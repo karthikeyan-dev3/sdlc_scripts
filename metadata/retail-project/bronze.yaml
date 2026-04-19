@@ -1,0 +1,9 @@
+config:
+  file_format: csv
+  output_options:
+    header: true
+    repartition: 1
+  source_path: s3://retail-project-raw-data/
+  target_path: s3://retail-project-bronze/
+layer: bronze
+project_id: retail-project
