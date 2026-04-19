@@ -1,4 +1,3 @@
-```python
 import sys
 from awsglue.context import GlueContext
 from awsglue.job import Job
@@ -304,4 +303,4 @@ daily_campaign_attribution_silver_df = spark.sql(daily_campaign_attribution_silv
 )
 
 job.commit()
-```
+
