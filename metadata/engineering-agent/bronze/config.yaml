@@ -1,0 +1,5 @@
+layer: bronze
+project_id: engineering-agent
+registration_date: '2026-04-20 15:34:06'
+script_ref: bronze_script.py
+status: Ready for Execution
