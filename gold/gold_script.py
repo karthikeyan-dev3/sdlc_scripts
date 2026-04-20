@@ -1,4 +1,4 @@
-```python
+
 import sys
 from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
@@ -139,4 +139,3 @@ GROUP BY
 )
 
 job.commit()
-```

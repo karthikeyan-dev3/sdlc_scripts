@@ -1,4 +1,4 @@
-```python
+
 import sys
 from awsglue.context import GlueContext
 from awsglue.job import Job
@@ -300,4 +300,3 @@ sales_enriched_silver_df = spark.sql(
 )
 
 job.commit()
-```
