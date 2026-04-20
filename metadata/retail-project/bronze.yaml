@@ -3,7 +3,7 @@ config:
   output_options:
     header: true
     repartition: 1
-  source_path: s3://retail-project-raw-data/
+  source_path: s3://retail-project-raw/
   target_path: s3://retail-project-bronze/
 layer: bronze
 project_id: retail-project
