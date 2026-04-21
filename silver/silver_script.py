@@ -1,4 +1,4 @@
-```python
+
 import sys
 from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
@@ -181,4 +181,3 @@ fact_transactions_silver_df = spark.sql(
 )
 
 job.commit()
-```
