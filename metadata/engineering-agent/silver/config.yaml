@@ -1,5 +1,5 @@
 layer: silver
 project_id: engineering-agent
-registration_date: '2026-04-21 13:50:33'
-script_ref: engineering-agent
+registration_date: '2026-04-21 19:14:49'
+script_ref: silver_script.py
 status: Registered
