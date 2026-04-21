@@ -1,0 +1,6 @@
+branch: dev
+layer: gold
+project_id: engineering-agent
+registration_date: '2026-04-21 12:53:37'
+script_ref: gold_script.py
+status: Ready for Execution
