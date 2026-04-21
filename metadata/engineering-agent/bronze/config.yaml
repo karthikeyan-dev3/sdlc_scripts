@@ -1,5 +1,5 @@
 layer: bronze
 project_id: engineering-agent
-registration_date: '2026-04-21 16:46:21'
-script_ref: engineeringagent
+registration_date: '2026-04-21 19:13:21'
+script_ref: bronze_script.py
 status: Registered
