@@ -1,4 +1,4 @@
-```python
+
 import sys
 from awsglue.context import GlueContext
 from awsglue.utils import getResolvedOptions
@@ -230,4 +230,3 @@ sales_transactions_silver_df = spark.sql(
     .option("header", "true")
     .save(f"{TARGET_PATH}/sales_transactions_silver.csv")
 )
-```
