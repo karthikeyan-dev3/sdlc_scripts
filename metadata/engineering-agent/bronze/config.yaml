@@ -1,6 +1,6 @@
 branch: dev
 layer: bronze
 project_id: engineering-agent
-registration_date: '2026-04-21 12:59:23'
-script_ref: bronze_script.py
+registration_date: '2026-04-21 13:00:27'
+script_ref: bronze_pipeline/bronze_script.py
 status: Ready for Execution
