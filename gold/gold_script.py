@@ -1,125 +1,86 @@
-
+```python
 import sys
-from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
-from awsglue.job import Job
+from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 
-# ------------------------------------------------------------------------------------
-# AWS Glue boilerplate
-# ------------------------------------------------------------------------------------
+# ======================================================================================
+# AWS Glue / Spark Session
+# ======================================================================================
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark: SparkSession = glueContext.spark_session
-job = Job(glueContext)
-job.init(args["JOB_NAME"], args)
+spark.sparkContext.setLogLevel("INFO")
 
-# ------------------------------------------------------------------------------------
-# Parameters (as provided)
-# ------------------------------------------------------------------------------------
+# ======================================================================================
+# Config
+# ======================================================================================
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-# ------------------------------------------------------------------------------------
-# 1) Read source tables from S3 (Silver)
-#    IMPORTANT: Path must be constructed using FILE_FORMAT and end with "/"
-# ------------------------------------------------------------------------------------
-sales_transactions_silver_df = (
+# ======================================================================================
+# 1) Read Source Tables from S3
+#    SOURCE READING RULE: .load(f"{SOURCE_PATH}/table_name.{FILE_FORMAT}/")
+# ======================================================================================
+fact_transactions_silver_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/sales_transactions_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/fact_transactions_silver.{FILE_FORMAT}/")
 )
 
-stores_silver_df = (
+dim_stores_silver_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/stores_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/dim_stores_silver.{FILE_FORMAT}/")
 )
 
-products_silver_df = (
+dim_products_silver_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/products_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/dim_products_silver.{FILE_FORMAT}/")
 )
 
-# ------------------------------------------------------------------------------------
-# 2) Create temp views
-# ------------------------------------------------------------------------------------
-sales_transactions_silver_df.createOrReplaceTempView("sales_transactions_silver")
-stores_silver_df.createOrReplaceTempView("stores_silver")
-products_silver_df.createOrReplaceTempView("products_silver")
+# ======================================================================================
+# 2) Create Temp Views
+# ======================================================================================
+fact_transactions_silver_df.createOrReplaceTempView("fact_transactions_silver")
+dim_stores_silver_df.createOrReplaceTempView("dim_stores_silver")
+dim_products_silver_df.createOrReplaceTempView("dim_products_silver")
 
-# ====================================================================================
-# TARGET TABLE 1: gold_daily_store_sales
-# mapping_details: silver.sales_transactions_silver sts
-#                  LEFT JOIN silver.stores_silver ss ON sts.store_id = ss.store_id
-# ====================================================================================
+# ======================================================================================
+# TARGET TABLE: gold_daily_store_sales
+# Mapping: silver.fact_transactions_silver ft INNER JOIN silver.dim_stores_silver ds ON ft.store_id = ds.store_id
+# ======================================================================================
 gold_daily_store_sales_sql = """
-WITH base AS (
-    SELECT
-        DATE(sts.sales_date) AS sales_date,
-        CAST(sts.store_id AS STRING) AS store_id,
-
-        -- store attributes
-        CAST(ss.store_name AS STRING) AS store_name,
-        CAST(ss.city AS STRING) AS city,
-        CAST(ss.state AS STRING) AS state,
-        CAST(ss.country AS STRING) AS country,
-        CAST(ss.store_type AS STRING) AS store_type,
-
-        -- transaction grain fields
-        CAST(sts.sale_amount AS DECIMAL(18,2)) AS sale_amount,
-        CAST(sts.quantity AS INT) AS quantity,
-        CAST(sts.transaction_id AS STRING) AS transaction_id
-    FROM sales_transactions_silver sts
-    LEFT JOIN stores_silver ss
-        ON sts.store_id = ss.store_id
-),
-agg AS (
-    SELECT
-        sales_date,
-        store_id,
-        store_name,
-        city,
-        state,
-        country,
-        store_type,
-        SUM(sale_amount) AS total_revenue,
-        SUM(quantity) AS total_quantity_sold,
-        COUNT(DISTINCT transaction_id) AS total_transactions
-    FROM base
-    GROUP BY
-        sales_date,
-        store_id,
-        store_name,
-        city,
-        state,
-        country,
-        store_type
-)
 SELECT
-    sales_date,
-    store_id,
-    store_name,
-    city,
-    state,
-    country,
-    store_type,
-    total_revenue,
-    total_quantity_sold,
-    CAST(total_transactions AS INT) AS total_transactions
-FROM agg
+  CAST(ft.sales_date AS DATE)                                             AS sales_date,
+  CAST(ft.store_id AS STRING)                                             AS store_id,
+  CAST(ds.store_name AS STRING)                                           AS store_name,
+  CAST(ds.city AS STRING)                                                 AS city,
+  CAST(ds.store_type AS STRING)                                           AS store_type,
+  CAST(SUM(CAST(ft.sale_amount AS DECIMAL(38, 10))) AS DECIMAL(38, 10))   AS total_revenue,
+  CAST(SUM(CAST(ft.quantity AS INT)) AS INT)                              AS total_quantity_sold,
+  CAST(COUNT(DISTINCT CAST(ft.transaction_id AS STRING)) AS INT)          AS transaction_count
+FROM fact_transactions_silver ft
+INNER JOIN dim_stores_silver ds
+  ON CAST(ft.store_id AS STRING) = CAST(ds.store_id AS STRING)
+GROUP BY
+  CAST(ft.sales_date AS DATE),
+  CAST(ft.store_id AS STRING),
+  CAST(ds.store_name AS STRING),
+  CAST(ds.city AS STRING),
+  CAST(ds.store_type AS STRING)
 """
 
 gold_daily_store_sales_df = spark.sql(gold_daily_store_sales_sql)
 
-# Write as SINGLE CSV file directly under TARGET_PATH (no subfolders)
+# Write SINGLE CSV file directly under TARGET_PATH as TARGET_PATH + "/" + target_table.csv
 (
     gold_daily_store_sales_df.coalesce(1)
     .write.mode("overwrite")
@@ -128,63 +89,33 @@ gold_daily_store_sales_df = spark.sql(gold_daily_store_sales_sql)
     .save(f"{TARGET_PATH}/gold_daily_store_sales.csv")
 )
 
-# ====================================================================================
-# TARGET TABLE 2: gold_daily_product_sales
-# mapping_details: silver.sales_transactions_silver sts
-#                  LEFT JOIN silver.products_silver ps ON sts.product_id = ps.product_id
-# ====================================================================================
+# ======================================================================================
+# TARGET TABLE: gold_daily_product_sales
+# Mapping: silver.fact_transactions_silver ft INNER JOIN silver.dim_products_silver dp ON ft.product_id = dp.product_id
+# ======================================================================================
 gold_daily_product_sales_sql = """
-WITH base AS (
-    SELECT
-        DATE(sts.sales_date) AS sales_date,
-        CAST(sts.product_id AS STRING) AS product_id,
-
-        -- product attributes
-        CAST(ps.product_name AS STRING) AS product_name,
-        CAST(ps.brand AS STRING) AS brand,
-        CAST(ps.category AS STRING) AS category,
-
-        -- transaction grain fields
-        CAST(sts.sale_amount AS DECIMAL(18,2)) AS sale_amount,
-        CAST(sts.quantity AS INT) AS quantity,
-        CAST(sts.transaction_id AS STRING) AS transaction_id
-    FROM sales_transactions_silver sts
-    LEFT JOIN products_silver ps
-        ON sts.product_id = ps.product_id
-),
-agg AS (
-    SELECT
-        sales_date,
-        product_id,
-        product_name,
-        brand,
-        category,
-        SUM(sale_amount) AS total_revenue,
-        SUM(quantity) AS total_quantity_sold,
-        COUNT(DISTINCT transaction_id) AS total_transactions
-    FROM base
-    GROUP BY
-        sales_date,
-        product_id,
-        product_name,
-        brand,
-        category
-)
 SELECT
-    sales_date,
-    product_id,
-    product_name,
-    brand,
-    category,
-    total_revenue,
-    total_quantity_sold,
-    CAST(total_transactions AS INT) AS total_transactions
-FROM agg
+  CAST(ft.sales_date AS DATE)                                             AS sales_date,
+  CAST(ft.product_id AS STRING)                                           AS product_id,
+  CAST(dp.product_name AS STRING)                                         AS product_name,
+  CAST(dp.category AS STRING)                                             AS category,
+  CAST(dp.brand AS STRING)                                                AS brand,
+  CAST(SUM(CAST(ft.sale_amount AS DECIMAL(38, 10))) AS DECIMAL(38, 10))   AS total_revenue,
+  CAST(SUM(CAST(ft.quantity AS INT)) AS INT)                              AS total_quantity_sold,
+  CAST(COUNT(DISTINCT CAST(ft.transaction_id AS STRING)) AS INT)          AS transaction_count
+FROM fact_transactions_silver ft
+INNER JOIN dim_products_silver dp
+  ON CAST(ft.product_id AS STRING) = CAST(dp.product_id AS STRING)
+GROUP BY
+  CAST(ft.sales_date AS DATE),
+  CAST(ft.product_id AS STRING),
+  CAST(dp.product_name AS STRING),
+  CAST(dp.category AS STRING),
+  CAST(dp.brand AS STRING)
 """
 
 gold_daily_product_sales_df = spark.sql(gold_daily_product_sales_sql)
 
-# Write as SINGLE CSV file directly under TARGET_PATH (no subfolders)
 (
     gold_daily_product_sales_df.coalesce(1)
     .write.mode("overwrite")
@@ -193,72 +124,69 @@ gold_daily_product_sales_df = spark.sql(gold_daily_product_sales_sql)
     .save(f"{TARGET_PATH}/gold_daily_product_sales.csv")
 )
 
-# ====================================================================================
-# TARGET TABLE 3: gold_daily_store_category_sales
-# mapping_details: silver.sales_transactions_silver sts
-#                  LEFT JOIN silver.stores_silver ss ON sts.store_id = ss.store_id
-#                  LEFT JOIN silver.products_silver ps ON sts.product_id = ps.product_id
-# ====================================================================================
-gold_daily_store_category_sales_sql = """
-WITH base AS (
-    SELECT
-        DATE(sts.sales_date) AS sales_date,
-        CAST(sts.store_id AS STRING) AS store_id,
-
-        -- store attributes
-        CAST(ss.store_name AS STRING) AS store_name,
-        CAST(ss.city AS STRING) AS city,
-        CAST(ss.store_type AS STRING) AS store_type,
-
-        -- category
-        CAST(ps.category AS STRING) AS category,
-
-        -- transaction grain fields
-        CAST(sts.sale_amount AS DECIMAL(18,2)) AS sale_amount,
-        CAST(sts.quantity AS INT) AS quantity,
-        CAST(sts.transaction_id AS STRING) AS transaction_id
-    FROM sales_transactions_silver sts
-    LEFT JOIN stores_silver ss
-        ON sts.store_id = ss.store_id
-    LEFT JOIN products_silver ps
-        ON sts.product_id = ps.product_id
-),
-agg AS (
-    SELECT
-        sales_date,
-        store_id,
-        store_name,
-        city,
-        store_type,
-        category,
-        SUM(sale_amount) AS total_revenue,
-        SUM(quantity) AS total_quantity_sold,
-        COUNT(DISTINCT transaction_id) AS total_transactions
-    FROM base
-    GROUP BY
-        sales_date,
-        store_id,
-        store_name,
-        city,
-        store_type,
-        category
-)
+# ======================================================================================
+# TARGET TABLE: gold_daily_category_sales
+# Mapping: silver.fact_transactions_silver ft INNER JOIN silver.dim_products_silver dp ON ft.product_id = dp.product_id
+# ======================================================================================
+gold_daily_category_sales_sql = """
 SELECT
-    sales_date,
-    store_id,
-    store_name,
-    city,
-    store_type,
-    category,
-    total_revenue,
-    total_quantity_sold,
-    CAST(total_transactions AS INT) AS total_transactions
-FROM agg
+  CAST(ft.sales_date AS DATE)                                             AS sales_date,
+  CAST(dp.category AS STRING)                                             AS category,
+  CAST(SUM(CAST(ft.sale_amount AS DECIMAL(38, 10))) AS DECIMAL(38, 10))   AS total_revenue,
+  CAST(SUM(CAST(ft.quantity AS INT)) AS INT)                              AS total_quantity_sold,
+  CAST(COUNT(DISTINCT CAST(ft.transaction_id AS STRING)) AS INT)          AS transaction_count
+FROM fact_transactions_silver ft
+INNER JOIN dim_products_silver dp
+  ON CAST(ft.product_id AS STRING) = CAST(dp.product_id AS STRING)
+GROUP BY
+  CAST(ft.sales_date AS DATE),
+  CAST(dp.category AS STRING)
+"""
+
+gold_daily_category_sales_df = spark.sql(gold_daily_category_sales_sql)
+
+(
+    gold_daily_category_sales_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/gold_daily_category_sales.csv")
+)
+
+# ======================================================================================
+# TARGET TABLE: gold_daily_store_category_sales
+# Mapping:
+#   silver.fact_transactions_silver ft
+#   INNER JOIN silver.dim_stores_silver ds ON ft.store_id = ds.store_id
+#   INNER JOIN silver.dim_products_silver dp ON ft.product_id = dp.product_id
+# ======================================================================================
+gold_daily_store_category_sales_sql = """
+SELECT
+  CAST(ft.sales_date AS DATE)                                             AS sales_date,
+  CAST(ft.store_id AS STRING)                                             AS store_id,
+  CAST(ds.store_name AS STRING)                                           AS store_name,
+  CAST(ds.city AS STRING)                                                 AS city,
+  CAST(ds.store_type AS STRING)                                           AS store_type,
+  CAST(dp.category AS STRING)                                             AS category,
+  CAST(SUM(CAST(ft.sale_amount AS DECIMAL(38, 10))) AS DECIMAL(38, 10))   AS total_revenue,
+  CAST(SUM(CAST(ft.quantity AS INT)) AS INT)                              AS total_quantity_sold,
+  CAST(COUNT(DISTINCT CAST(ft.transaction_id AS STRING)) AS INT)          AS transaction_count
+FROM fact_transactions_silver ft
+INNER JOIN dim_stores_silver ds
+  ON CAST(ft.store_id AS STRING) = CAST(ds.store_id AS STRING)
+INNER JOIN dim_products_silver dp
+  ON CAST(ft.product_id AS STRING) = CAST(dp.product_id AS STRING)
+GROUP BY
+  CAST(ft.sales_date AS DATE),
+  CAST(ft.store_id AS STRING),
+  CAST(ds.store_name AS STRING),
+  CAST(ds.city AS STRING),
+  CAST(ds.store_type AS STRING),
+  CAST(dp.category AS STRING)
 """
 
 gold_daily_store_category_sales_df = spark.sql(gold_daily_store_category_sales_sql)
 
-# Write as SINGLE CSV file directly under TARGET_PATH (no subfolders)
 (
     gold_daily_store_category_sales_df.coalesce(1)
     .write.mode("overwrite")
@@ -266,5 +194,4 @@ gold_daily_store_category_sales_df = spark.sql(gold_daily_store_category_sales_s
     .option("header", "true")
     .save(f"{TARGET_PATH}/gold_daily_store_category_sales.csv")
 )
-
-job.commit()
+```
