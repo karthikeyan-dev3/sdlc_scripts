@@ -1,4 +1,4 @@
-```python
+
 import sys
 from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
@@ -185,4 +185,3 @@ gold_category_daily_sales_df = spark.sql(gold_category_daily_sales_sql)
 )
 
 job.commit()
-```
