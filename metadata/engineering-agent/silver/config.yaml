@@ -1,6 +1,6 @@
 branch: dev
 layer: silver
 project_id: engineering-agent
-registration_date: '2026-04-21 12:59:26'
-script_ref: silver_script.py
+registration_date: '2026-04-21 13:00:31'
+script_ref: silver_pipeline/silver_script.py
 status: Ready for Execution
