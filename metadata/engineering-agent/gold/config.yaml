@@ -1,6 +1,6 @@
 branch: dev
 layer: gold
 project_id: engineering-agent
-registration_date: '2026-04-21 12:59:29'
-script_ref: gold_script.py
+registration_date: '2026-04-21 13:00:34'
+script_ref: gold_pipeline/gold_script.py
 status: Ready for Execution
