@@ -1,5 +1,5 @@
 layer: bronze
 project_id: engineering-agent
-registration_date: '2026-04-22 15:50:44'
-script_ref: etl
+registration_date: '2026-04-22 15:50:50'
+script_ref: bronze
 status: Registered
