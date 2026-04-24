@@ -6,26 +6,26 @@ from awsglue.job import Job
 from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 
-# -----------------------------------------------------------------------------------
-# AWS Glue job setup
-# -----------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------------
+# Glue / Spark setup
+# ------------------------------------------------------------------------------------
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
 sc = SparkContext()
-glue_context = GlueContext(sc)
-spark: SparkSession = glue_context.spark_session
-job = Job(glue_context)
+glueContext = GlueContext(sc)
+spark: SparkSession = glueContext.spark_session
+job = Job(glueContext)
 job.init(args["JOB_NAME"], args)
 
-# -----------------------------------------------------------------------------------
-# Parameters (as provided)
-# -----------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------------
+# Config
+# ------------------------------------------------------------------------------------
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-# -----------------------------------------------------------------------------------
-# 1) Read source tables from S3 (STRICT PATH FORMAT)
-# -----------------------------------------------------------------------------------
+# ====================================================================================
+# Source Reads (Silver)
+# ====================================================================================
 orders_silver_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
@@ -33,142 +33,143 @@ orders_silver_df = (
     .load(f"{SOURCE_PATH}/orders_silver.{FILE_FORMAT}/")
 )
 
-customers_silver_df = (
+order_items_silver_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/customers_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/order_items_silver.{FILE_FORMAT}/")
 )
 
-payments_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/payments_silver.{FILE_FORMAT}/")
-)
-
-shipments_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/shipments_silver.{FILE_FORMAT}/")
-)
-
-order_status_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/order_status_silver.{FILE_FORMAT}/")
-)
-
-currencies_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/currencies_silver.{FILE_FORMAT}/")
-)
-
-source_files_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/source_files_silver.{FILE_FORMAT}/")
-)
-
-ingestions_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/ingestions_silver.{FILE_FORMAT}/")
-)
-
-# -----------------------------------------------------------------------------------
-# 2) Create temp views
-# -----------------------------------------------------------------------------------
+# Temp views
 orders_silver_df.createOrReplaceTempView("orders_silver")
-customers_silver_df.createOrReplaceTempView("customers_silver")
-payments_silver_df.createOrReplaceTempView("payments_silver")
-shipments_silver_df.createOrReplaceTempView("shipments_silver")
-order_status_silver_df.createOrReplaceTempView("order_status_silver")
-currencies_silver_df.createOrReplaceTempView("currencies_silver")
-source_files_silver_df.createOrReplaceTempView("source_files_silver")
-ingestions_silver_df.createOrReplaceTempView("ingestions_silver")
+order_items_silver_df.createOrReplaceTempView("order_items_silver")
 
-# -----------------------------------------------------------------------------------
-# 3) Transform (Spark SQL) - Target table: gold.gold_customer_orders
-#    - Driving table: orders_silver (os)
-#    - Joins: as specified in UDT mapping_details
-#    - ROW_NUMBER used to deduplicate to one row per order_id (preferring latest ingestion_date)
-#    - Apply exact column mappings (gco.col = src.col) and conform to target types using CAST/COALESCE/TRIM/UPPER/LOWER/DATE
-# -----------------------------------------------------------------------------------
-gold_customer_orders_df = spark.sql(
-    """
-    WITH joined AS (
-        SELECT
-            os.order_id,
-            os.order_date,
-            os.customer_id,
-            cs.customer_email_masked,
-            cs.customer_name,
-            oss.order_status,
-            os.order_total_amount,
-            cur.currency_code,
-            ps.payment_method,
-            ss.shipping_country,
-            ss.shipping_state,
-            ss.shipping_city,
-            sfs.source_file_format,
-            isg.ingestion_date,
-            ROW_NUMBER() OVER (
-                PARTITION BY os.order_id
-                ORDER BY isg.ingestion_date DESC
-            ) AS rn
-        FROM orders_silver os
-        LEFT JOIN customers_silver cs
-            ON os.customer_id = cs.customer_id
-        LEFT JOIN payments_silver ps
-            ON os.order_id = ps.order_id
-        LEFT JOIN shipments_silver ss
-            ON os.order_id = ss.order_id
-        LEFT JOIN order_status_silver oss
-            ON os.order_id = oss.order_id
-        LEFT JOIN currencies_silver cur
-            ON os.currency_code = cur.currency_code
-        LEFT JOIN source_files_silver sfs
-            ON os.source_file_id = sfs.source_file_id
-        LEFT JOIN ingestions_silver isg
-            ON os.ingestion_id = isg.ingestion_id
-    )
-    SELECT
-        CAST(TRIM(order_id) AS STRING)                                         AS order_id,
-        CAST(DATE(order_date) AS DATE)                                         AS order_date,
-        CAST(TRIM(customer_id) AS STRING)                                      AS customer_id,
-        CAST(TRIM(COALESCE(customer_email_masked, '')) AS STRING)              AS customer_email_masked,
-        CAST(TRIM(COALESCE(customer_name, '')) AS STRING)                      AS customer_name,
-        CAST(TRIM(COALESCE(order_status, 'UNKNOWN')) AS STRING)                AS order_status,
-        CAST(COALESCE(order_total_amount, 0) AS DECIMAL(38, 10))               AS order_total_amount,
-        CAST(TRIM(COALESCE(currency_code, 'UNKNOWN')) AS STRING)               AS currency_code,
-        CAST(TRIM(COALESCE(payment_method, 'UNKNOWN')) AS STRING)              AS payment_method,
-        CAST(TRIM(COALESCE(shipping_country, 'UNKNOWN')) AS STRING)            AS shipping_country,
-        CAST(TRIM(COALESCE(shipping_state, 'UNKNOWN')) AS STRING)              AS shipping_state,
-        CAST(TRIM(COALESCE(shipping_city, 'UNKNOWN')) AS STRING)               AS shipping_city,
-        CAST(TRIM(COALESCE(source_file_format, 'UNKNOWN')) AS STRING)          AS source_file_format,
-        CAST(DATE(ingestion_date) AS DATE)                                     AS ingestion_date
-    FROM joined
-    WHERE rn = 1
-    """
+# ====================================================================================
+# Target: gold.gold_customer_orders
+# Mapping: silver.orders_silver os
+# ====================================================================================
+gold_customer_orders_sql = """
+WITH base AS (
+  SELECT
+    CAST(os.order_id AS STRING)                             AS order_id,
+    CAST(os.order_date AS DATE)                             AS order_date,
+    CAST(os.customer_id AS STRING)                          AS customer_id,
+    CAST(os.customer_name AS STRING)                        AS customer_name,
+    CAST(os.customer_email AS STRING)                       AS customer_email,
+    CAST(os.customer_phone AS STRING)                       AS customer_phone,
+    CAST(os.shipping_address_line1 AS STRING)               AS shipping_address_line1,
+    CAST(os.shipping_address_line2 AS STRING)               AS shipping_address_line2,
+    CAST(os.shipping_city AS STRING)                        AS shipping_city,
+    CAST(os.shipping_state AS STRING)                       AS shipping_state,
+    CAST(os.shipping_postal_code AS STRING)                 AS shipping_postal_code,
+    CAST(os.shipping_country AS STRING)                     AS shipping_country,
+    CAST(os.order_status AS STRING)                         AS order_status,
+    CAST(os.order_total_amount AS DECIMAL(38, 10))           AS order_total_amount,
+    CAST(os.currency_code AS STRING)                        AS currency_code,
+    CAST(os.payment_method AS STRING)                       AS payment_method,
+    CAST(os.source_system AS STRING)                        AS source_system,
+    CAST(os.ingestion_date AS DATE)                         AS ingestion_date,
+    CAST(os.record_created_ts AS TIMESTAMP)                 AS record_created_ts,
+    CAST(os.record_updated_ts AS TIMESTAMP)                 AS record_updated_ts,
+    ROW_NUMBER() OVER (
+      PARTITION BY os.order_id
+      ORDER BY CAST(os.record_updated_ts AS TIMESTAMP) DESC, CAST(os.record_created_ts AS TIMESTAMP) DESC
+    ) AS rn
+  FROM orders_silver os
 )
+SELECT
+  order_id,
+  order_date,
+  customer_id,
+  customer_name,
+  customer_email,
+  customer_phone,
+  shipping_address_line1,
+  shipping_address_line2,
+  shipping_city,
+  shipping_state,
+  shipping_postal_code,
+  shipping_country,
+  order_status,
+  order_total_amount,
+  currency_code,
+  payment_method,
+  source_system,
+  ingestion_date,
+  record_created_ts,
+  record_updated_ts
+FROM base
+WHERE rn = 1
+"""
 
-# -----------------------------------------------------------------------------------
-# 4) Save output (STRICT OUTPUT RULE: single CSV file directly under TARGET_PATH)
-#    Output: s3://.../gold_customer_orders.csv
-# -----------------------------------------------------------------------------------
+gold_customer_orders_df = spark.sql(gold_customer_orders_sql)
+
+gold_customer_orders_output_path = f"{TARGET_PATH}/gold_customer_orders.csv"
 (
     gold_customer_orders_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_customer_orders.csv")
+    .save(gold_customer_orders_output_path)
+)
+
+# ====================================================================================
+# Target: gold.gold_customer_order_items
+# Mapping: silver.order_items_silver ois INNER JOIN silver.orders_silver os ON ois.order_id = os.order_id
+# ====================================================================================
+gold_customer_order_items_sql = """
+WITH joined AS (
+  SELECT
+    CAST(ois.order_id AS STRING)                            AS order_id,
+    CAST(ois.order_item_id AS STRING)                       AS order_item_id,
+    CAST(ois.product_id AS STRING)                          AS product_id,
+    CAST(ois.product_name AS STRING)                        AS product_name,
+    CAST(ois.product_category AS STRING)                    AS product_category,
+    CAST(ois.quantity AS INT)                               AS quantity,
+    CAST(ois.unit_price AS DECIMAL(38, 10))                 AS unit_price,
+    CAST(ois.item_discount_amount AS DECIMAL(38, 10))       AS item_discount_amount,
+    CAST(ois.item_tax_amount AS DECIMAL(38, 10))            AS item_tax_amount,
+    CAST(ois.item_total_amount AS DECIMAL(38, 10))          AS item_total_amount,
+    CAST(os.currency_code AS STRING)                        AS currency_code,
+    CAST(os.ingestion_date AS DATE)                         AS ingestion_date,
+    CAST(ois.record_created_ts AS TIMESTAMP)                AS record_created_ts,
+    CAST(ois.record_updated_ts AS TIMESTAMP)                AS record_updated_ts,
+    ROW_NUMBER() OVER (
+      PARTITION BY ois.order_id, ois.order_item_id
+      ORDER BY CAST(ois.record_updated_ts AS TIMESTAMP) DESC, CAST(ois.record_created_ts AS TIMESTAMP) DESC
+    ) AS rn
+  FROM order_items_silver ois
+  INNER JOIN orders_silver os
+    ON ois.order_id = os.order_id
+)
+SELECT
+  order_id,
+  order_item_id,
+  product_id,
+  product_name,
+  product_category,
+  quantity,
+  unit_price,
+  item_discount_amount,
+  item_tax_amount,
+  item_total_amount,
+  currency_code,
+  ingestion_date,
+  record_created_ts,
+  record_updated_ts
+FROM joined
+WHERE rn = 1
+"""
+
+gold_customer_order_items_df = spark.sql(gold_customer_order_items_sql)
+
+gold_customer_order_items_output_path = f"{TARGET_PATH}/gold_customer_order_items.csv"
+(
+    gold_customer_order_items_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(gold_customer_order_items_output_path)
 )
 
 job.commit()
