@@ -1,222 +1,233 @@
 ```python
 import sys
-from awsglue.context import GlueContext
 from awsglue.utils import getResolvedOptions
+from awsglue.context import GlueContext
+from awsglue.job import Job
 from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 
-# ------------------------------------------------------------------------------------
-# AWS Glue boilerplate
-# ------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------
+# AWS Glue bootstrap
+# -----------------------------------------------------------------------------------
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
+
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark: SparkSession = glueContext.spark_session
+job = Job(glueContext)
+job.init(args["JOB_NAME"], args)
 
-# ------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------
 # Config
-# ------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 FILE_FORMAT = "csv"
 
-spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
+# Ensure a single output file per target table (single CSV under TARGET_PATH)
+spark.conf.set("spark.sql.shuffle.partitions", "1")
 
-# ====================================================================================
-# SOURCE: bronze.customer_orders_bronze  -> TARGET: silver.customer_orders_silver
-# ====================================================================================
+# ===================================================================================
+# SOURCE READS + TEMP VIEWS (Bronze)
+# ===================================================================================
 
-# 1) Read source table
-customer_orders_bronze_df = (
+# bronze.customer_orders
+df_customer_orders_bronze = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/customer_orders_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/customer_orders.{FILE_FORMAT}/")
 )
+df_customer_orders_bronze.createOrReplaceTempView("customer_orders")
 
-# 2) Create temp view
-customer_orders_bronze_df.createOrReplaceTempView("customer_orders_bronze")
-
-# 3) Transform (Spark SQL) + de-dup (latest transaction_time per order_id)
-customer_orders_silver_df = spark.sql(
-    """
-    WITH base AS (
-        SELECT
-            -- Transformations (EXACT per UDT)
-            TRIM(cob.transaction_id)                                              AS order_id,
-            CAST(cob.transaction_time AS DATE)                                     AS order_date,
-            TRIM(cob.store_id)                                                     AS customer_id,
-            CASE
-                WHEN cob.transaction_id IS NOT NULL AND cob.transaction_time IS NOT NULL
-                    THEN 'COMPLETED'
-                ELSE 'UNKNOWN'
-            END                                                                    AS order_status,
-            CASE WHEN cob.sale_amount < 0 THEN NULL ELSE cob.sale_amount END       AS order_total_amount,
-            'USD'                                                                  AS currency_code,
-
-            cob.transaction_time                                                   AS transaction_time,
-
-            ROW_NUMBER() OVER (
-                PARTITION BY TRIM(cob.transaction_id)
-                ORDER BY cob.transaction_time DESC
-            )                                                                      AS rn
-        FROM customer_orders_bronze cob
-    )
-    SELECT
-        order_id,
-        order_date,
-        customer_id,
-        order_status,
-        order_total_amount,
-        currency_code
-    FROM base
-    WHERE rn = 1
-    """
-)
-
-# 4) Save output as SINGLE CSV file directly under TARGET_PATH
-(
-    customer_orders_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/customer_orders_silver.csv")
-)
-
-# ====================================================================================
-# SOURCE: bronze.order_items_bronze  -> TARGET: silver.order_items_silver
-# ====================================================================================
-
-# 1) Read source table
-order_items_bronze_df = (
+# bronze.customer_order_items
+df_customer_order_items_bronze = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/order_items_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/customer_order_items.{FILE_FORMAT}/")
 )
+df_customer_order_items_bronze.createOrReplaceTempView("customer_order_items")
 
-# 2) Create temp view
-order_items_bronze_df.createOrReplaceTempView("order_items_bronze")
-
-# 3) Transform (Spark SQL) + de-dup (latest transaction_time per (order_id, product_id))
-order_items_silver_df = spark.sql(
-    """
-    WITH base AS (
-        SELECT
-            -- Transformations (EXACT per UDT)
-            TRIM(oib.transaction_id)                                                                 AS order_id,
-            CONCAT(TRIM(oib.transaction_id), '-', COALESCE(TRIM(oib.product_id), 'UNKNOWN'))          AS order_item_id,
-            TRIM(oib.product_id)                                                                      AS product_id,
-            CASE WHEN oib.quantity <= 0 THEN NULL ELSE oib.quantity END                               AS quantity,
-            CASE
-                WHEN oib.quantity IS NOT NULL AND oib.quantity <> 0 AND oib.quantity > 0
-                     AND oib.sale_amount IS NOT NULL AND oib.sale_amount >= 0
-                    THEN oib.sale_amount / oib.quantity
-                ELSE NULL
-            END                                                                                       AS unit_price,
-            CASE WHEN oib.sale_amount < 0 THEN NULL ELSE oib.sale_amount END                          AS line_amount,
-
-            oib.transaction_time                                                                       AS transaction_time,
-
-            ROW_NUMBER() OVER (
-                PARTITION BY TRIM(oib.transaction_id), TRIM(oib.product_id)
-                ORDER BY oib.transaction_time DESC
-            )                                                                                          AS rn
-        FROM order_items_bronze oib
-    )
-    SELECT
-        order_id,
-        order_item_id,
-        product_id,
-        quantity,
-        unit_price,
-        line_amount
-    FROM base
-    WHERE rn = 1
-    """
+# ===================================================================================
+# TARGET TABLE: silver.customer_orders
+#  - De-duplicate to one record per order_id keeping latest order_timestamp
+#  - order_date = CAST(order_timestamp AS DATE)
+#  - customer_id = 'UNKNOWN'
+#  - order_status = 'placed'
+#  - currency_code = 'USD'
+#  - order_total_amount carried forward
+#  - source_file_date = CAST(order_timestamp AS DATE)
+# ===================================================================================
+sql_customer_orders = """
+WITH dedup AS (
+  SELECT
+    co.*,
+    ROW_NUMBER() OVER (
+      PARTITION BY co.order_id
+      ORDER BY co.order_timestamp DESC
+    ) AS rn
+  FROM customer_orders co
 )
+SELECT
+  CAST(TRIM(d.order_id) AS STRING)                                 AS order_id,
+  CAST(d.order_timestamp AS DATE)                                  AS order_date,
+  CAST('UNKNOWN' AS STRING)                                        AS customer_id,
+  CAST('placed' AS STRING)                                         AS order_status,
+  CAST('USD' AS STRING)                                            AS currency_code,
+  CAST(d.order_total_amount AS DECIMAL(38, 10))                    AS order_total_amount,
+  CAST(d.order_timestamp AS DATE)                                  AS source_file_date
+FROM dedup d
+WHERE d.rn = 1
+"""
 
-# 4) Save output as SINGLE CSV file directly under TARGET_PATH
+df_customer_orders_silver = spark.sql(sql_customer_orders)
+
+# Write single CSV file directly under TARGET_PATH as: TARGET_PATH + "/customer_orders.csv"
 (
-    order_items_silver_df.coalesce(1)
+    df_customer_orders_silver.coalesce(1)
     .write.mode("overwrite")
-    .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/order_items_silver.csv")
+    .csv(f"{TARGET_PATH}/customer_orders.csv")
 )
 
-# ====================================================================================
-# SOURCE: bronze.data_quality_daily_bronze  -> TARGET: silver.data_quality_daily_silver
-# ====================================================================================
-
-# 1) Read source table
-data_quality_daily_bronze_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/data_quality_daily_bronze.{FILE_FORMAT}/")
+# ===================================================================================
+# TARGET TABLE: silver.customer_order_items
+#  - De-duplicate to one record per (order_id, product_id, transaction_time, store_id, quantity, line_sale_amount)
+#  - order_item_id = HASH(order_id, product_id, store_id, transaction_time)
+#  - enforce quantity > 0
+#  - unit_price_amount = ROUND(line_sale_amount / NULLIF(quantity,0), 2)
+#  - line_total_amount = line_sale_amount
+# ===================================================================================
+sql_customer_order_items = """
+WITH filtered AS (
+  SELECT
+    coi.*
+  FROM customer_order_items coi
+  WHERE coi.quantity > 0
+),
+dedup AS (
+  SELECT
+    f.*,
+    ROW_NUMBER() OVER (
+      PARTITION BY
+        f.order_id,
+        f.product_id,
+        f.transaction_time,
+        f.store_id,
+        f.quantity,
+        f.line_sale_amount
+      ORDER BY f.transaction_time DESC
+    ) AS rn
+  FROM filtered f
 )
+SELECT
+  CAST(TRIM(d.order_id) AS STRING)                                                                 AS order_id,
+  CAST(
+    sha2(
+      concat_ws(
+        '||',
+        COALESCE(CAST(d.order_id AS STRING), ''),
+        COALESCE(CAST(d.product_id AS STRING), ''),
+        COALESCE(CAST(d.store_id AS STRING), ''),
+        COALESCE(CAST(d.transaction_time AS STRING), '')
+      ),
+      256
+    ) AS STRING
+  )                                                                                                 AS order_item_id,
+  CAST(TRIM(d.product_id) AS STRING)                                                                AS product_id,
+  CAST(d.quantity AS INT)                                                                           AS quantity,
+  CAST(ROUND(CAST(d.line_sale_amount AS DECIMAL(38, 10)) / NULLIF(CAST(d.quantity AS INT), 0), 2)
+       AS DECIMAL(38, 2))                                                                           AS unit_price_amount,
+  CAST(d.line_sale_amount AS DECIMAL(38, 10))                                                       AS line_total_amount
+FROM dedup d
+WHERE d.rn = 1
+"""
 
-# 2) Create temp view
-data_quality_daily_bronze_df.createOrReplaceTempView("data_quality_daily_bronze")
+df_customer_order_items_silver = spark.sql(sql_customer_order_items)
 
-# 3) Transform (Spark SQL) aggregated DQ metrics (one row per (load_date, source_file_date))
-data_quality_daily_silver_df = spark.sql(
-    """
-    SELECT
-        -- Transformations (EXACT per UDT)
-        CAST(dqdb.transaction_time AS DATE)                                                                 AS load_date,
-        CAST(dqdb.transaction_time AS DATE)                                                                 AS source_file_date,
-        COUNT(1)                                                                                            AS records_ingested,
-        SUM(
-            CASE
-                WHEN dqdb.transaction_id IS NULL
-                  OR dqdb.transaction_time IS NULL
-                  OR dqdb.sale_amount IS NULL OR dqdb.sale_amount < 0
-                  OR dqdb.quantity IS NULL OR dqdb.quantity <= 0
-                THEN 1 ELSE 0
-            END
-        )                                                                                                   AS records_rejected,
-        (
-            COUNT(1) - SUM(
-                CASE
-                    WHEN dqdb.transaction_id IS NULL
-                      OR dqdb.transaction_time IS NULL
-                      OR dqdb.sale_amount IS NULL OR dqdb.sale_amount < 0
-                      OR dqdb.quantity IS NULL OR dqdb.quantity <= 0
-                    THEN 1 ELSE 0
-                END
-            )
-        )                                                                                                   AS records_loaded,
-        CASE
-            WHEN COUNT(1) = 0 THEN 0
-            ELSE (
-                (COUNT(1) - SUM(
-                    CASE
-                        WHEN dqdb.transaction_id IS NULL
-                          OR dqdb.transaction_time IS NULL
-                          OR dqdb.sale_amount IS NULL OR dqdb.sale_amount < 0
-                          OR dqdb.quantity IS NULL OR dqdb.quantity <= 0
-                        THEN 1 ELSE 0
-                    END
-                )) / COUNT(1)
-            )
-        END                                                                                                 AS dq_pass_rate,
-        MIN(dqdb.transaction_time)                                                                          AS load_start_ts,
-        MAX(dqdb.transaction_time)                                                                          AS load_end_ts
-    FROM data_quality_daily_bronze dqdb
-    GROUP BY
-        CAST(dqdb.transaction_time AS DATE),
-        CAST(dqdb.transaction_time AS DATE)
-    """
-)
-
-# 4) Save output as SINGLE CSV file directly under TARGET_PATH
+# Write single CSV file directly under TARGET_PATH as: TARGET_PATH + "/customer_order_items.csv"
 (
-    data_quality_daily_silver_df.coalesce(1)
+    df_customer_order_items_silver.coalesce(1)
     .write.mode("overwrite")
-    .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/data_quality_daily_silver.csv")
+    .csv(f"{TARGET_PATH}/customer_order_items.csv")
 )
+
+# ===================================================================================
+# TARGET TABLE: silver.daily_order_data_quality
+#  - Grain: data_date = CAST(co.order_timestamp AS DATE)
+#  - total_orders_count = COUNT(DISTINCT co.order_id)
+#  - valid_orders_count = distinct orders meeting completeness & value rules and having at least one valid line
+#  - invalid_orders_count = total - valid
+#  - duplicate_orders_count = COUNT(*) - COUNT(DISTINCT co.order_id) within same data_date (based on bronze.customer_orders)
+#  - dq_pass_rate = valid_orders_count / NULLIF(total_orders_count, 0)
+# ===================================================================================
+sql_daily_order_data_quality = """
+SELECT
+  CAST(co.order_timestamp AS DATE)                                                                 AS data_date,
+  CAST(COUNT(DISTINCT co.order_id) AS INT)                                                          AS total_orders_count,
+  CAST(
+    COUNT(
+      DISTINCT CASE
+        WHEN co.order_id IS NOT NULL
+         AND co.order_timestamp IS NOT NULL
+         AND co.order_total_amount IS NOT NULL
+         AND co.order_total_amount >= 0
+         AND coi.quantity > 0
+         AND coi.line_sale_amount IS NOT NULL
+        THEN co.order_id
+      END
+    ) AS INT
+  )                                                                                                 AS valid_orders_count,
+  CAST(
+    (
+      COUNT(DISTINCT co.order_id)
+      - COUNT(
+          DISTINCT CASE
+            WHEN co.order_id IS NOT NULL
+             AND co.order_timestamp IS NOT NULL
+             AND co.order_total_amount IS NOT NULL
+             AND co.order_total_amount >= 0
+             AND coi.quantity > 0
+             AND coi.line_sale_amount IS NOT NULL
+            THEN co.order_id
+          END
+        )
+    ) AS INT
+  )                                                                                                 AS invalid_orders_count,
+  CAST((COUNT(*) - COUNT(DISTINCT co.order_id)) AS INT)                                              AS duplicate_orders_count,
+  CAST(
+    (
+      COUNT(
+        DISTINCT CASE
+          WHEN co.order_id IS NOT NULL
+           AND co.order_timestamp IS NOT NULL
+           AND co.order_total_amount IS NOT NULL
+           AND co.order_total_amount >= 0
+           AND coi.quantity > 0
+           AND coi.line_sale_amount IS NOT NULL
+          THEN co.order_id
+        END
+      )
+      / NULLIF(COUNT(DISTINCT co.order_id), 0)
+    ) AS DECIMAL(38, 10)
+  )                                                                                                 AS dq_pass_rate
+FROM customer_orders co
+LEFT JOIN customer_order_items coi
+  ON co.order_id = coi.order_id
+GROUP BY CAST(co.order_timestamp AS DATE)
+"""
+
+df_daily_order_data_quality_silver = spark.sql(sql_daily_order_data_quality)
+
+# Write single CSV file directly under TARGET_PATH as: TARGET_PATH + "/daily_order_data_quality.csv"
+(
+    df_daily_order_data_quality_silver.coalesce(1)
+    .write.mode("overwrite")
+    .option("header", "true")
+    .csv(f"{TARGET_PATH}/daily_order_data_quality.csv")
+)
+
+job.commit()
 ```
