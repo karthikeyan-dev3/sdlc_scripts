@@ -7,7 +7,7 @@ from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 
 # -----------------------------------------------------------------------------------
-# Glue setup
+# AWS Glue bootstrap
 # -----------------------------------------------------------------------------------
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
 sc = SparkContext()
@@ -17,256 +17,205 @@ job = Job(glueContext)
 job.init(args["JOB_NAME"], args)
 
 # -----------------------------------------------------------------------------------
-# Config
+# Parameters (as provided)
 # -----------------------------------------------------------------------------------
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver"
 FILE_FORMAT = "csv"
 
-spark.conf.set("spark.sql.session.timeZone", "UTC")
-
 # -----------------------------------------------------------------------------------
-# 1) Read source tables from S3 (Bronze) and create temp views
+# 1) Read source tables from S3
+#    SOURCE READING RULE: .load(f"{SOURCE_PATH}/table_name.{FILE_FORMAT}/")
 # -----------------------------------------------------------------------------------
-customer_orders_bronze_df = (
+bronze_customer_orders_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/customer_orders_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/customer_orders.{FILE_FORMAT}/")
 )
-customer_orders_bronze_df.createOrReplaceTempView("customer_orders_bronze")
 
-customer_order_items_bronze_df = (
+bronze_customer_order_items_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/customer_order_items_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/customer_order_items.{FILE_FORMAT}/")
 )
-customer_order_items_bronze_df.createOrReplaceTempView("customer_order_items_bronze")
-
-products_bronze_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/products_bronze.{FILE_FORMAT}/")
-)
-products_bronze_df.createOrReplaceTempView("products_bronze")
 
 # -----------------------------------------------------------------------------------
-# 2) Transform + Write: silver.customer_orders_silver
-#    One row per order (de-duplicated on order_id using latest order_timestamp)
+# 2) Create temp views
 # -----------------------------------------------------------------------------------
-customer_orders_silver_df = spark.sql("""
-WITH ranked AS (
+bronze_customer_orders_df.createOrReplaceTempView("bronze_customer_orders")
+bronze_customer_order_items_df.createOrReplaceTempView("bronze_customer_order_items")
+
+# ===================================================================================
+# TABLE: silver.customer_orders
+# ===================================================================================
+
+# 3) SQL transformation (clean + de-dup + rejects)
+customer_orders_sql = """
+WITH base AS (
   SELECT
-    cob.order_id                                                  AS order_id,
-    CAST(cob.order_timestamp AS DATE)                             AS order_date,
-    cob.store_id                                                  AS customer_id,
-    'COMPLETED'                                                   AS order_status,
-    cob.order_total_amount                                        AS order_total_amount,
-    'USD'                                                         AS currency_code,
-    'sales_transactions_raw'                                      AS source_system,
-    CURRENT_DATE                                                  AS ingestion_date,
+    TRIM(co.order_id)                               AS order_id,
+    CAST(co.order_time AS DATE)                     AS order_date,
+    co.order_time                                   AS order_time,
+    CAST(NULL AS STRING)                            AS customer_id,
+    'COMPLETED'                                     AS order_status,
+    CAST(co.order_total_amount AS DECIMAL(18,2))     AS order_total_amount,
+    'USD'                                           AS currency_code
+  FROM bronze_customer_orders co
+  WHERE
+    co.order_id IS NOT NULL
+    AND co.order_time IS NOT NULL
+    AND co.order_total_amount IS NOT NULL
+    AND CAST(co.order_total_amount AS DECIMAL(18,2)) >= CAST(0.00 AS DECIMAL(18,2))
+    AND TRIM(co.order_id) <> ''
+),
+dedup AS (
+  SELECT
+    *,
     ROW_NUMBER() OVER (
-      PARTITION BY cob.order_id
-      ORDER BY cob.order_timestamp DESC
-    )                                                             AS rn
-  FROM customer_orders_bronze cob
+      PARTITION BY order_id
+      ORDER BY order_time DESC
+    ) AS rn
+  FROM base
 )
 SELECT
   order_id,
   order_date,
+  order_time,
   customer_id,
   order_status,
   order_total_amount,
-  currency_code,
-  source_system,
-  ingestion_date
-FROM ranked
+  currency_code
+FROM dedup
 WHERE rn = 1
-""")
+"""
 
+silver_customer_orders_df = spark.sql(customer_orders_sql)
+silver_customer_orders_df.createOrReplaceTempView("silver_customer_orders")
+
+# 4) Save output (SINGLE CSV file directly under TARGET_PATH)
 (
-    customer_orders_silver_df.coalesce(1)
+    silver_customer_orders_df.coalesce(1)
     .write.mode("overwrite")
     .option("header", "true")
-    .csv(f"{TARGET_PATH}/customer_orders_silver.csv")
+    .csv(f"{TARGET_PATH}/customer_orders.csv")
 )
 
-customer_orders_silver_df.createOrReplaceTempView("customer_orders_silver")
+# ===================================================================================
+# TABLE: silver.customer_order_items
+# ===================================================================================
 
-# -----------------------------------------------------------------------------------
-# 3) Transform + Write: silver.customer_order_items_silver
-#    One row per order item (de-duplicated on (order_id, order_item_id) using latest transaction_timestamp)
-# -----------------------------------------------------------------------------------
-customer_order_items_silver_df = spark.sql("""
-WITH ranked AS (
+# 3) SQL transformation (clean + conformed to order headers + de-dup + rejects)
+customer_order_items_sql = """
+WITH base AS (
   SELECT
-    coib.order_id                                                 AS order_id,
-    coib.order_item_id                                            AS order_item_id,
-    coib.product_id                                               AS product_id,
-    coib.quantity                                                 AS quantity,
+    TRIM(coi.order_id)                                                      AS order_id,
+    sha2(concat(TRIM(coi.order_id), '|', TRIM(coi.product_id)), 256)         AS order_item_id,
+    TRIM(coi.product_id)                                                    AS product_id,
+    CAST(coi.quantity AS INT)                                               AS quantity,
     CASE
-      WHEN coib.quantity <> 0 THEN coib.line_amount / coib.quantity
-      ELSE NULL
-    END                                                           AS unit_price,
-    coib.line_amount                                              AS line_amount,
-    CURRENT_DATE                                                  AS ingestion_date,
+      WHEN CAST(coi.quantity AS INT) > 0
+        THEN CAST(coi.line_amount AS DECIMAL(18,2)) / CAST(coi.quantity AS INT)
+      ELSE CAST(NULL AS DECIMAL(18,4))
+    END                                                                     AS unit_price,
+    CAST(coi.line_amount AS DECIMAL(18,2))                                  AS line_total_amount
+  FROM bronze_customer_order_items coi
+  WHERE
+    coi.order_id IS NOT NULL
+    AND coi.product_id IS NOT NULL
+    AND coi.quantity IS NOT NULL
+    AND coi.line_amount IS NOT NULL
+    AND TRIM(coi.order_id) <> ''
+    AND TRIM(coi.product_id) <> ''
+    AND CAST(coi.quantity AS INT) > 0
+    AND CAST(coi.line_amount AS DECIMAL(18,2)) >= CAST(0.00 AS DECIMAL(18,2))
+),
+conformed AS (
+  SELECT
+    b.*
+  FROM base b
+  INNER JOIN silver_customer_orders sco
+    ON b.order_id = sco.order_id
+),
+dedup AS (
+  SELECT
+    *,
     ROW_NUMBER() OVER (
-      PARTITION BY coib.order_id, coib.order_item_id
-      ORDER BY coib.transaction_timestamp DESC
-    )                                                             AS rn
-  FROM customer_order_items_bronze coib
+      PARTITION BY order_id, product_id
+      ORDER BY line_total_amount DESC
+    ) AS rn
+  FROM conformed
 )
 SELECT
   order_id,
   order_item_id,
   product_id,
   quantity,
-  unit_price,
-  line_amount,
-  ingestion_date
-FROM ranked
-WHERE rn = 1
-""")
-
-(
-    customer_order_items_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .option("header", "true")
-    .csv(f"{TARGET_PATH}/customer_order_items_silver.csv")
-)
-
-customer_order_items_silver_df.createOrReplaceTempView("customer_order_items_silver")
-
-# -----------------------------------------------------------------------------------
-# 4) Transform + Write: silver.customers_silver
-#    Customer dimension (SCD2-ready) from orders; one current record per customer_id
-# -----------------------------------------------------------------------------------
-customers_silver_df = spark.sql("""
-WITH base AS (
-  SELECT
-    cob.store_id                                                  AS customer_id,
-    NULL                                                         AS customer_name,
-    NULL                                                         AS customer_email,
-    NULL                                                         AS customer_phone,
-    NULL                                                         AS billing_country,
-    NULL                                                         AS shipping_country,
-    TRUE                                                         AS is_active,
-    MIN(CAST(cob.order_timestamp AS DATE)) OVER (
-      PARTITION BY cob.store_id
-    )                                                            AS effective_start_date,
-    DATE '9999-12-31'                                            AS effective_end_date
-  FROM customer_orders_bronze cob
-),
-dedup AS (
-  SELECT
-    customer_id,
-    customer_name,
-    customer_email,
-    customer_phone,
-    billing_country,
-    shipping_country,
-    is_active,
-    effective_start_date,
-    effective_end_date,
-    ROW_NUMBER() OVER (
-      PARTITION BY customer_id
-      ORDER BY effective_start_date ASC
-    )                                                             AS rn
-  FROM base
-)
-SELECT
-  customer_id,
-  customer_name,
-  customer_email,
-  customer_phone,
-  billing_country,
-  shipping_country,
-  is_active,
-  effective_start_date,
-  effective_end_date
+  CAST(unit_price AS DECIMAL(18,4)) AS unit_price,
+  line_total_amount
 FROM dedup
 WHERE rn = 1
-""")
+"""
 
+silver_customer_order_items_df = spark.sql(customer_order_items_sql)
+silver_customer_order_items_df.createOrReplaceTempView("silver_customer_order_items")
+
+# 4) Save output (SINGLE CSV file directly under TARGET_PATH)
 (
-    customers_silver_df.coalesce(1)
+    silver_customer_order_items_df.coalesce(1)
     .write.mode("overwrite")
     .option("header", "true")
-    .csv(f"{TARGET_PATH}/customers_silver.csv")
+    .csv(f"{TARGET_PATH}/customer_order_items.csv")
 )
 
-customers_silver_df.createOrReplaceTempView("customers_silver")
+# ===================================================================================
+# TABLE: silver.data_quality_daily
+# ===================================================================================
 
-# -----------------------------------------------------------------------------------
-# 5) Transform + Write: silver.products_silver
-#    Product dimension (SCD2-ready); de-duplicate on product_id (latest record if duplicates exist)
-# -----------------------------------------------------------------------------------
-products_silver_df = spark.sql("""
-WITH ranked AS (
+# 3) SQL transformation (daily quality metrics)
+data_quality_daily_sql = """
+WITH counts AS (
   SELECT
-    pb.product_id                                                 AS product_id,
-    pb.product_name                                               AS product_name,
-    pb.category                                                   AS product_category,
-    pb.is_active                                                  AS is_active,
-    CURRENT_DATE                                                  AS effective_start_date,
-    DATE '9999-12-31'                                            AS effective_end_date,
-    ROW_NUMBER() OVER (
-      PARTITION BY pb.product_id
-      ORDER BY pb.updated_at DESC
-    )                                                             AS rn
-  FROM products_bronze pb
+    CAST(current_date() AS DATE) AS load_date,
+
+    (
+      (SELECT COUNT(*) FROM bronze_customer_orders)
+      +
+      (SELECT COUNT(*) FROM bronze_customer_order_items)
+    ) AS source_record_count,
+
+    (SELECT COUNT(*) FROM silver_customer_orders) AS loaded_order_count,
+    (SELECT COUNT(*) FROM silver_customer_order_items) AS loaded_order_item_count
 )
 SELECT
-  product_id,
-  product_name,
-  product_category,
-  is_active,
-  effective_start_date,
-  effective_end_date
-FROM ranked
-WHERE rn = 1
-""")
+  load_date,
+  CAST(source_record_count AS BIGINT) AS source_record_count,
+  CAST(loaded_order_count AS BIGINT) AS loaded_order_count,
+  CAST(loaded_order_item_count AS BIGINT) AS loaded_order_item_count,
+  CAST(
+    source_record_count - (loaded_order_count + loaded_order_item_count)
+    AS BIGINT
+  ) AS rejected_record_count,
+  CAST(
+    CASE
+      WHEN source_record_count > 0
+        THEN round(((loaded_order_count + loaded_order_item_count) / source_record_count) * 100, 4)
+      ELSE 100
+    END
+    AS DECIMAL(9,4)
+  ) AS data_accuracy_pct
+FROM counts
+"""
 
+silver_data_quality_daily_df = spark.sql(data_quality_daily_sql)
+
+# 4) Save output (SINGLE CSV file directly under TARGET_PATH)
 (
-    products_silver_df.coalesce(1)
+    silver_data_quality_daily_df.coalesce(1)
     .write.mode("overwrite")
     .option("header", "true")
-    .csv(f"{TARGET_PATH}/products_silver.csv")
-)
-
-products_silver_df.createOrReplaceTempView("products_silver")
-
-# -----------------------------------------------------------------------------------
-# 6) Transform + Write: silver.daily_order_kpis_silver
-#    Daily KPI pre-aggregation
-# -----------------------------------------------------------------------------------
-daily_order_kpis_silver_df = spark.sql("""
-SELECT
-  cos.order_date                                                  AS kpi_date,
-  COUNT(DISTINCT cos.order_id)                                    AS orders_count,
-  COALESCE(SUM(cois.quantity), 0)                                 AS items_count,
-  COALESCE(SUM(cois.line_amount), 0)                              AS gross_sales_amount,
-  CASE
-    WHEN COUNT(DISTINCT cos.order_id) > 0
-      THEN SUM(cos.order_total_amount) / COUNT(DISTINCT cos.order_id)
-    ELSE 0
-  END                                                            AS avg_order_value,
-  COUNT(DISTINCT cos.customer_id)                                 AS distinct_customers_count,
-  CURRENT_DATE                                                    AS ingestion_date
-FROM customer_orders_silver cos
-INNER JOIN customer_order_items_silver cois
-  ON cos.order_id = cois.order_id
-GROUP BY
-  cos.order_date
-""")
-
-(
-    daily_order_kpis_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .option("header", "true")
-    .csv(f"{TARGET_PATH}/daily_order_kpis_silver.csv")
+    .csv(f"{TARGET_PATH}/data_quality_daily.csv")
 )
 
 job.commit()
