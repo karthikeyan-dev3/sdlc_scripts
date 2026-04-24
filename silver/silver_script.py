@@ -1,120 +1,188 @@
 ```python
 import sys
+from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
 from awsglue.job import Job
-from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 
 # -----------------------------------------------------------------------------------
-# Glue / Spark bootstrap
+# AWS Glue boilerplate
 # -----------------------------------------------------------------------------------
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
-sc = SparkContext.getOrCreate()
-glueContext = GlueContext(sc)
-spark: SparkSession = glueContext.spark_session
-job = Job(glueContext)
+sc = SparkContext()
+glue_context = GlueContext(sc)
+spark: SparkSession = glue_context.spark_session
+job = Job(glue_context)
 job.init(args["JOB_NAME"], args)
 
+# -----------------------------------------------------------------------------------
+# Parameters (as provided)
+# -----------------------------------------------------------------------------------
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 FILE_FORMAT = "csv"
 
-# Common CSV options (adjust if your bronze files differ)
-CSV_READ_OPTIONS = {
-    "header": "true",
-    "inferSchema": "true",
-    "mode": "PERMISSIVE",
-}
-
-# ===================================================================================
-# TABLE: silver.customer_orders
-# ===================================================================================
-
-# 1) Read source table(s) from S3 (STRICT SOURCE READING RULE)
-customer_orders_src_df = (
+# -----------------------------------------------------------------------------------
+# Read source tables from S3 (STRICT PATH FORMAT)
+# -----------------------------------------------------------------------------------
+customer_orders_bronze_df = (
     spark.read.format(FILE_FORMAT)
-    .options(**CSV_READ_OPTIONS)
-    .load(f"{SOURCE_PATH}/customer_orders.{FILE_FORMAT}/")
+    .option("header", "true")
+    .option("inferSchema", "true")
+    .load(f"{SOURCE_PATH}/customer_orders_bronze.{FILE_FORMAT}/")
 )
 
-# 2) Create temp view(s)
-customer_orders_src_df.createOrReplaceTempView("customer_orders")  # alias: co in SQL
+customer_order_items_bronze_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .option("inferSchema", "true")
+    .load(f"{SOURCE_PATH}/customer_order_items_bronze.{FILE_FORMAT}/")
+)
 
-# 3) Transform using Spark SQL (includes dedup with ROW_NUMBER)
-customer_orders_sql = """
-WITH base AS (
+products_bronze_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .option("inferSchema", "true")
+    .load(f"{SOURCE_PATH}/products_bronze.{FILE_FORMAT}/")
+)
+
+# -----------------------------------------------------------------------------------
+# Create temp views
+# -----------------------------------------------------------------------------------
+customer_orders_bronze_df.createOrReplaceTempView("customer_orders_bronze")
+customer_order_items_bronze_df.createOrReplaceTempView("customer_order_items_bronze")
+products_bronze_df.createOrReplaceTempView("products_bronze")
+
+# ===================================================================================
+# Target table: silver.customer_orders_silver
+# ===================================================================================
+# Transformations (EXACT per UDT):
+# - order_id = cob.transaction_id (TRIM + filter null/blank)
+# - order_date = CAST(cob.transaction_time AS DATE)
+# - order_total_amount = COALESCE(cob.sale_amount, 0)
+# - order_status = 'completed'
+# - order_currency = 'USD'
+# - customer_id = cob.store_id
+# - items_count = COUNT(*) by transaction_id from customer_order_items_bronze
+# - source_file_name = cob.source_file_name
+# - ingested_at = cob.ingested_at
+# - Dedupe to one row per order_id (transaction_id) using ROW_NUMBER
+customer_orders_silver_sql = """
+WITH cob_clean AS (
   SELECT
-    co.order_id                                                                 AS order_id,
-    CAST(co.order_timestamp AS DATE)                                            AS order_date,
-    CASE WHEN co.order_total_amount >= 0 THEN co.order_total_amount ELSE NULL END AS order_total_amount,
-    'UNKNOWN'                                                                   AS order_status,
-    'USD'                                                                       AS currency_code,
-    'sales_transactions_raw'                                                    AS source_system,
-    CAST(CURRENT_DATE AS DATE)                                                  AS ingestion_date,
+    TRIM(cob.transaction_id)                          AS transaction_id,
+    cob.transaction_time                              AS transaction_time,
+    cob.store_id                                      AS store_id,
+    cob.sale_amount                                   AS sale_amount,
+    cob.source_file_name                              AS source_file_name,
+    cob.ingested_at                                   AS ingested_at
+  FROM customer_orders_bronze cob
+  WHERE cob.transaction_id IS NOT NULL
+    AND TRIM(cob.transaction_id) <> ''
+),
+items_count_by_order AS (
+  SELECT
+    TRIM(coib.transaction_id)                         AS transaction_id,
+    COUNT(*)                                          AS items_count
+  FROM customer_order_items_bronze coib
+  WHERE coib.transaction_id IS NOT NULL
+    AND TRIM(coib.transaction_id) <> ''
+  GROUP BY TRIM(coib.transaction_id)
+),
+dedup AS (
+  SELECT
+    transaction_id,
+    transaction_time,
+    store_id,
+    sale_amount,
+    source_file_name,
+    ingested_at,
     ROW_NUMBER() OVER (
-      PARTITION BY co.order_id
-      ORDER BY co.order_timestamp DESC
+      PARTITION BY transaction_id
+      ORDER BY ingested_at DESC, source_file_name DESC
     ) AS rn
-  FROM customer_orders co
+  FROM cob_clean
 )
 SELECT
-  order_id,
-  order_date,
-  order_total_amount,
-  order_status,
-  currency_code,
-  source_system,
-  ingestion_date
-FROM base
-WHERE rn = 1
+  d.transaction_id                                    AS order_id,
+  CAST(d.transaction_time AS DATE)                    AS order_date,
+  d.store_id                                          AS customer_id,
+  'completed'                                         AS order_status,
+  'USD'                                               AS order_currency,
+  COALESCE(d.sale_amount, 0)                          AS order_total_amount,
+  COALESCE(ic.items_count, 0)                         AS items_count,
+  d.source_file_name                                  AS source_file_name,
+  d.ingested_at                                       AS ingested_at
+FROM dedup d
+LEFT JOIN items_count_by_order ic
+  ON d.transaction_id = ic.transaction_id
+WHERE d.rn = 1
 """
 
-customer_orders_tgt_df = spark.sql(customer_orders_sql)
+customer_orders_silver_df = spark.sql(customer_orders_silver_sql)
 
-# 4) Write output (SINGLE CSV file directly under TARGET_PATH)
+# Write as SINGLE CSV file directly under TARGET_PATH (STRICT OUTPUT RULE)
 (
-    customer_orders_tgt_df.coalesce(1)
+    customer_orders_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/customer_orders.csv")
+    .save(f"{TARGET_PATH}/customer_orders_silver.csv")
 )
 
 # ===================================================================================
-# TABLE: silver.customer_order_items
+# Target table: silver.customer_order_items_silver
 # ===================================================================================
-
-# 1) Read source table(s) from S3 (STRICT SOURCE READING RULE)
-customer_order_items_src_df = (
-    spark.read.format(FILE_FORMAT)
-    .options(**CSV_READ_OPTIONS)
-    .load(f"{SOURCE_PATH}/customer_order_items.{FILE_FORMAT}/")
-)
-
-# 2) Create temp view(s)
-customer_order_items_src_df.createOrReplaceTempView("customer_order_items")  # alias: coi in SQL
-
-# 3) Transform using Spark SQL (includes dedup with ROW_NUMBER)
-customer_order_items_sql = """
+# Transformations (EXACT per UDT):
+# - Filter out null/blank transaction_id
+# - order_id = coib.transaction_id (TRIM)
+# - order_item_id = ROW_NUMBER() OVER (PARTITION BY transaction_id ORDER BY COALESCE(product_id,'') , COALESCE(sale_amount,0) , COALESCE(quantity,0))
+# - product_id = TRIM(coib.product_id)
+# - quantity = COALESCE(coib.quantity, 0)
+# - line_amount = COALESCE(coib.sale_amount, 0)
+# - unit_price = CASE WHEN COALESCE(quantity,0)>0 THEN COALESCE(sale_amount,0)/quantity ELSE pb.price END
+# - Dedupe to one row per (order_id, order_item_id) (naturally unique via row_number within order_id)
+customer_order_items_silver_sql = """
 WITH base AS (
   SELECT
-    coi.order_id                                                   AS order_id,
-    CAST(xxhash64(coi.order_id, coi.product_id) AS STRING)         AS order_item_id,
-    coi.product_id                                                 AS product_id,
-    CASE WHEN coi.quantity > 0 THEN coi.quantity ELSE NULL END     AS quantity,
-    CASE
-      WHEN coi.quantity > 0 THEN coi.line_amount / COALESCE(coi.quantity, 0)
-      ELSE NULL
-    END                                                            AS unit_price,
-    CASE WHEN coi.line_amount >= 0 THEN coi.line_amount ELSE NULL END AS line_amount,
-    'USD'                                                          AS currency_code,
-    CAST(CURRENT_DATE AS DATE)                                     AS ingestion_date,
+    TRIM(coib.transaction_id)                          AS transaction_id,
+    coib.product_id                                    AS product_id_raw,
+    coib.sale_amount                                   AS sale_amount,
+    coib.quantity                                      AS quantity
+  FROM customer_order_items_bronze coib
+  WHERE coib.transaction_id IS NOT NULL
+    AND TRIM(coib.transaction_id) <> ''
+),
+joined AS (
+  SELECT
+    b.transaction_id,
+    TRIM(b.product_id_raw)                             AS product_id,
+    COALESCE(b.quantity, 0)                            AS quantity,
+    COALESCE(b.sale_amount, 0)                         AS line_amount,
+    pb.price                                           AS pb_price
+  FROM base b
+  LEFT JOIN products_bronze pb
+    ON TRIM(b.product_id_raw) = pb.product_id
+),
+numbered AS (
+  SELECT
+    transaction_id                                     AS order_id,
     ROW_NUMBER() OVER (
-      PARTITION BY coi.order_id, CAST(xxhash64(coi.order_id, coi.product_id) AS STRING)
-      ORDER BY coi.product_id ASC
-    ) AS rn
-  FROM customer_order_items coi
+      PARTITION BY transaction_id
+      ORDER BY
+        COALESCE(product_id, ''),
+        COALESCE(line_amount, 0),
+        COALESCE(quantity, 0)
+    )                                                  AS order_item_id,
+    product_id                                         AS product_id,
+    quantity                                           AS quantity,
+    CASE
+      WHEN COALESCE(quantity, 0) > 0 THEN COALESCE(line_amount, 0) / quantity
+      ELSE pb_price
+    END                                                AS unit_price,
+    COALESCE(line_amount, 0)                           AS line_amount
+  FROM joined
 )
 SELECT
   order_id,
@@ -122,87 +190,19 @@ SELECT
   product_id,
   quantity,
   unit_price,
-  line_amount,
-  currency_code,
-  ingestion_date
-FROM base
-WHERE rn = 1
+  line_amount
+FROM numbered
 """
 
-customer_order_items_tgt_df = spark.sql(customer_order_items_sql)
+customer_order_items_silver_df = spark.sql(customer_order_items_silver_sql)
 
-# 4) Write output (SINGLE CSV file directly under TARGET_PATH)
+# Write as SINGLE CSV file directly under TARGET_PATH (STRICT OUTPUT RULE)
 (
-    customer_order_items_tgt_df.coalesce(1)
+    customer_order_items_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/customer_order_items.csv")
-)
-
-# ===================================================================================
-# TABLE: silver.ingestion_run_audit
-# ===================================================================================
-
-# 1) Read source table(s) from S3 (STRICT SOURCE READING RULE)
-ingestion_run_audit_src_df = (
-    spark.read.format(FILE_FORMAT)
-    .options(**CSV_READ_OPTIONS)
-    .load(f"{SOURCE_PATH}/ingestion_run_audit.{FILE_FORMAT}/")
-)
-
-# 2) Create temp view(s)
-ingestion_run_audit_src_df.createOrReplaceTempView("ingestion_run_audit")  # alias: ira in SQL
-
-# 3) Transform using Spark SQL (includes dedup with ROW_NUMBER)
-ingestion_run_audit_sql = """
-WITH base AS (
-  SELECT
-    ira.run_id                                                     AS run_id,
-    ira.source_name                                                AS source_file_path,
-    'UNKNOWN'                                                      AS source_file_format,
-    CAST(ira.ingestion_start_timestamp AS DATE)                    AS ingestion_date,
-    ira.ingestion_start_timestamp                                  AS run_start_ts,
-    ira.ingestion_end_timestamp                                    AS run_end_ts,
-    ira.load_status                                                AS run_status,
-    ira.record_count                                               AS records_read,
-    CAST(NULL AS BIGINT)                                           AS records_loaded,
-    CAST(NULL AS BIGINT)                                           AS records_rejected,
-    CASE
-      WHEN ira.load_status IN ('FAILED', 'ERROR') THEN 'UNKNOWN'
-      ELSE NULL
-    END                                                            AS error_reason,
-    ROW_NUMBER() OVER (
-      PARTITION BY ira.run_id, ira.source_name
-      ORDER BY ira.ingestion_start_timestamp DESC
-    ) AS rn
-  FROM ingestion_run_audit ira
-)
-SELECT
-  run_id,
-  source_file_path,
-  source_file_format,
-  ingestion_date,
-  run_start_ts,
-  run_end_ts,
-  run_status,
-  records_read,
-  records_loaded,
-  records_rejected,
-  error_reason
-FROM base
-WHERE rn = 1
-"""
-
-ingestion_run_audit_tgt_df = spark.sql(ingestion_run_audit_sql)
-
-# 4) Write output (SINGLE CSV file directly under TARGET_PATH)
-(
-    ingestion_run_audit_tgt_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/ingestion_run_audit.csv")
+    .save(f"{TARGET_PATH}/customer_order_items_silver.csv")
 )
 
 job.commit()
