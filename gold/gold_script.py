@@ -7,139 +7,64 @@ from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 
 # -----------------------------------------------------------------------------------
-# AWS Glue Job Init
+# Job bootstrap
 # -----------------------------------------------------------------------------------
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
+
 sc = SparkContext()
 glueContext = GlueContext(sc)
-spark = glueContext.spark_session
+spark: SparkSession = glueContext.spark_session
 job = Job(glueContext)
 job.init(args["JOB_NAME"], args)
 
 # -----------------------------------------------------------------------------------
-# Parameters (as provided)
+# Config
 # -----------------------------------------------------------------------------------
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
 # ===================================================================================
-# Target Table: gold.gold_customer_orders_daily
-# Sources:
-#  - silver.order_amounts_silver oas
-#  - silver.orders_silver os
-#  - silver.order_validation_silver ovs
-#  - silver.order_lines_silver ols
+# Target Table: gold.gold_customer_orders
+# Source: silver.customer_orders_silver (alias: cos)
 # ===================================================================================
 
-# -------------------------------------
-# 1) Read source tables from S3
-# -------------------------------------
-oas_df = (
+# 1) Read source table(s) from S3 (STRICT path format)
+df_customer_orders_silver = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/order_amounts_silver.{FILE_FORMAT}/")
+    .option("inferSchema", "false")
+    .load(f"{SOURCE_PATH}/customer_orders_silver.{FILE_FORMAT}/")
 )
 
-os_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/orders_silver.{FILE_FORMAT}/")
-)
+# 2) Create temp view(s)
+df_customer_orders_silver.createOrReplaceTempView("customer_orders_silver")
 
-ovs_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/order_validation_silver.{FILE_FORMAT}/")
-)
-
-ols_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/order_lines_silver.{FILE_FORMAT}/")
-)
-
-# -------------------------------------
-# 2) Create temp views
-# -------------------------------------
-oas_df.createOrReplaceTempView("order_amounts_silver")
-os_df.createOrReplaceTempView("orders_silver")
-ovs_df.createOrReplaceTempView("order_validation_silver")
-ols_df.createOrReplaceTempView("order_lines_silver")
-
-# -------------------------------------
-# 3) Transform using Spark SQL (EXACT UDT intent)
-#    - One row per order_date
-#    - Aggregations by oas.order_date
-#    - avg_order_value = SUM(net_sales_amount) / NULLIF(COUNT(DISTINCT order_id), 0)
-#    - load_timestamp = MAX(GREATEST(...)) by order_date
-# -------------------------------------
-gold_customer_orders_daily_df = spark.sql(
+# 3) Transform using Spark SQL (apply EXACT mappings + required SQL functions)
+df_gold_customer_orders = spark.sql(
     """
     SELECT
-        CAST(oas.order_date AS DATE) AS order_date,
-
-        CAST(COUNT(DISTINCT os.order_id) AS INT) AS total_orders,
-        CAST(COUNT(ols.order_id) AS INT) AS total_order_lines,
-        CAST(COALESCE(SUM(CAST(ols.quantity AS INT)), 0) AS INT) AS total_quantity,
-
-        CAST(COALESCE(SUM(CAST(oas.gross_sales_amount AS DECIMAL(38, 10))), 0) AS DECIMAL(38, 10)) AS gross_sales_amount,
-        CAST(COALESCE(SUM(CAST(oas.net_sales_amount   AS DECIMAL(38, 10))), 0) AS DECIMAL(38, 10)) AS net_sales_amount,
-        CAST(COALESCE(SUM(CAST(oas.discount_amount    AS DECIMAL(38, 10))), 0) AS DECIMAL(38, 10)) AS discount_amount,
-        CAST(COALESCE(SUM(CAST(oas.tax_amount         AS DECIMAL(38, 10))), 0) AS DECIMAL(38, 10)) AS tax_amount,
-        CAST(COALESCE(SUM(CAST(oas.shipping_amount    AS DECIMAL(38, 10))), 0) AS DECIMAL(38, 10)) AS shipping_amount,
-
-        CAST(
-            COALESCE(SUM(CAST(oas.net_sales_amount AS DECIMAL(38, 10))), 0)
-            /
-            NULLIF(COUNT(DISTINCT os.order_id), 0)
-            AS DECIMAL(38, 10)
-        ) AS avg_order_value,
-
-        CAST(
-            COALESCE(SUM(CASE WHEN CAST(ovs.is_valid_order AS BOOLEAN) THEN 1 ELSE 0 END), 0)
-            AS INT
-        ) AS valid_orders_count,
-
-        CAST(
-            COALESCE(SUM(CASE WHEN CAST(ovs.is_valid_order AS BOOLEAN) THEN 0 ELSE 1 END), 0)
-            AS INT
-        ) AS invalid_orders_count,
-
-        MAX(
-            GREATEST(
-                CAST(oas.load_timestamp AS TIMESTAMP),
-                CAST(os.load_timestamp  AS TIMESTAMP),
-                CAST(ovs.load_timestamp AS TIMESTAMP),
-                CAST(ols.load_timestamp AS TIMESTAMP)
-            )
-        ) AS load_timestamp
-
-    FROM order_amounts_silver oas
-    INNER JOIN orders_silver os
-        ON oas.order_id = os.order_id
-    INNER JOIN order_validation_silver ovs
-        ON oas.order_id = ovs.order_id
-    LEFT JOIN order_lines_silver ols
-        ON oas.order_id = ols.order_id
-    GROUP BY CAST(oas.order_date AS DATE)
+        CAST(TRIM(cos.order_id) AS STRING)                   AS order_id,
+        CAST(DATE(cos.order_date) AS DATE)                  AS order_date,
+        CAST(TRIM(cos.customer_id) AS STRING)               AS customer_id,
+        CAST(TRIM(cos.customer_email_hash) AS STRING)       AS customer_email_hash,
+        CAST(TRIM(cos.order_status) AS STRING)              AS order_status,
+        CAST(cos.order_total_amount AS DECIMAL(38, 18))     AS order_total_amount,
+        CAST(TRIM(cos.currency_code) AS STRING)             AS currency_code,
+        CAST(DATE(cos.ingestion_date) AS DATE)              AS ingestion_date,
+        CAST(TRIM(cos.source_system) AS STRING)             AS source_system,
+        CAST(TRIM(cos.record_valid_flag) AS STRING)         AS record_valid_flag
+    FROM customer_orders_silver cos
     """
 )
 
-# -------------------------------------
-# 4) Save output (SINGLE CSV file directly under TARGET_PATH)
-#    Output path MUST be: s3://.../gold_customer_orders_daily.csv
-# -------------------------------------
+# 4) Write output as a SINGLE CSV file directly under TARGET_PATH (no subfolders)
 (
-    gold_customer_orders_daily_df.coalesce(1)
+    df_gold_customer_orders.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_customer_orders_daily.csv")
+    .save(f"{TARGET_PATH}/gold_customer_orders.csv")
 )
 
 job.commit()
