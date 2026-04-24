@@ -1,149 +1,93 @@
 ```python
 import sys
-from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
 from awsglue.job import Job
+from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 
-# ------------------------------------------------------------------------------------
-# Glue job setup
-# ------------------------------------------------------------------------------------
+# ----------------------------
+# Job / Context
+# ----------------------------
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
-
-sc = SparkContext()
+sc = SparkContext.getOrCreate()
 glueContext = GlueContext(sc)
 spark: SparkSession = glueContext.spark_session
 job = Job(glueContext)
 job.init(args["JOB_NAME"], args)
 
-# ------------------------------------------------------------------------------------
-# Config
-# ------------------------------------------------------------------------------------
+# ----------------------------
+# Parameters (as provided)
+# ----------------------------
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-# Recommended CSV options (safe defaults for typical silver CSV outputs)
-CSV_READ_OPTIONS = {
-    "header": "true",
-    "inferSchema": "true",
-    "multiLine": "false",
-    "escape": "\""
-}
-
-# ====================================================================================
-# TABLE: gold.gold_customer_orders  (source: silver.customer_orders sco)
-# ====================================================================================
-
-# 1) Read source tables from S3
+# ----------------------------
+# SOURCE: silver.customer_orders_silver (alias: cos)
+# Read source table from S3 and create temp view
+# ----------------------------
 customer_orders_silver_df = (
     spark.read.format(FILE_FORMAT)
-    .options(**CSV_READ_OPTIONS)
-    .load(f"{SOURCE_PATH}/customer_orders.{FILE_FORMAT}/")
+    .option("header", "true")
+    .option("inferSchema", "true")
+    .load(f"{SOURCE_PATH}/customer_orders_silver.{FILE_FORMAT}/")
 )
 
-# 2) Create temp views
-customer_orders_silver_df.createOrReplaceTempView("customer_orders")
+customer_orders_silver_df.createOrReplaceTempView("customer_orders_silver")
 
-# 3) SQL transformation (exact mappings)
-gold_customer_orders_df = spark.sql("""
+# ----------------------------
+# TARGET: gold.gold_customer_orders (alias: gco)
+# Transform using Spark SQL (1:1 mapping as per UDT)
+# ----------------------------
+gold_customer_orders_sql = """
 SELECT
-  CAST(sco.order_id AS STRING)                         AS order_id,
-  CAST(sco.order_date AS DATE)                         AS order_date,
-  CAST(sco.customer_id AS STRING)                      AS customer_id,
-  CAST(sco.order_status AS STRING)                     AS order_status,
-  CAST(sco.order_total_amount AS DECIMAL(38,10))       AS order_total_amount,
-  CAST(sco.currency_code AS STRING)                    AS currency_code,
-  CAST(sco.source_system AS STRING)                    AS source_system,
-  CAST(sco.ingestion_date AS DATE)                     AS ingestion_date,
-  CAST(sco.record_hash AS STRING)                      AS record_hash
-FROM customer_orders sco
-""")
+    CAST(cos.order_id AS STRING)                       AS order_id,
+    DATE(cos.order_date)                               AS order_date,
+    CAST(cos.customer_id AS STRING)                    AS customer_id,
+    CAST(cos.order_status AS STRING)                   AS order_status,
+    CAST(cos.currency_code AS STRING)                  AS currency_code,
+    CAST(cos.order_total_amount AS DECIMAL(38, 18))    AS order_total_amount,
+    CAST(cos.source_file_path AS STRING)               AS source_file_path,
+    CAST(cos.ingested_at AS TIMESTAMP)                 AS ingested_at
+FROM customer_orders_silver cos
+"""
 
-# 4) Save output (single CSV file directly under TARGET_PATH)
+gold_customer_orders_df = spark.sql(gold_customer_orders_sql)
+
+# ----------------------------
+# WRITE: Single CSV file directly under TARGET_PATH
+# Output: s3://.../gold/gold_customer_orders.csv
+# ----------------------------
+gold_customer_orders_tmp = f"{TARGET_PATH}/__tmp_gold_customer_orders_csv"
+
 (
     gold_customer_orders_df.coalesce(1)
     .write.mode("overwrite")
+    .format("csv")
     .option("header", "true")
-    .csv(f"{TARGET_PATH}/gold_customer_orders.csv")
+    .save(gold_customer_orders_tmp)
 )
 
-# ====================================================================================
-# TABLE: gold.gold_customer_order_items  (source: silver.customer_order_items scoi)
-# ====================================================================================
+# Move the single part file to the required exact path: TARGET_PATH + "/gold_customer_orders.csv"
+tmp_files = glueContext._jsc.hadoopConfiguration()
+fs = spark._jvm.org.apache.hadoop.fs.FileSystem.get(tmp_files)
+tmp_path = spark._jvm.org.apache.hadoop.fs.Path(gold_customer_orders_tmp)
+final_path = spark._jvm.org.apache.hadoop.fs.Path(f"{TARGET_PATH}/gold_customer_orders.csv")
 
-# 1) Read source tables from S3
-customer_order_items_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .options(**CSV_READ_OPTIONS)
-    .load(f"{SOURCE_PATH}/customer_order_items.{FILE_FORMAT}/")
-)
+# Find the part file
+for status in fs.listStatus(tmp_path):
+    name = status.getPath().getName()
+    if name.startswith("part-") and name.endswith(".csv"):
+        part_file_path = status.getPath()
+        break
 
-# 2) Create temp views
-customer_order_items_silver_df.createOrReplaceTempView("customer_order_items")
+# Delete final if exists, then rename part -> final, then delete tmp folder
+if fs.exists(final_path):
+    fs.delete(final_path, True)
 
-# 3) SQL transformation (exact mappings)
-gold_customer_order_items_df = spark.sql("""
-SELECT
-  CAST(scoi.order_id AS STRING)                    AS order_id,
-  CAST(scoi.order_item_id AS STRING)               AS order_item_id,
-  CAST(scoi.product_id AS STRING)                  AS product_id,
-  CAST(scoi.quantity AS INT)                       AS quantity,
-  CAST(scoi.unit_price_amount AS DECIMAL(38,10))   AS unit_price_amount,
-  CAST(scoi.line_total_amount AS DECIMAL(38,10))   AS line_total_amount,
-  CAST(scoi.currency_code AS STRING)               AS currency_code,
-  CAST(scoi.source_system AS STRING)               AS source_system,
-  CAST(scoi.ingestion_date AS DATE)                AS ingestion_date,
-  CAST(scoi.record_hash AS STRING)                 AS record_hash
-FROM customer_order_items scoi
-""")
-
-# 4) Save output (single CSV file directly under TARGET_PATH)
-(
-    gold_customer_order_items_df.coalesce(1)
-    .write.mode("overwrite")
-    .option("header", "true")
-    .csv(f"{TARGET_PATH}/gold_customer_order_items.csv")
-)
-
-# ====================================================================================
-# TABLE: gold.gold_ingestion_audit_daily  (source: silver.ingestion_audit_daily siad)
-# ====================================================================================
-
-# 1) Read source tables from S3
-ingestion_audit_daily_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .options(**CSV_READ_OPTIONS)
-    .load(f"{SOURCE_PATH}/ingestion_audit_daily.{FILE_FORMAT}/")
-)
-
-# 2) Create temp views
-ingestion_audit_daily_silver_df.createOrReplaceTempView("ingestion_audit_daily")
-
-# 3) SQL transformation (exact mappings)
-gold_ingestion_audit_daily_df = spark.sql("""
-SELECT
-  CAST(siad.ingestion_date AS DATE)            AS ingestion_date,
-  CAST(siad.source_system AS STRING)           AS source_system,
-  CAST(siad.dataset_name AS STRING)            AS dataset_name,
-  CAST(siad.s3_object_count AS BIGINT)         AS s3_object_count,
-  CAST(siad.record_count_ingested AS BIGINT)   AS record_count_ingested,
-  CAST(siad.record_count_rejected AS BIGINT)   AS record_count_rejected,
-  CAST(siad.validation_status AS STRING)       AS validation_status,
-  CAST(siad.pipeline_run_id AS STRING)         AS pipeline_run_id,
-  CAST(siad.run_start_ts AS TIMESTAMP)         AS run_start_ts,
-  CAST(siad.run_end_ts AS TIMESTAMP)           AS run_end_ts
-FROM ingestion_audit_daily siad
-""")
-
-# 4) Save output (single CSV file directly under TARGET_PATH)
-(
-    gold_ingestion_audit_daily_df.coalesce(1)
-    .write.mode("overwrite")
-    .option("header", "true")
-    .csv(f"{TARGET_PATH}/gold_ingestion_audit_daily.csv")
-)
+fs.rename(part_file_path, final_path)
+fs.delete(tmp_path, True)
 
 job.commit()
 ```
