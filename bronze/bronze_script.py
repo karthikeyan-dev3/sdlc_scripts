@@ -16,35 +16,21 @@ metadata = {
             'target_table': 'orders_bronze',
             'target_alias': 'ob',
             'mapping_details': 'sales_transactions_raw str',
-            'description': 'Direct mapping from sales_transactions_raw to orders_bronze. Columns: transaction_id -> order_id, store_id -> store_id, sale_amount -> order_total_amount, transaction_time -> order_timestamp.'
+            'description': 'Bronze orders table capturing one record per sales transaction from sales_transactions_raw. Maps: transaction_id -> order_id, store_id, sale_amount -> order_total_amount, transaction_time -> order_timestamp.'
         },
         {
             'target_schema': 'bronze',
             'target_table': 'order_items_bronze',
             'target_alias': 'oib',
             'mapping_details': 'sales_transactions_raw str',
-            'description': 'Direct mapping from sales_transactions_raw to order_items_bronze. Columns: transaction_id -> order_id, product_id -> product_id, quantity -> quantity.'
+            'description': 'Bronze order items table capturing line-item level details available in sales_transactions_raw (one product per transaction in this source). Maps: transaction_id -> order_id, product_id, quantity, sale_amount -> line_amount, transaction_time -> line_timestamp, store_id.'
         },
         {
             'target_schema': 'bronze',
-            'target_table': 'order_statuses_bronze',
-            'target_alias': 'osb',
-            'mapping_details': 'sales_transactions_raw str',
-            'description': "Direct mapping from sales_transactions_raw to order_statuses_bronze using a default status for all transactions (no status provided in source). Columns: transaction_id -> order_id, 'COMPLETED' (constant) -> status, transaction_time -> status_timestamp."
-        },
-        {
-            'target_schema': 'bronze',
-            'target_table': 'loads_bronze',
-            'target_alias': 'lb',
-            'mapping_details': 'sales_transactions_raw str',
-            'description': 'Load audit records derived per ingested row from sales_transactions_raw. Columns: transaction_id -> source_record_id, transaction_time -> source_event_time.'
-        },
-        {
-            'target_schema': 'bronze',
-            'target_table': 'source_files_bronze',
-            'target_alias': 'sfb',
-            'mapping_details': 'sales_transactions_raw str',
-            'description': 'Source file lineage placeholder derived from sales_transactions_raw ingestion context; no file-level fields exist in provided schema. Columns: transaction_id -> source_record_id.'
+            'target_table': 'etl_data_quality_daily_bronze',
+            'target_alias': 'dqdb',
+            'mapping_details': 'sales_transactions_raw str; products_raw pr; stores_raw sr',
+            'description': 'Bronze ETL data quality daily events table to record daily source-level DQ checks for each raw source (sales_transactions_raw, products_raw, stores_raw). Captures per-run/per-day metrics such as record_count, null_counts, and load_timestamp derived directly from each source without joins or aggregations.'
         }
     ],
     'columns': [
@@ -61,30 +47,30 @@ metadata = {
         {
             'source_column': "['str.store_id']",
             'source_type': 'STRING',
-            'source_nullable': 'accepted',
+            'source_nullable': 'not_accepted',
             'target_column': 'store_id',
             'target_type': 'STRING',
-            'target_nullable': 'accepted',
+            'target_nullable': 'not_accepted',
             'transformation': 'ob.store_id = str.store_id',
             'target_table': 'ob'
         },
         {
             'source_column': "['str.sale_amount']",
             'source_type': 'DECIMAL',
-            'source_nullable': 'accepted',
+            'source_nullable': 'not_accepted',
             'target_column': 'order_total_amount',
             'target_type': 'DECIMAL',
-            'target_nullable': 'accepted',
+            'target_nullable': 'not_accepted',
             'transformation': 'ob.order_total_amount = str.sale_amount',
             'target_table': 'ob'
         },
         {
             'source_column': "['str.transaction_time']",
             'source_type': 'TIMESTAMP',
-            'source_nullable': 'accepted',
+            'source_nullable': 'not_accepted',
             'target_column': 'order_timestamp',
             'target_type': 'TIMESTAMP',
-            'target_nullable': 'accepted',
+            'target_nullable': 'not_accepted',
             'transformation': 'ob.order_timestamp = str.transaction_time',
             'target_table': 'ob'
         },
@@ -101,82 +87,142 @@ metadata = {
         {
             'source_column': "['str.product_id']",
             'source_type': 'STRING',
-            'source_nullable': 'accepted',
+            'source_nullable': 'not_accepted',
             'target_column': 'product_id',
             'target_type': 'STRING',
-            'target_nullable': 'accepted',
+            'target_nullable': 'not_accepted',
             'transformation': 'oib.product_id = str.product_id',
             'target_table': 'oib'
         },
         {
             'source_column': "['str.quantity']",
             'source_type': 'INT',
-            'source_nullable': 'accepted',
+            'source_nullable': 'not_accepted',
             'target_column': 'quantity',
             'target_type': 'INT',
-            'target_nullable': 'accepted',
+            'target_nullable': 'not_accepted',
             'transformation': 'oib.quantity = str.quantity',
             'target_table': 'oib'
         },
         {
-            'source_column': "['str.transaction_id']",
-            'source_type': 'STRING',
+            'source_column': "['str.sale_amount']",
+            'source_type': 'DECIMAL',
             'source_nullable': 'not_accepted',
-            'target_column': 'order_id',
-            'target_type': 'STRING',
+            'target_column': 'line_amount',
+            'target_type': 'DECIMAL',
             'target_nullable': 'not_accepted',
-            'transformation': 'osb.order_id = str.transaction_id',
-            'target_table': 'osb'
-        },
-        {
-            'source_column': "['str.transaction_id']",
-            'source_type': 'STRING',
-            'source_nullable': 'not_accepted',
-            'target_column': 'status',
-            'target_type': 'STRING',
-            'target_nullable': 'not_accepted',
-            'transformation': "osb.status = 'COMPLETED'",
-            'target_table': 'osb'
+            'transformation': 'oib.line_amount = str.sale_amount',
+            'target_table': 'oib'
         },
         {
             'source_column': "['str.transaction_time']",
             'source_type': 'TIMESTAMP',
-            'source_nullable': 'accepted',
-            'target_column': 'status_timestamp',
+            'source_nullable': 'not_accepted',
+            'target_column': 'line_timestamp',
             'target_type': 'TIMESTAMP',
-            'target_nullable': 'accepted',
-            'transformation': 'osb.status_timestamp = str.transaction_time',
-            'target_table': 'osb'
+            'target_nullable': 'not_accepted',
+            'transformation': 'oib.line_timestamp = str.transaction_time',
+            'target_table': 'oib'
         },
         {
-            'source_column': "['str.transaction_id']",
+            'source_column': "['str.store_id']",
             'source_type': 'STRING',
             'source_nullable': 'not_accepted',
-            'target_column': 'source_record_id',
+            'target_column': 'store_id',
             'target_type': 'STRING',
             'target_nullable': 'not_accepted',
-            'transformation': 'lb.source_record_id = str.transaction_id',
-            'target_table': 'lb'
+            'transformation': 'oib.store_id = str.store_id',
+            'target_table': 'oib'
         },
         {
             'source_column': "['str.transaction_time']",
             'source_type': 'TIMESTAMP',
-            'source_nullable': 'accepted',
-            'target_column': 'source_event_time',
-            'target_type': 'TIMESTAMP',
-            'target_nullable': 'accepted',
-            'transformation': 'lb.source_event_time = str.transaction_time',
-            'target_table': 'lb'
+            'source_nullable': 'not_accepted',
+            'target_column': 'dq_event_date',
+            'target_type': 'DATE',
+            'target_nullable': 'not_accepted',
+            'transformation': 'dqdb.dq_event_date = CAST(str.transaction_time AS DATE)',
+            'target_table': 'dqdb'
         },
         {
             'source_column': "['str.transaction_id']",
             'source_type': 'STRING',
-            'source_nullable': 'not_accepted',
-            'target_column': 'source_record_id',
+            'source_nullable': 'accepted',
+            'target_column': 'record_id',
             'target_type': 'STRING',
+            'target_nullable': 'accepted',
+            'transformation': 'dqdb.record_id = str.transaction_id',
+            'target_table': 'dqdb'
+        },
+        {
+            'source_column': "['str.transaction_time']",
+            'source_type': 'TIMESTAMP',
+            'source_nullable': 'not_accepted',
+            'target_column': 'load_timestamp',
+            'target_type': 'TIMESTAMP',
             'target_nullable': 'not_accepted',
-            'transformation': 'sfb.source_record_id = str.transaction_id',
-            'target_table': 'sfb'
+            'transformation': 'dqdb.load_timestamp = str.transaction_time',
+            'target_table': 'dqdb'
+        },
+        {
+            'source_column': "['pr.product_id']",
+            'source_type': 'STRING',
+            'source_nullable': 'not_accepted',
+            'target_column': 'dq_event_date',
+            'target_type': 'DATE',
+            'target_nullable': 'not_accepted',
+            'transformation': 'dqdb.dq_event_date = CURRENT_DATE',
+            'target_table': 'dqdb'
+        },
+        {
+            'source_column': "['pr.product_id']",
+            'source_type': 'STRING',
+            'source_nullable': 'accepted',
+            'target_column': 'record_id',
+            'target_type': 'STRING',
+            'target_nullable': 'accepted',
+            'transformation': 'dqdb.record_id = pr.product_id',
+            'target_table': 'dqdb'
+        },
+        {
+            'source_column': "['pr.product_id']",
+            'source_type': 'STRING',
+            'source_nullable': 'not_accepted',
+            'target_column': 'load_timestamp',
+            'target_type': 'TIMESTAMP',
+            'target_nullable': 'not_accepted',
+            'transformation': 'dqdb.load_timestamp = CURRENT_TIMESTAMP',
+            'target_table': 'dqdb'
+        },
+        {
+            'source_column': "['sr.store_id']",
+            'source_type': 'STRING',
+            'source_nullable': 'not_accepted',
+            'target_column': 'dq_event_date',
+            'target_type': 'DATE',
+            'target_nullable': 'not_accepted',
+            'transformation': 'dqdb.dq_event_date = CURRENT_DATE',
+            'target_table': 'dqdb'
+        },
+        {
+            'source_column': "['sr.store_id']",
+            'source_type': 'STRING',
+            'source_nullable': 'accepted',
+            'target_column': 'record_id',
+            'target_type': 'STRING',
+            'target_nullable': 'accepted',
+            'transformation': 'dqdb.record_id = sr.store_id',
+            'target_table': 'dqdb'
+        },
+        {
+            'source_column': "['sr.store_id']",
+            'source_type': 'STRING',
+            'source_nullable': 'not_accepted',
+            'target_column': 'load_timestamp',
+            'target_type': 'TIMESTAMP',
+            'target_nullable': 'not_accepted',
+            'transformation': 'dqdb.load_timestamp = CURRENT_TIMESTAMP',
+            'target_table': 'dqdb'
         }
     ],
     'runtime_config': {
@@ -195,32 +241,40 @@ read_format = runtime_config.get('read_format')
 write_format = runtime_config.get('write_format')
 write_mode = runtime_config.get('write_mode')
 
-for table in metadata.get('tables', []):
-    mapping_details = table.get('mapping_details', '')
-    mapping_parts = mapping_details.split()
-    source_table = mapping_parts[0] if len(mapping_parts) > 0 else None
-    source_alias = mapping_parts[1] if len(mapping_parts) > 1 else None
+for table_meta in metadata.get('tables', []):
+    target_table = table_meta.get('target_table')
+    target_alias = table_meta.get('target_alias')
+    mapping_details = table_meta.get('mapping_details')
 
-    target_table = table.get('target_table')
-    target_alias = table.get('target_alias')
+    source_mappings = []
+    if mapping_details:
+        for part in mapping_details.split(';'):
+            part = part.strip()
+            if part:
+                tokens = part.split()
+                if len(tokens) >= 2:
+                    source_mappings.append((tokens[0].strip(), tokens[1].strip()))
+
+    if not source_mappings:
+        continue
+
+    source_table, source_alias = source_mappings[0]
 
     reader = spark.read.format(read_format)
     if read_format == 'csv':
         reader = reader.option('header', 'true').option('inferSchema', 'true')
 
-    df = reader.load(base_path + source_table + '.' + read_format)
+    df = reader.load(base_path + f"{source_table}.{read_format}")
     df = df.alias(source_alias)
 
     transformations = []
     for col_meta in metadata.get('columns', []):
         if col_meta.get('target_table') == target_alias:
-            transformation = col_meta.get('transformation', '')
-            if '=' in transformation:
+            transformation = col_meta.get('transformation')
+            target_col = col_meta.get('target_column')
+            if transformation and target_col and '=' in transformation:
                 rhs = transformation.split('=', 1)[1].strip()
-            else:
-                rhs = transformation.strip()
-            target_column = col_meta.get('target_column')
-            transformations.append(f"{rhs} as {target_column}")
+                transformations.append(f"{rhs} as {target_col}")
 
     df = df.selectExpr(*transformations)
 
@@ -228,6 +282,6 @@ for table in metadata.get('tables', []):
     if write_format == 'csv':
         writer = writer.option('header', 'true')
 
-    writer.save(target_path + target_table + '.' + write_format)
+    writer.save(target_path + f"{target_table}.{write_format}")
 
 job.commit()
