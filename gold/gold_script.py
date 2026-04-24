@@ -6,78 +6,148 @@ from awsglue.job import Job
 from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 
-# -----------------------------------------------------------------------------------
-# AWS Glue boilerplate
-# -----------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------------
+# AWS Glue Job Setup
+# ------------------------------------------------------------------------------------
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
-
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark: SparkSession = glueContext.spark_session
 job = Job(glueContext)
 job.init(args["JOB_NAME"], args)
 
-# -----------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------------
 # Config
-# -----------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------------
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-# -----------------------------------------------------------------------------------
-# TABLE: gold.gold_customer_orders
-# Source: silver.customer_orders_silver cos
-# -----------------------------------------------------------------------------------
-
-# 1) Read source table(s) from S3 (STRICT PATH FORMAT)
-customer_orders_silver_df = (
+# ====================================================================================
+# Source Read: silver.customer_orders (sco)
+# ====================================================================================
+df_sco = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/customer_orders_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/customer_orders.{FILE_FORMAT}/")
 )
+df_sco.createOrReplaceTempView("customer_orders")
 
-# 2) Create temp view(s)
-customer_orders_silver_df.createOrReplaceTempView("customer_orders_silver")
-
-# 3) Transform using Spark SQL (apply UDT mappings + required placeholders)
-gold_customer_orders_df = spark.sql("""
-    SELECT
-        CAST(TRIM(cos.order_id) AS STRING)                                  AS order_id,
-        CAST(cos.order_date AS DATE)                                       AS order_date,
-        CAST(TRIM(cos.order_status) AS STRING)                              AS order_status,
-        CAST(cos.order_total_amount AS DECIMAL(38, 18))                    AS order_total_amount,
-        CAST(cos.item_count AS INT)                                        AS item_count,
-        CAST(cos.s3_file_date AS DATE)                                     AS s3_file_date,
-        CAST(cos.load_timestamp AS TIMESTAMP)                              AS load_timestamp,
-        CAST(NULL AS STRING)                                               AS customer_id,     -- placeholder per UDT description
-        CAST(NULL AS STRING)                                               AS currency_code    -- placeholder per UDT description
-    FROM customer_orders_silver cos
+# ====================================================================================
+# Target: gold.gold_customer_orders (gco)
+#   Transformations (EXACT from UDT):
+#     gco.order_id = sco.order_id
+#     gco.order_date = sco.order_date
+#     gco.customer_id = sco.customer_id
+#     gco.order_total_amount = sco.order_total_amount
+#     gco.created_at = sco.created_at
+#     gco.updated_at = sco.updated_at
+#     gco.load_date = sco.load_date
+# ====================================================================================
+df_gco = spark.sql("""
+SELECT
+  CAST(sco.order_id AS STRING)            AS order_id,
+  CAST(sco.order_date AS DATE)            AS order_date,
+  CAST(sco.customer_id AS STRING)         AS customer_id,
+  CAST(sco.order_total_amount AS DECIMAL(38, 10)) AS order_total_amount,
+  CAST(sco.created_at AS TIMESTAMP)       AS created_at,
+  CAST(sco.updated_at AS TIMESTAMP)       AS updated_at,
+  CAST(sco.load_date AS DATE)             AS load_date
+FROM customer_orders sco
 """)
 
-gold_customer_orders_df.createOrReplaceTempView("gold_customer_orders")
-
-# 4) Write output as a SINGLE CSV file directly under TARGET_PATH (no subfolders)
-#    NOTE: coalesce(1) ensures a single data file; we then rename it to *.csv at the target path.
-output_tmp_path = f"{TARGET_PATH}/_tmp_gold_customer_orders"
-
 (
-    gold_customer_orders_df.coalesce(1)
+    df_gco.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(output_tmp_path)
+    .save(f"{TARGET_PATH}/gold_customer_orders.csv")
 )
 
-# Move the single part file to TARGET_PATH/gold_customer_orders.csv (no nesting)
-tmp_files = [f.path for f in dbutils.fs.ls(output_tmp_path) if f.path.endswith(".csv")]
-if len(tmp_files) != 1:
-    raise Exception(f"Expected exactly 1 CSV part file in {output_tmp_path}, found {len(tmp_files)}")
+# ====================================================================================
+# Source Read: silver.customer_order_items (scoi)
+# ====================================================================================
+df_scoi = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .option("inferSchema", "true")
+    .load(f"{SOURCE_PATH}/customer_order_items.{FILE_FORMAT}/")
+)
+df_scoi.createOrReplaceTempView("customer_order_items")
 
-final_output_path = f"{TARGET_PATH}/gold_customer_orders.csv"
-dbutils.fs.cp(tmp_files[0], final_output_path, True)
-dbutils.fs.rm(output_tmp_path, True)
+# ====================================================================================
+# Target: gold.gold_customer_order_items (gcoi)
+#   Transformations (EXACT from UDT):
+#     gcoi.order_id = scoi.order_id
+#     gcoi.order_item_id = scoi.order_item_id
+#     gcoi.product_id = scoi.product_id
+#     gcoi.quantity = scoi.quantity
+#     gcoi.unit_price = scoi.unit_price
+#     gcoi.line_amount = scoi.line_amount
+#     gcoi.load_date = scoi.load_date
+# ====================================================================================
+df_gcoi = spark.sql("""
+SELECT
+  CAST(scoi.order_id AS STRING)                 AS order_id,
+  CAST(scoi.order_item_id AS STRING)            AS order_item_id,
+  CAST(scoi.product_id AS STRING)               AS product_id,
+  CAST(scoi.quantity AS INT)                    AS quantity,
+  CAST(scoi.unit_price AS DECIMAL(38, 10))      AS unit_price,
+  CAST(scoi.line_amount AS DECIMAL(38, 10))     AS line_amount,
+  CAST(scoi.load_date AS DATE)                  AS load_date
+FROM customer_order_items scoi
+""")
 
-# -----------------------------------------------------------------------------------
+(
+    df_gcoi.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/gold_customer_order_items.csv")
+)
+
+# ====================================================================================
+# Source Read: silver.data_quality_daily_orders (sdqdo)
+# ====================================================================================
+df_sdqdo = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .option("inferSchema", "true")
+    .load(f"{SOURCE_PATH}/data_quality_daily_orders.{FILE_FORMAT}/")
+)
+df_sdqdo.createOrReplaceTempView("data_quality_daily_orders")
+
+# ====================================================================================
+# Target: gold.gold_data_quality_daily_orders (gdqdo)
+#   Transformations (EXACT from UDT):
+#     gdqdo.load_date = sdqdo.load_date
+#     gdqdo.total_records = sdqdo.total_records
+#     gdqdo.valid_records = sdqdo.valid_records
+#     gdqdo.invalid_records = sdqdo.invalid_records
+#     gdqdo.completeness_score_pct = sdqdo.completeness_score_pct
+#     gdqdo.accuracy_score_pct = sdqdo.accuracy_score_pct
+#     gdqdo.validation_run_timestamp = sdqdo.validation_run_timestamp
+# ====================================================================================
+df_gdqdo = spark.sql("""
+SELECT
+  CAST(sdqdo.load_date AS DATE)                      AS load_date,
+  CAST(sdqdo.total_records AS INT)                   AS total_records,
+  CAST(sdqdo.valid_records AS INT)                   AS valid_records,
+  CAST(sdqdo.invalid_records AS INT)                 AS invalid_records,
+  CAST(sdqdo.completeness_score_pct AS DECIMAL(38, 10)) AS completeness_score_pct,
+  CAST(sdqdo.accuracy_score_pct AS DECIMAL(38, 10))     AS accuracy_score_pct,
+  CAST(sdqdo.validation_run_timestamp AS TIMESTAMP)  AS validation_run_timestamp
+FROM data_quality_daily_orders sdqdo
+""")
+
+(
+    df_gdqdo.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/gold_data_quality_daily_orders.csv")
+)
+
 job.commit()
 ```
