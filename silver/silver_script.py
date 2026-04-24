@@ -6,205 +6,111 @@ from awsglue.job import Job
 from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 
-# ------------------------------------------------------------------------------------
-# AWS Glue bootstrap
-# ------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------
+# AWS Glue boilerplate
+# -----------------------------------------------------------------------------------
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
-
-sc = SparkContext()
-glueContext = GlueContext(sc)
-spark = glueContext.spark_session
-job = Job(glueContext)
+sc = SparkContext.getOrCreate()
+glue_context = GlueContext(sc)
+spark: SparkSession = glue_context.spark_session
+job = Job(glue_context)
 job.init(args["JOB_NAME"], args)
 
-# ------------------------------------------------------------------------------------
-# Config
-# ------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------
+# Parameters (as provided)
+# -----------------------------------------------------------------------------------
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 FILE_FORMAT = "csv"
 
-# Recommended for consistent SQL behavior
-spark.sql("SET spark.sql.legacy.timeParserPolicy=LEGACY")
+# -----------------------------------------------------------------------------------
+# TABLE: silver.customer_orders_silver
+# -----------------------------------------------------------------------------------
 
-# ------------------------------------------------------------------------------------
-# 1) Read source tables from S3 + create temp views (bronze)
-# ------------------------------------------------------------------------------------
-orders_bronze_df = (
+# 1) Read source tables from S3 (strict path format: {SOURCE_PATH}/table_name.{FILE_FORMAT}/)
+customer_orders_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/orders_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/customer_orders_bronze.{FILE_FORMAT}/")
 )
-orders_bronze_df.createOrReplaceTempView("orders_bronze")
 
-order_lines_bronze_df = (
+order_status_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/order_lines_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/order_status_bronze.{FILE_FORMAT}/")
 )
-order_lines_bronze_df.createOrReplaceTempView("order_lines_bronze")
 
-# ====================================================================================
-# TABLE: silver.orders_silver
-# - De-duplicate to one record per order_id (latest order_time)
-# - Conform types + derive order_date
-# - Add load_timestamp
-# ====================================================================================
-orders_silver_df = spark.sql("""
-WITH dedup AS (
-  SELECT
-    ob.*,
-    ROW_NUMBER() OVER (PARTITION BY ob.order_id ORDER BY ob.order_time DESC) AS rn
-  FROM orders_bronze ob
+# 2) Create temp views
+customer_orders_bronze_df.createOrReplaceTempView("customer_orders_bronze")
+order_status_bronze_df.createOrReplaceTempView("order_status_bronze")
+
+# 3) Spark SQL transformation (EXACT transformations from UDT)
+customer_orders_silver_df = spark.sql(
+    """
+    SELECT
+        TRIM(cob.order_id)                                         AS order_id,
+        CAST(MIN(cob.order_timestamp) AS DATE)                     AS order_date,
+        SUM(cob.sale_amount)                                       AS order_total_amount,
+        COALESCE(MAX(osb.status), 'COMPLETED')                     AS order_status,
+        CASE
+            WHEN TRIM(cob.order_id) IS NOT NULL
+             AND CAST(MIN(cob.order_timestamp) AS DATE) IS NOT NULL
+             AND SUM(cob.sale_amount) IS NOT NULL
+            THEN 'Y' ELSE 'N'
+        END                                                        AS record_valid_flag
+    FROM customer_orders_bronze cob
+    LEFT JOIN order_status_bronze osb
+        ON cob.order_id = osb.order_id
+    GROUP BY
+        TRIM(cob.order_id)
+    """
 )
-SELECT
-  CAST(ob.order_id AS STRING)                                 AS order_id,
-  CAST(ob.store_id AS STRING)                                 AS store_id,
-  CAST(ob.order_time AS TIMESTAMP)                            AS order_time,
-  CAST(CAST(ob.order_time AS TIMESTAMP) AS DATE)              AS order_date,
-  CAST(ob.order_total_amount AS DECIMAL(18,2))                AS order_total_amount,
-  current_timestamp()                                         AS load_timestamp
-FROM dedup ob
-WHERE ob.rn = 1
-""")
-orders_silver_df.createOrReplaceTempView("orders_silver")
 
+# 4) Save output as SINGLE CSV directly under TARGET_PATH (no subfolders)
+#    Write to a temporary directory then move/rename to {TARGET_PATH}/customer_orders_silver.csv
+tmp_out_dir = f"{TARGET_PATH}/__tmp_customer_orders_silver_csv_out"
+final_out_file = f"{TARGET_PATH}/customer_orders_silver.csv"
+
+# Ensure single partition -> single CSV part file
 (
-    orders_silver_df.coalesce(1)
+    customer_orders_silver_df.coalesce(1)
     .write.mode("overwrite")
+    .format("csv")
     .option("header", "true")
-    .csv(f"{TARGET_PATH}/orders_silver.csv")
+    .save(tmp_out_dir)
 )
 
-# ====================================================================================
-# TABLE: silver.order_lines_silver
-# - De-duplicate to one record per (order_id, product_id)
-# - Conform types
-# - Enforce non-negative quantity/amounts via CASE -> 0
-# - Add load_timestamp
-# ====================================================================================
-order_lines_silver_df = spark.sql("""
-WITH dedup AS (
-  SELECT
-    olb.*,
-    ROW_NUMBER() OVER (
-      PARTITION BY olb.order_id, olb.product_id
-      ORDER BY olb.order_id
-    ) AS rn
-  FROM order_lines_bronze olb
-)
-SELECT
-  CAST(olb.order_id AS STRING)                                AS order_id,
-  CAST(olb.product_id AS STRING)                              AS product_id,
-  CAST(CASE WHEN olb.quantity > 0 THEN olb.quantity ELSE 0 END AS INT)              AS quantity,
-  CAST(CASE WHEN olb.line_amount >= 0 THEN olb.line_amount ELSE 0 END AS DECIMAL(18,2)) AS line_amount,
-  current_timestamp()                                         AS load_timestamp
-FROM dedup olb
-WHERE olb.rn = 1
-""")
-order_lines_silver_df.createOrReplaceTempView("order_lines_silver")
+# Move single part file to the required final path (no subfolders)
+jvm = spark._jvm
+hadoop_conf = sc._jsc.hadoopConfiguration()
+fs = jvm.org.apache.hadoop.fs.FileSystem.get(hadoop_conf)
 
-(
-    order_lines_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .option("header", "true")
-    .csv(f"{TARGET_PATH}/order_lines_silver.csv")
-)
+tmp_path = jvm.org.apache.hadoop.fs.Path(tmp_out_dir)
+final_path = jvm.org.apache.hadoop.fs.Path(final_out_file)
 
-# ====================================================================================
-# TABLE: silver.order_validation_silver
-# - Order-level validation outcomes
-# - valid_order rules:
-#   order_id not null, order_time not null, order_total_amount >= 0,
-#   invalid_line_cnt = 0, valid_line_cnt > 0
-# - invalid_reason_code per UDT
-# - Add load_timestamp
-# ====================================================================================
-order_validation_silver_df = spark.sql("""
-WITH lc AS (
-  SELECT
-    order_id,
-    SUM(CASE WHEN quantity > 0 AND line_amount >= 0 THEN 1 ELSE 0 END) AS valid_line_cnt,
-    SUM(CASE WHEN quantity <= 0 OR line_amount < 0 THEN 1 ELSE 0 END)  AS invalid_line_cnt
-  FROM order_lines_silver
-  GROUP BY order_id
-)
-SELECT
-  CAST(os.order_id AS STRING)                                                    AS order_id,
-  CAST(COALESCE(lc.valid_line_cnt, 0) AS INT)                                     AS valid_line_cnt,
-  CAST(COALESCE(lc.invalid_line_cnt, 0) AS INT)                                   AS invalid_line_cnt,
-  CASE
-    WHEN os.order_id IS NOT NULL
-     AND os.order_time IS NOT NULL
-     AND os.order_total_amount >= 0
-     AND COALESCE(lc.invalid_line_cnt, 0) = 0
-     AND COALESCE(lc.valid_line_cnt, 0) > 0
-    THEN TRUE ELSE FALSE
-  END                                                                            AS is_valid_order,
-  CAST(
-    CASE
-      WHEN os.order_id IS NULL THEN 'MISSING_ORDER_ID'
-      WHEN os.order_time IS NULL THEN 'MISSING_ORDER_TIME'
-      WHEN os.order_total_amount < 0 THEN 'NEGATIVE_ORDER_TOTAL'
-      WHEN COALESCE(lc.valid_line_cnt, 0) = 0 THEN 'NO_VALID_LINES'
-      WHEN COALESCE(lc.invalid_line_cnt, 0) > 0 THEN 'HAS_INVALID_LINES'
-      ELSE 'VALID'
-    END
-    AS STRING
-  )                                                                              AS invalid_reason_code,
-  current_timestamp()                                                            AS load_timestamp
-FROM orders_silver os
-LEFT JOIN lc
-  ON os.order_id = lc.order_id
-""")
-order_validation_silver_df.createOrReplaceTempView("order_validation_silver")
+# Delete final file if it exists (overwrite semantics)
+if fs.exists(final_path):
+    fs.delete(final_path, True)
 
-(
-    order_validation_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .option("header", "true")
-    .csv(f"{TARGET_PATH}/order_validation_silver.csv")
-)
+# Find the single part file under the temp directory
+files = fs.listStatus(tmp_path)
+part_file_path = None
+for f in files:
+    name = f.getPath().getName()
+    if name.startswith("part-") and name.endswith(".csv"):
+        part_file_path = f.getPath()
+        break
 
-# ====================================================================================
-# TABLE: silver.order_amounts_silver
-# - Monetary measures for gold
-# - gross_sales_amount = CASE WHEN is_valid_order THEN order_total_amount ELSE 0 END
-# - net_sales_amount = gross_sales_amount
-# - discount/tax/shipping = 0
-# - order_date = CAST(order_time AS DATE)
-# - Add load_timestamp
-# ====================================================================================
-order_amounts_silver_df = spark.sql("""
-SELECT
-  CAST(os.order_id AS STRING)                                                     AS order_id,
-  CAST(CAST(os.order_time AS TIMESTAMP) AS DATE)                                   AS order_date,
-  CAST(
-    CASE WHEN ovs.is_valid_order THEN os.order_total_amount ELSE 0 END
-    AS DECIMAL(18,2)
-  )                                                                               AS gross_sales_amount,
-  CAST(
-    CASE WHEN ovs.is_valid_order THEN os.order_total_amount ELSE 0 END
-    AS DECIMAL(18,2)
-  )                                                                               AS net_sales_amount,
-  CAST(0 AS DECIMAL(18,2))                                                        AS discount_amount,
-  CAST(0 AS DECIMAL(18,2))                                                        AS tax_amount,
-  CAST(0 AS DECIMAL(18,2))                                                        AS shipping_amount,
-  current_timestamp()                                                             AS load_timestamp
-FROM orders_silver os
-LEFT JOIN order_validation_silver ovs
-  ON os.order_id = ovs.order_id
-""")
-order_amounts_silver_df.createOrReplaceTempView("order_amounts_silver")
+if part_file_path is None:
+    raise Exception(f"No part CSV file found in temporary output directory: {tmp_out_dir}")
 
-(
-    order_amounts_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .option("header", "true")
-    .csv(f"{TARGET_PATH}/order_amounts_silver.csv")
-)
+# Rename/move part file to final {TARGET_PATH}/customer_orders_silver.csv
+fs.rename(part_file_path, final_path)
+
+# Cleanup temp output dir
+fs.delete(tmp_path, True)
 
 job.commit()
 ```
