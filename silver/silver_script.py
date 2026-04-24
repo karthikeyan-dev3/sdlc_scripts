@@ -1,194 +1,275 @@
 ```python
 import sys
-from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
 from awsglue.job import Job
+from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 
 # -----------------------------------------------------------------------------------
-# Glue job bootstrap
+# AWS Glue bootstrap
 # -----------------------------------------------------------------------------------
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
-
-sc = SparkContext()
-glueContext = GlueContext(sc)
-spark: SparkSession = glueContext.spark_session
-job = Job(glueContext)
+sc = SparkContext.getOrCreate()
+glue_context = GlueContext(sc)
+spark: SparkSession = glue_context.spark_session
+job = Job(glue_context)
 job.init(args["JOB_NAME"], args)
 
-# -----------------------------------------------------------------------------------
-# Parameters (as provided)
-# -----------------------------------------------------------------------------------
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 FILE_FORMAT = "csv"
 
-# Recommended CSV read options (adjust if your bronze differs)
-csv_read_options = {
-    "header": "true",
-    "inferSchema": "true",
-    "mode": "PERMISSIVE",
-}
+# Recommended for CSV I/O
+spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
 
-# For single CSV output file
-spark.conf.set("spark.sql.sources.commitProtocolClass", "org.apache.spark.sql.execution.datasources.SQLHadoopMapReduceCommitProtocol")
-spark.conf.set("mapreduce.fileoutputcommitter.marksuccessfuljobs", "false")
-
-# ===================================================================================
-# TABLE: orders_silver
-# ===================================================================================
-
-# 1) Read source tables
+# -----------------------------------------------------------------------------------
+# 1) Read source tables from S3 (NO LOOPS; explicit per table)
+# -----------------------------------------------------------------------------------
 orders_bronze_df = (
     spark.read.format(FILE_FORMAT)
-    .options(**csv_read_options)
+    .option("header", "true")
+    .option("inferSchema", "true")
     .load(f"{SOURCE_PATH}/orders_bronze.{FILE_FORMAT}/")
 )
 
+order_financials_bronze_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .option("inferSchema", "true")
+    .load(f"{SOURCE_PATH}/order_financials_bronze.{FILE_FORMAT}/")
+)
+
+order_payments_bronze_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .option("inferSchema", "true")
+    .load(f"{SOURCE_PATH}/order_payments_bronze.{FILE_FORMAT}/")
+)
+
+order_shipping_addresses_bronze_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .option("inferSchema", "true")
+    .load(f"{SOURCE_PATH}/order_shipping_addresses_bronze.{FILE_FORMAT}/")
+)
+
+order_customers_bronze_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .option("inferSchema", "true")
+    .load(f"{SOURCE_PATH}/order_customers_bronze.{FILE_FORMAT}/")
+)
+
+# -----------------------------------------------------------------------------------
 # 2) Create temp views
+# -----------------------------------------------------------------------------------
 orders_bronze_df.createOrReplaceTempView("orders_bronze")
+order_financials_bronze_df.createOrReplaceTempView("order_financials_bronze")
+order_payments_bronze_df.createOrReplaceTempView("order_payments_bronze")
+order_shipping_addresses_bronze_df.createOrReplaceTempView("order_shipping_addresses_bronze")
+order_customers_bronze_df.createOrReplaceTempView("order_customers_bronze")
 
-# 3) SQL transformations (dedup to latest per order_id by order_timestamp DESC; tie-breaker: highest order_total_amount)
-orders_silver_df = spark.sql("""
-WITH ranked AS (
-    SELECT
-        ob.*,
-        ROW_NUMBER() OVER (
-            PARTITION BY ob.order_id
-            ORDER BY
-                ob.order_timestamp DESC,
-                CAST(ob.order_total_amount AS DECIMAL(18,2)) DESC
-        ) AS rn
-    FROM orders_bronze ob
+# ===================================================================================
+# TARGET TABLE: silver_orders
+# ===================================================================================
+silver_orders_sql = """
+WITH base AS (
+  SELECT
+    CAST(ob.transaction_id AS STRING)                                           AS order_id,
+    MIN(CAST(ob.transaction_time AS TIMESTAMP)) OVER (PARTITION BY ob.transaction_id) AS order_timestamp,
+    CAST(MIN(CAST(ob.transaction_time AS TIMESTAMP)) OVER (PARTITION BY ob.transaction_id) AS DATE) AS order_date,
+    CAST(ob.store_id AS STRING)                                                 AS store_id,
+    CAST(SUM(COALESCE(CAST(ob.quantity AS INT), 0)) OVER (PARTITION BY ob.transaction_id) AS INT) AS items_count,
+    ROW_NUMBER() OVER (
+      PARTITION BY ob.transaction_id
+      ORDER BY
+        CASE WHEN ob.transaction_time IS NULL THEN 1 ELSE 0 END,
+        CAST(ob.transaction_time AS TIMESTAMP) ASC
+    ) AS rn
+  FROM orders_bronze ob
+  WHERE ob.transaction_id IS NOT NULL
 )
 SELECT
-    ob.order_id                                                        AS order_id,
-    CAST(ob.order_timestamp AS DATE)                                    AS order_date,
-    ob.store_id                                                         AS customer_id,
-    'COMPLETED'                                                         AS order_status,
-    CAST(ob.order_total_amount AS DECIMAL(18,2))                         AS order_total_amount,
-    'USD'                                                               AS currency_code,
-    'UNKNOWN'                                                           AS payment_method,
-    'UNKNOWN'                                                           AS shipping_method,
-    'UNKNOWN'                                                           AS ship_to_country_code,
-    'sales_transactions_raw'                                            AS record_source,
-    CURRENT_DATE                                                        AS ingestion_date
-FROM ranked ob
-WHERE ob.rn = 1
-""")
+  order_id,
+  order_timestamp,
+  order_date,
+  store_id,
+  items_count
+FROM base
+WHERE rn = 1
+"""
 
-# 4) Save output (single CSV file directly under TARGET_PATH)
+silver_orders_df = spark.sql(silver_orders_sql)
+
 (
-    orders_silver_df.coalesce(1)
+    silver_orders_df.coalesce(1)
     .write.mode("overwrite")
+    .format("csv")
     .option("header", "true")
-    .csv(f"{TARGET_PATH}/orders_silver.csv")
+    .save(f"{TARGET_PATH}/silver_orders.csv")
 )
 
 # ===================================================================================
-# TABLE: order_items_silver
+# TARGET TABLE: silver_order_financials
 # ===================================================================================
+silver_order_financials_sql = """
+WITH base AS (
+  SELECT
+    CAST(ofb.transaction_id AS STRING) AS order_id,
+    CAST(SUM(COALESCE(CAST(ofb.sale_amount AS DECIMAL(18,2)), CAST(0 AS DECIMAL(18,2))))
+         OVER (PARTITION BY ofb.transaction_id) AS DECIMAL(18,2)) AS order_subtotal_amount,
+    CAST(0 AS DECIMAL(18,2)) AS order_tax_amount,
+    CAST(0 AS DECIMAL(18,2)) AS order_shipping_amount,
+    CAST(0 AS DECIMAL(18,2)) AS order_discount_amount,
+    CAST(SUM(COALESCE(CAST(ofb.sale_amount AS DECIMAL(18,2)), CAST(0 AS DECIMAL(18,2))))
+         OVER (PARTITION BY ofb.transaction_id) AS DECIMAL(18,2)) AS order_total_amount,
+    CAST('USD' AS STRING) AS currency_code,
+    ROW_NUMBER() OVER (
+      PARTITION BY ofb.transaction_id
+      ORDER BY ofb.transaction_id
+    ) AS rn
+  FROM order_financials_bronze ofb
+  WHERE ofb.transaction_id IS NOT NULL
+)
+SELECT
+  order_id,
+  order_subtotal_amount,
+  order_tax_amount,
+  order_shipping_amount,
+  order_discount_amount,
+  (order_subtotal_amount + order_tax_amount + order_shipping_amount - order_discount_amount) AS order_total_amount,
+  currency_code
+FROM base
+WHERE rn = 1
+"""
 
-# 1) Read source tables
-order_items_bronze_df = (
-    spark.read.format(FILE_FORMAT)
-    .options(**csv_read_options)
-    .load(f"{SOURCE_PATH}/order_items_bronze.{FILE_FORMAT}/")
+silver_order_financials_df = spark.sql(silver_order_financials_sql)
+
+(
+    silver_order_financials_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/silver_order_financials.csv")
 )
 
-# 2) Create temp views
-order_items_bronze_df.createOrReplaceTempView("order_items_bronze")
+# ===================================================================================
+# TARGET TABLE: silver_order_payments
+# ===================================================================================
+silver_order_payments_sql = """
+WITH base AS (
+  SELECT
+    CAST(opb.transaction_id AS STRING) AS order_id,
+    MAX(CAST(opb.transaction_time AS TIMESTAMP)) OVER (PARTITION BY opb.transaction_id) AS payment_timestamp,
+    CAST(SUM(COALESCE(CAST(opb.sale_amount AS DECIMAL(18,2)), CAST(0 AS DECIMAL(18,2))))
+         OVER (PARTITION BY opb.transaction_id) AS DECIMAL(18,2)) AS payment_amount,
+    CAST('UNKNOWN' AS STRING) AS payment_method,
+    ROW_NUMBER() OVER (
+      PARTITION BY opb.transaction_id
+      ORDER BY
+        CASE WHEN opb.transaction_time IS NULL THEN 1 ELSE 0 END,
+        CAST(opb.transaction_time AS TIMESTAMP) DESC
+    ) AS rn
+  FROM order_payments_bronze opb
+  WHERE opb.transaction_id IS NOT NULL
+)
+SELECT
+  order_id,
+  payment_timestamp,
+  payment_amount,
+  payment_method
+FROM base
+WHERE rn = 1
+"""
 
-# 3) SQL transformations (filter invalids; deduplicate; deterministic hash ID; unit price; ingestion_date)
-order_items_silver_df = spark.sql("""
-WITH cleaned AS (
-    SELECT
-        oib.order_id                                                   AS order_id,
-        oib.product_id                                                 AS product_id,
-        CAST(oib.quantity AS INT)                                      AS quantity_int,
-        CAST(oib.line_total_amount AS DECIMAL(18,2))                   AS line_total_amount_dec,
-        oib.transaction_time                                           AS transaction_time
-    FROM order_items_bronze oib
-    WHERE
-        CAST(oib.quantity AS INT) > 0
-        AND oib.line_total_amount IS NOT NULL
+silver_order_payments_df = spark.sql(silver_order_payments_sql)
+
+(
+    silver_order_payments_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/silver_order_payments.csv")
+)
+
+# ===================================================================================
+# TARGET TABLE: silver_order_shipping_addresses
+# ===================================================================================
+silver_order_shipping_addresses_sql = """
+WITH orders_dedup AS (
+  SELECT
+    CAST(ob.transaction_id AS STRING) AS order_id,
+    CAST(ob.store_id AS STRING)       AS store_id,
+    ROW_NUMBER() OVER (
+      PARTITION BY ob.transaction_id
+      ORDER BY
+        CASE WHEN ob.transaction_time IS NULL THEN 1 ELSE 0 END,
+        CAST(ob.transaction_time AS TIMESTAMP) ASC
+    ) AS rn
+  FROM orders_bronze ob
+  WHERE ob.transaction_id IS NOT NULL
 ),
-deduped AS (
-    SELECT
-        c.*,
-        ROW_NUMBER() OVER (
-            PARTITION BY
-                c.order_id,
-                c.product_id,
-                c.transaction_time,
-                c.quantity_int,
-                c.line_total_amount_dec
-            ORDER BY c.transaction_time DESC
-        ) AS rn
-    FROM cleaned c
+orders_distinct AS (
+  SELECT
+    order_id,
+    store_id
+  FROM orders_dedup
+  WHERE rn = 1
 )
 SELECT
-    d.order_id                                                                 AS order_id,
-    CAST(
-        hash(d.order_id, d.product_id, d.transaction_time, d.quantity_int, d.line_total_amount_dec)
-        AS STRING
-    )                                                                          AS order_item_id,
-    d.product_id                                                               AS product_id,
-    d.quantity_int                                                             AS quantity,
-    ROUND(d.line_total_amount_dec / NULLIF(d.quantity_int, 0), 2)              AS unit_price_amount,
-    d.line_total_amount_dec                                                    AS line_total_amount,
-    CAST(d.transaction_time AS DATE)                                           AS ingestion_date
-FROM deduped d
-WHERE d.rn = 1
-""")
+  od.order_id AS order_id,
+  CAST(osab.city AS STRING)  AS shipping_city,
+  CAST(osab.state AS STRING) AS shipping_state,
+  od.store_id AS store_id,
+  CAST('UNKNOWN' AS STRING)  AS shipping_country
+FROM orders_distinct od
+LEFT JOIN order_shipping_addresses_bronze osab
+  ON od.store_id = osab.store_id
+"""
 
-# 4) Save output (single CSV file directly under TARGET_PATH)
+silver_order_shipping_addresses_df = spark.sql(silver_order_shipping_addresses_sql)
+
 (
-    order_items_silver_df.coalesce(1)
+    silver_order_shipping_addresses_df.coalesce(1)
     .write.mode("overwrite")
+    .format("csv")
     .option("header", "true")
-    .csv(f"{TARGET_PATH}/order_items_silver.csv")
+    .save(f"{TARGET_PATH}/silver_order_shipping_addresses.csv")
 )
 
 # ===================================================================================
-# TABLE: daily_etl_run_metrics_silver
+# TARGET TABLE: silver_order_customers
 # ===================================================================================
-
-# 1) Read source tables
-daily_etl_run_metrics_bronze_df = (
-    spark.read.format(FILE_FORMAT)
-    .options(**csv_read_options)
-    .load(f"{SOURCE_PATH}/daily_etl_run_metrics_bronze.{FILE_FORMAT}/")
+silver_order_customers_sql = """
+WITH base AS (
+  SELECT
+    CAST(ocb.transaction_id AS STRING) AS order_id,
+    CONCAT('STORE_', COALESCE(CAST(ocb.store_id AS STRING), 'UNKNOWN')) AS customer_id,
+    ROW_NUMBER() OVER (
+      PARTITION BY ocb.transaction_id
+      ORDER BY
+        CASE WHEN ocb.transaction_time IS NULL THEN 1 ELSE 0 END,
+        CAST(ocb.transaction_time AS TIMESTAMP) DESC
+    ) AS rn
+  FROM order_customers_bronze ocb
+  WHERE ocb.transaction_id IS NOT NULL
 )
-
-# 2) Create temp views
-daily_etl_run_metrics_bronze_df.createOrReplaceTempView("daily_etl_run_metrics_bronze")
-
-# 3) SQL transformations (aggregate by load_date; derive run window; counts; duration)
-daily_etl_run_metrics_silver_df = spark.sql("""
 SELECT
-    dermb.load_date                                             AS run_date,
-    'sales_transactions_raw'                                    AS dataset_name,
-    COUNT(dermb.source_transaction_id)                          AS records_read_count,
-    COUNT(dermb.source_transaction_id)                          AS records_loaded_count,
-    CAST(0 AS BIGINT)                                           AS records_rejected_count,
-    MIN(dermb.ingestion_timestamp)                              AS load_start_ts,
-    MAX(dermb.ingestion_timestamp)                              AS load_end_ts,
-    CAST(
-        (unix_timestamp(MAX(dermb.ingestion_timestamp)) - unix_timestamp(MIN(dermb.ingestion_timestamp))) / 60
-        AS INT
-    )                                                           AS duration_minutes
-FROM daily_etl_run_metrics_bronze dermb
-GROUP BY dermb.load_date
-""")
+  order_id,
+  customer_id
+FROM base
+WHERE rn = 1
+"""
 
-# 4) Save output (single CSV file directly under TARGET_PATH)
+silver_order_customers_df = spark.sql(silver_order_customers_sql)
+
 (
-    daily_etl_run_metrics_silver_df.coalesce(1)
+    silver_order_customers_df.coalesce(1)
     .write.mode("overwrite")
+    .format("csv")
     .option("header", "true")
-    .csv(f"{TARGET_PATH}/daily_etl_run_metrics_silver.csv")
+    .save(f"{TARGET_PATH}/silver_order_customers.csv")
 )
 
 job.commit()
