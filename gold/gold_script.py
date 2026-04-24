@@ -1,104 +1,145 @@
 ```python
 import sys
+from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
 from awsglue.job import Job
-from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 
-# ------------------------------------------------------------------------------------
-# Glue / Spark bootstrap
-# ------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------
+# AWS Glue Job Init
+# -----------------------------------------------------------------------------------
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
-sc = SparkContext.getOrCreate()
+sc = SparkContext()
 glueContext = GlueContext(sc)
-spark: SparkSession = glueContext.spark_session
+spark = glueContext.spark_session
 job = Job(glueContext)
 job.init(args["JOB_NAME"], args)
 
-# ------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------
 # Parameters (as provided)
-# ------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-# Recommended CSV options (kept explicit and consistent)
-CSV_READ_OPTIONS = {
-    "header": "true",
-    "inferSchema": "true",
-    "quote": "\"",
-    "escape": "\"",
-    "multiLine": "false",
-}
-
-# ------------------------------------------------------------------------------------
-# TABLE: gold.customer_orders_gold
+# ===================================================================================
+# Target Table: gold.gold_customer_orders_daily
 # Sources:
-#   silver.customer_orders_silver cos
-#   silver.customers_silver cus
-#   silver.order_statuses_silver oss  (single-row default via 1=1)
-#   silver.currencies_silver cur      (single-row default via 1=1)
-# ------------------------------------------------------------------------------------
+#  - silver.order_amounts_silver oas
+#  - silver.orders_silver os
+#  - silver.order_validation_silver ovs
+#  - silver.order_lines_silver ols
+# ===================================================================================
 
-# 1) Read source tables from S3 (STRICT path format: f"{SOURCE_PATH}/table_name.{FILE_FORMAT}/")
-customer_orders_silver_df = (
+# -------------------------------------
+# 1) Read source tables from S3
+# -------------------------------------
+oas_df = (
     spark.read.format(FILE_FORMAT)
-    .options(**CSV_READ_OPTIONS)
-    .load(f"{SOURCE_PATH}/customer_orders_silver.{FILE_FORMAT}/")
-)
-customers_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .options(**CSV_READ_OPTIONS)
-    .load(f"{SOURCE_PATH}/customers_silver.{FILE_FORMAT}/")
-)
-order_statuses_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .options(**CSV_READ_OPTIONS)
-    .load(f"{SOURCE_PATH}/order_statuses_silver.{FILE_FORMAT}/")
-)
-currencies_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .options(**CSV_READ_OPTIONS)
-    .load(f"{SOURCE_PATH}/currencies_silver.{FILE_FORMAT}/")
+    .option("header", "true")
+    .option("inferSchema", "true")
+    .load(f"{SOURCE_PATH}/order_amounts_silver.{FILE_FORMAT}/")
 )
 
+os_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .option("inferSchema", "true")
+    .load(f"{SOURCE_PATH}/orders_silver.{FILE_FORMAT}/")
+)
+
+ovs_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .option("inferSchema", "true")
+    .load(f"{SOURCE_PATH}/order_validation_silver.{FILE_FORMAT}/")
+)
+
+ols_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .option("inferSchema", "true")
+    .load(f"{SOURCE_PATH}/order_lines_silver.{FILE_FORMAT}/")
+)
+
+# -------------------------------------
 # 2) Create temp views
-customer_orders_silver_df.createOrReplaceTempView("customer_orders_silver")
-customers_silver_df.createOrReplaceTempView("customers_silver")
-order_statuses_silver_df.createOrReplaceTempView("order_statuses_silver")
-currencies_silver_df.createOrReplaceTempView("currencies_silver")
+# -------------------------------------
+oas_df.createOrReplaceTempView("order_amounts_silver")
+os_df.createOrReplaceTempView("orders_silver")
+ovs_df.createOrReplaceTempView("order_validation_silver")
+ols_df.createOrReplaceTempView("order_lines_silver")
 
-# 3) Transform using Spark SQL (apply EXACT UDT mappings)
-customer_orders_gold_df = spark.sql(
+# -------------------------------------
+# 3) Transform using Spark SQL (EXACT UDT intent)
+#    - One row per order_date
+#    - Aggregations by oas.order_date
+#    - avg_order_value = SUM(net_sales_amount) / NULLIF(COUNT(DISTINCT order_id), 0)
+#    - load_timestamp = MAX(GREATEST(...)) by order_date
+# -------------------------------------
+gold_customer_orders_daily_df = spark.sql(
     """
     SELECT
-        CAST(cos.order_id AS STRING)                         AS order_id,
-        CAST(cos.order_date AS DATE)                         AS order_date,
-        CAST(cus.customer_id AS STRING)                      AS customer_id,
-        CAST(oss.order_status AS STRING)                     AS order_status,
-        CAST(cos.order_total_amount AS DECIMAL(38, 18))      AS order_total_amount,
-        CAST(cur.currency_code AS STRING)                    AS currency_code
-    FROM customer_orders_silver cos
-    LEFT JOIN customers_silver cus
-        ON cos.customer_id = cus.customer_id
-    LEFT JOIN order_statuses_silver oss
-        ON 1 = 1
-    LEFT JOIN currencies_silver cur
-        ON 1 = 1
+        CAST(oas.order_date AS DATE) AS order_date,
+
+        CAST(COUNT(DISTINCT os.order_id) AS INT) AS total_orders,
+        CAST(COUNT(ols.order_id) AS INT) AS total_order_lines,
+        CAST(COALESCE(SUM(CAST(ols.quantity AS INT)), 0) AS INT) AS total_quantity,
+
+        CAST(COALESCE(SUM(CAST(oas.gross_sales_amount AS DECIMAL(38, 10))), 0) AS DECIMAL(38, 10)) AS gross_sales_amount,
+        CAST(COALESCE(SUM(CAST(oas.net_sales_amount   AS DECIMAL(38, 10))), 0) AS DECIMAL(38, 10)) AS net_sales_amount,
+        CAST(COALESCE(SUM(CAST(oas.discount_amount    AS DECIMAL(38, 10))), 0) AS DECIMAL(38, 10)) AS discount_amount,
+        CAST(COALESCE(SUM(CAST(oas.tax_amount         AS DECIMAL(38, 10))), 0) AS DECIMAL(38, 10)) AS tax_amount,
+        CAST(COALESCE(SUM(CAST(oas.shipping_amount    AS DECIMAL(38, 10))), 0) AS DECIMAL(38, 10)) AS shipping_amount,
+
+        CAST(
+            COALESCE(SUM(CAST(oas.net_sales_amount AS DECIMAL(38, 10))), 0)
+            /
+            NULLIF(COUNT(DISTINCT os.order_id), 0)
+            AS DECIMAL(38, 10)
+        ) AS avg_order_value,
+
+        CAST(
+            COALESCE(SUM(CASE WHEN CAST(ovs.is_valid_order AS BOOLEAN) THEN 1 ELSE 0 END), 0)
+            AS INT
+        ) AS valid_orders_count,
+
+        CAST(
+            COALESCE(SUM(CASE WHEN CAST(ovs.is_valid_order AS BOOLEAN) THEN 0 ELSE 1 END), 0)
+            AS INT
+        ) AS invalid_orders_count,
+
+        MAX(
+            GREATEST(
+                CAST(oas.load_timestamp AS TIMESTAMP),
+                CAST(os.load_timestamp  AS TIMESTAMP),
+                CAST(ovs.load_timestamp AS TIMESTAMP),
+                CAST(ols.load_timestamp AS TIMESTAMP)
+            )
+        ) AS load_timestamp
+
+    FROM order_amounts_silver oas
+    INNER JOIN orders_silver os
+        ON oas.order_id = os.order_id
+    INNER JOIN order_validation_silver ovs
+        ON oas.order_id = ovs.order_id
+    LEFT JOIN order_lines_silver ols
+        ON oas.order_id = ols.order_id
+    GROUP BY CAST(oas.order_date AS DATE)
     """
 )
 
-# 4) Write output (SINGLE CSV file directly under TARGET_PATH; no subfolders)
-#    Output path MUST be: TARGET_PATH + "/" + target_table.csv
-output_path_customer_orders_gold = f"{TARGET_PATH}/customer_orders_gold.csv"
-
+# -------------------------------------
+# 4) Save output (SINGLE CSV file directly under TARGET_PATH)
+#    Output path MUST be: s3://.../gold_customer_orders_daily.csv
+# -------------------------------------
 (
-    customer_orders_gold_df.coalesce(1)
+    gold_customer_orders_daily_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(output_path_customer_orders_gold)
+    .save(f"{TARGET_PATH}/gold_customer_orders_daily.csv")
 )
 
 job.commit()
