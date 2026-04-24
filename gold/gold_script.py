@@ -7,10 +7,9 @@ from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 
 # ------------------------------------------------------------------------------------
-# AWS Glue Boilerplate
+# AWS Glue init
 # ------------------------------------------------------------------------------------
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
-
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark: SparkSession = glueContext.spark_session
@@ -18,116 +17,188 @@ job = Job(glueContext)
 job.init(args["JOB_NAME"], args)
 
 # ------------------------------------------------------------------------------------
-# Parameters (as provided)
+# Config
 # ------------------------------------------------------------------------------------
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-# Recommended CSV options (safe defaults)
-spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
-
-csv_read_options = {
-    "header": "true",
-    "inferSchema": "true",
-    "mode": "PERMISSIVE"
-}
-
-csv_write_options = {
-    "header": "true",
-    "quote": '"',
-    "escape": '"'
-}
+spark.conf.set("spark.sql.session.timeZone", "UTC")
+spark.conf.set("spark.sql.legacy.timeParserPolicy", "LEGACY")
 
 # ====================================================================================
-# SOURCE: silver.customer_orders
-# TARGET: gold.gold_customer_orders
+# SOURCE: silver.orders_silver  -> TARGET: gold.gold_orders
 # ====================================================================================
-customer_orders_src_df = (
+
+# 1) Read source table from S3 (STRICT PATH FORMAT)
+orders_silver_df = (
     spark.read.format(FILE_FORMAT)
-    .options(**csv_read_options)
-    .load(f"{SOURCE_PATH}/customer_orders.{FILE_FORMAT}/")
+    .option("header", "true")
+    .option("inferSchema", "true")
+    .load(f"{SOURCE_PATH}/orders_silver.{FILE_FORMAT}/")
 )
-customer_orders_src_df.createOrReplaceTempView("customer_orders")
 
-gold_customer_orders_df = spark.sql("""
-SELECT
-    CAST(sco.order_id AS STRING)                          AS order_id,
-    CAST(sco.order_date AS DATE)                          AS order_date,
-    CAST(sco.customer_id AS STRING)                       AS customer_id,
-    CAST(sco.order_status AS STRING)                      AS order_status,
-    CAST(sco.currency_code AS STRING)                     AS currency_code,
-    CAST(sco.order_total_amount AS DECIMAL(38, 10))       AS order_total_amount,
-    CAST(sco.source_file_date AS DATE)                    AS source_file_date
-FROM customer_orders sco
-""")
+# 2) Create temp view
+orders_silver_df.createOrReplaceTempView("orders_silver")
 
+# 3) Transform using Spark SQL (casts + optional ROW_NUMBER dedup pattern)
+gold_orders_df = spark.sql(
+    """
+    WITH base AS (
+      SELECT
+        CAST(os.order_id AS STRING)                          AS order_id,
+        CAST(os.order_date AS DATE)                          AS order_date,
+        CAST(os.customer_id AS STRING)                       AS customer_id,
+        CAST(os.order_status AS STRING)                      AS order_status,
+        CAST(os.order_total_amount AS DECIMAL(18,2))         AS order_total_amount,
+        CAST(os.currency_code AS STRING)                     AS currency_code,
+        CAST(os.payment_method AS STRING)                    AS payment_method,
+        CAST(os.shipping_method AS STRING)                   AS shipping_method,
+        CAST(os.ship_to_country_code AS STRING)              AS ship_to_country_code,
+        CAST(os.record_source AS STRING)                     AS record_source,
+        CAST(os.ingestion_date AS DATE)                      AS ingestion_date,
+        ROW_NUMBER() OVER (
+          PARTITION BY os.order_id
+          ORDER BY os.ingestion_date DESC
+        ) AS rn
+      FROM orders_silver os
+    )
+    SELECT
+      order_id,
+      order_date,
+      customer_id,
+      order_status,
+      order_total_amount,
+      currency_code,
+      payment_method,
+      shipping_method,
+      ship_to_country_code,
+      record_source,
+      ingestion_date
+    FROM base
+    WHERE rn = 1
+    """
+)
+
+# 4) Write output as SINGLE CSV file directly under TARGET_PATH (no subfolders)
 (
-    gold_customer_orders_df.coalesce(1)
+    gold_orders_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
-    .options(**csv_write_options)
-    .save(f"{TARGET_PATH}/gold_customer_orders.csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/gold_orders.csv")
 )
 
 # ====================================================================================
-# SOURCE: silver.customer_order_items
-# TARGET: gold.gold_customer_order_items
+# SOURCE: silver.order_items_silver  -> TARGET: gold.gold_order_items
 # ====================================================================================
-customer_order_items_src_df = (
+
+# 1) Read source table from S3 (STRICT PATH FORMAT)
+order_items_silver_df = (
     spark.read.format(FILE_FORMAT)
-    .options(**csv_read_options)
-    .load(f"{SOURCE_PATH}/customer_order_items.{FILE_FORMAT}/")
+    .option("header", "true")
+    .option("inferSchema", "true")
+    .load(f"{SOURCE_PATH}/order_items_silver.{FILE_FORMAT}/")
 )
-customer_order_items_src_df.createOrReplaceTempView("customer_order_items")
 
-gold_customer_order_items_df = spark.sql("""
-SELECT
-    CAST(scoi.order_id AS STRING)                         AS order_id,
-    CAST(scoi.order_item_id AS STRING)                    AS order_item_id,
-    CAST(scoi.product_id AS STRING)                       AS product_id,
-    CAST(scoi.quantity AS INT)                            AS quantity,
-    CAST(scoi.unit_price_amount AS DECIMAL(38, 10))       AS unit_price_amount,
-    CAST(scoi.line_total_amount AS DECIMAL(38, 10))       AS line_total_amount
-FROM customer_order_items scoi
-""")
+# 2) Create temp view
+order_items_silver_df.createOrReplaceTempView("order_items_silver")
 
+# 3) Transform using Spark SQL (casts + optional ROW_NUMBER dedup pattern)
+gold_order_items_df = spark.sql(
+    """
+    WITH base AS (
+      SELECT
+        CAST(ois.order_id AS STRING)                    AS order_id,
+        CAST(ois.order_item_id AS STRING)               AS order_item_id,
+        CAST(ois.product_id AS STRING)                  AS product_id,
+        CAST(ois.quantity AS INT)                       AS quantity,
+        CAST(ois.unit_price_amount AS DECIMAL(18,2))    AS unit_price_amount,
+        CAST(ois.line_total_amount AS DECIMAL(18,2))    AS line_total_amount,
+        CAST(ois.ingestion_date AS DATE)                AS ingestion_date,
+        ROW_NUMBER() OVER (
+          PARTITION BY ois.order_id, ois.order_item_id
+          ORDER BY ois.ingestion_date DESC
+        ) AS rn
+      FROM order_items_silver ois
+    )
+    SELECT
+      order_id,
+      order_item_id,
+      product_id,
+      quantity,
+      unit_price_amount,
+      line_total_amount,
+      ingestion_date
+    FROM base
+    WHERE rn = 1
+    """
+)
+
+# 4) Write output as SINGLE CSV file directly under TARGET_PATH (no subfolders)
 (
-    gold_customer_order_items_df.coalesce(1)
+    gold_order_items_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
-    .options(**csv_write_options)
-    .save(f"{TARGET_PATH}/gold_customer_order_items.csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/gold_order_items.csv")
 )
 
 # ====================================================================================
-# SOURCE: silver.daily_order_data_quality
-# TARGET: gold.gold_daily_order_data_quality
+# SOURCE: silver.daily_etl_run_metrics_silver  -> TARGET: gold.gold_daily_etl_run_metrics
 # ====================================================================================
-daily_order_dq_src_df = (
+
+# 1) Read source table from S3 (STRICT PATH FORMAT)
+daily_etl_run_metrics_silver_df = (
     spark.read.format(FILE_FORMAT)
-    .options(**csv_read_options)
-    .load(f"{SOURCE_PATH}/daily_order_data_quality.{FILE_FORMAT}/")
+    .option("header", "true")
+    .option("inferSchema", "true")
+    .load(f"{SOURCE_PATH}/daily_etl_run_metrics_silver.{FILE_FORMAT}/")
 )
-daily_order_dq_src_df.createOrReplaceTempView("daily_order_data_quality")
 
-gold_daily_order_data_quality_df = spark.sql("""
-SELECT
-    CAST(sdodq.data_date AS DATE)                         AS data_date,
-    CAST(sdodq.total_orders_count AS INT)                 AS total_orders_count,
-    CAST(sdodq.valid_orders_count AS INT)                 AS valid_orders_count,
-    CAST(sdodq.invalid_orders_count AS INT)               AS invalid_orders_count,
-    CAST(sdodq.duplicate_orders_count AS INT)             AS duplicate_orders_count,
-    CAST(sdodq.dq_pass_rate AS DECIMAL(38, 10))           AS dq_pass_rate
-FROM daily_order_data_quality sdodq
-""")
+# 2) Create temp view
+daily_etl_run_metrics_silver_df.createOrReplaceTempView("daily_etl_run_metrics_silver")
 
+# 3) Transform using Spark SQL (casts + optional ROW_NUMBER dedup pattern)
+gold_daily_etl_run_metrics_df = spark.sql(
+    """
+    WITH base AS (
+      SELECT
+        CAST(derms.run_date AS DATE)             AS run_date,
+        CAST(derms.dataset_name AS STRING)       AS dataset_name,
+        CAST(derms.records_read_count AS BIGINT) AS records_read_count,
+        CAST(derms.records_loaded_count AS BIGINT) AS records_loaded_count,
+        CAST(derms.records_rejected_count AS BIGINT) AS records_rejected_count,
+        CAST(derms.load_start_ts AS TIMESTAMP)   AS load_start_ts,
+        CAST(derms.load_end_ts AS TIMESTAMP)     AS load_end_ts,
+        CAST(derms.duration_minutes AS INT)      AS duration_minutes,
+        ROW_NUMBER() OVER (
+          PARTITION BY derms.run_date, derms.dataset_name
+          ORDER BY derms.load_end_ts DESC
+        ) AS rn
+      FROM daily_etl_run_metrics_silver derms
+    )
+    SELECT
+      run_date,
+      dataset_name,
+      records_read_count,
+      records_loaded_count,
+      records_rejected_count,
+      load_start_ts,
+      load_end_ts,
+      duration_minutes
+    FROM base
+    WHERE rn = 1
+    """
+)
+
+# 4) Write output as SINGLE CSV file directly under TARGET_PATH (no subfolders)
 (
-    gold_daily_order_data_quality_df.coalesce(1)
+    gold_daily_etl_run_metrics_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
-    .options(**csv_write_options)
-    .save(f"{TARGET_PATH}/gold_daily_order_data_quality.csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/gold_daily_etl_run_metrics.csv")
 )
 
 job.commit()
