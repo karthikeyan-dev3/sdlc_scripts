@@ -6,312 +6,213 @@ from awsglue.job import Job
 from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 
-# ----------------------------
-# Job params (optional)
-# ----------------------------
+# -----------------------------------------------------------------------------------
+# AWS Glue boilerplate
+# -----------------------------------------------------------------------------------
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
 
-# ----------------------------
-# Glue / Spark setup
-# ----------------------------
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark: SparkSession = glueContext.spark_session
 job = Job(glueContext)
 job.init(args["JOB_NAME"], args)
 
-# ----------------------------
-# Constants
-# ----------------------------
+# -----------------------------------------------------------------------------------
+# Config
+# -----------------------------------------------------------------------------------
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-# =====================================================================================
-# SOURCE: silver.ingestion_file_audit_silver  (alias: ifas)
-# TARGET: gold.gold_ingestion_file_audit
-# =====================================================================================
-df_ifas = (
+# Recommended CSV options for consistent reads/writes
+CSV_READ_OPTIONS = {
+    "header": "true",
+    "inferSchema": "true",
+    "quote": '"',
+    "escape": '"',
+    "multiLine": "false",
+}
+CSV_WRITE_OPTIONS = {
+    "header": "true",
+    "quote": '"',
+    "escape": '"',
+}
+
+# -----------------------------------------------------------------------------------
+# 1) Read source tables from S3 (Silver)
+#    SOURCE READING RULE:
+#    .load(f"{SOURCE_PATH}/table_name.{FILE_FORMAT}/")
+# -----------------------------------------------------------------------------------
+silver_customer_orders_df = (
     spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/ingestion_file_audit_silver.{FILE_FORMAT}/")
+    .options(**CSV_READ_OPTIONS)
+    .load(f"{SOURCE_PATH}/silver_customer_orders.{FILE_FORMAT}/")
 )
-df_ifas.createOrReplaceTempView("ingestion_file_audit_silver")
 
-sql_gold_ingestion_file_audit = """
-WITH base AS (
-  SELECT
-    CAST(ifas.audit_id AS BIGINT)              AS audit_id,
-    CAST(ifas.source_system AS STRING)         AS source_system,
-    CAST(ifas.s3_bucket AS STRING)             AS s3_bucket,
-    CAST(ifas.s3_key AS STRING)                AS s3_key,
-    CAST(ifas.file_name AS STRING)             AS file_name,
-    CAST(ifas.file_format AS STRING)           AS file_format,
-    CAST(ifas.file_size_bytes AS BIGINT)       AS file_size_bytes,
-    CAST(ifas.file_row_count AS BIGINT)        AS file_row_count,
-    CAST(ifas.file_checksum AS STRING)         AS file_checksum,
-    CAST(ifas.ingestion_status AS STRING)      AS ingestion_status,
-    CAST(ifas.ingestion_started_at AS TIMESTAMP)   AS ingestion_started_at,
-    CAST(ifas.ingestion_completed_at AS TIMESTAMP) AS ingestion_completed_at,
-    CAST(ifas.records_loaded AS BIGINT)        AS records_loaded,
-    CAST(ifas.records_rejected AS BIGINT)      AS records_rejected,
-    CAST(ifas.error_count AS BIGINT)           AS error_count,
-    CAST(ifas.error_message AS STRING)         AS error_message,
-    CAST(ifas.redshift_schema AS STRING)       AS redshift_schema,
-    CAST(ifas.redshift_table AS STRING)        AS redshift_table,
-    CAST(ifas.batch_id AS STRING)              AS batch_id,
-    CAST(ifas.created_at AS TIMESTAMP)         AS created_at
-  FROM ingestion_file_audit_silver ifas
-),
-dedup AS (
-  SELECT
-    b.*,
-    ROW_NUMBER() OVER (
-      PARTITION BY b.s3_bucket, b.s3_key, b.file_checksum, b.batch_id
-      ORDER BY b.created_at DESC
-    ) AS rn
-  FROM base b
+silver_order_items_df = (
+    spark.read.format(FILE_FORMAT)
+    .options(**CSV_READ_OPTIONS)
+    .load(f"{SOURCE_PATH}/silver_order_items.{FILE_FORMAT}/")
 )
-SELECT
-  audit_id,
-  source_system,
-  s3_bucket,
-  s3_key,
-  file_name,
-  file_format,
-  file_size_bytes,
-  file_row_count,
-  file_checksum,
-  ingestion_status,
-  ingestion_started_at,
-  ingestion_completed_at,
-  records_loaded,
-  records_rejected,
-  error_count,
-  error_message,
-  redshift_schema,
-  redshift_table,
-  batch_id,
-  created_at
-FROM dedup
-WHERE rn = 1
-"""
-df_gold_ingestion_file_audit = spark.sql(sql_gold_ingestion_file_audit)
 
+silver_customers_df = (
+    spark.read.format(FILE_FORMAT)
+    .options(**CSV_READ_OPTIONS)
+    .load(f"{SOURCE_PATH}/silver_customers.{FILE_FORMAT}/")
+)
+
+silver_products_df = (
+    spark.read.format(FILE_FORMAT)
+    .options(**CSV_READ_OPTIONS)
+    .load(f"{SOURCE_PATH}/silver_products.{FILE_FORMAT}/")
+)
+
+silver_daily_order_kpis_df = (
+    spark.read.format(FILE_FORMAT)
+    .options(**CSV_READ_OPTIONS)
+    .load(f"{SOURCE_PATH}/silver_daily_order_kpis.{FILE_FORMAT}/")
+)
+
+# -----------------------------------------------------------------------------------
+# 2) Create temp views
+# -----------------------------------------------------------------------------------
+silver_customer_orders_df.createOrReplaceTempView("silver_customer_orders")
+silver_order_items_df.createOrReplaceTempView("silver_order_items")
+silver_customers_df.createOrReplaceTempView("silver_customers")
+silver_products_df.createOrReplaceTempView("silver_products")
+silver_daily_order_kpis_df.createOrReplaceTempView("silver_daily_order_kpis")
+
+# -----------------------------------------------------------------------------------
+# TARGET TABLE: gold.gold_customer_orders  (alias: gco)
+# Source: silver.silver_customer_orders sco
+# Transformations: EXACT mapping (pass-through) with explicit CAST/DATE where applicable
+# -----------------------------------------------------------------------------------
+gold_customer_orders_df = spark.sql(
+    """
+    SELECT
+        CAST(sco.order_id AS STRING)                              AS order_id,
+        DATE(sco.order_date)                                      AS order_date,
+        CAST(sco.customer_id AS STRING)                           AS customer_id,
+        CAST(sco.order_status AS STRING)                          AS order_status,
+        CAST(sco.currency_code AS STRING)                         AS currency_code,
+        CAST(sco.order_subtotal_amount AS DECIMAL(18,2))          AS order_subtotal_amount,
+        CAST(sco.order_tax_amount AS DECIMAL(18,2))               AS order_tax_amount,
+        CAST(sco.order_shipping_amount AS DECIMAL(18,2))          AS order_shipping_amount,
+        CAST(sco.order_discount_amount AS DECIMAL(18,2))          AS order_discount_amount,
+        CAST(sco.order_total_amount AS DECIMAL(18,2))             AS order_total_amount
+    FROM silver_customer_orders sco
+    """
+)
+
+# Write as a SINGLE CSV file directly under TARGET_PATH
 (
-    df_gold_ingestion_file_audit.coalesce(1)
+    gold_customer_orders_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_ingestion_file_audit.csv")
+    .options(**CSV_WRITE_OPTIONS)
+    .save(f"{TARGET_PATH}/gold_customer_orders.csv")
 )
 
-# =====================================================================================
-# SOURCE: silver.ingestion_batch_summary_silver  (alias: ibss)
-# TARGET: gold.gold_ingestion_batch_summary
-# =====================================================================================
-df_ibss = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/ingestion_batch_summary_silver.{FILE_FORMAT}/")
+# -----------------------------------------------------------------------------------
+# TARGET TABLE: gold.gold_order_items  (alias: goi)
+# Source: silver.silver_order_items soi
+# Transformations: EXACT mapping (pass-through) with explicit CAST
+# -----------------------------------------------------------------------------------
+gold_order_items_df = spark.sql(
+    """
+    SELECT
+        CAST(soi.order_id AS STRING)                      AS order_id,
+        CAST(soi.order_item_id AS STRING)                 AS order_item_id,
+        CAST(soi.product_id AS STRING)                    AS product_id,
+        CAST(soi.quantity AS INT)                         AS quantity,
+        CAST(soi.unit_price_amount AS DECIMAL(18,2))      AS unit_price_amount,
+        CAST(soi.line_discount_amount AS DECIMAL(18,2))   AS line_discount_amount,
+        CAST(soi.line_total_amount AS DECIMAL(18,2))      AS line_total_amount
+    FROM silver_order_items soi
+    """
 )
-df_ibss.createOrReplaceTempView("ingestion_batch_summary_silver")
-
-sql_gold_ingestion_batch_summary = """
-WITH base AS (
-  SELECT
-    CAST(ibss.batch_id AS STRING)              AS batch_id,
-    CAST(ibss.source_system AS STRING)         AS source_system,
-    CAST(ibss.batch_started_at AS TIMESTAMP)   AS batch_started_at,
-    CAST(ibss.batch_completed_at AS TIMESTAMP) AS batch_completed_at,
-    CAST(ibss.batch_status AS STRING)          AS batch_status,
-    CAST(ibss.files_processed AS BIGINT)       AS files_processed,
-    CAST(ibss.files_succeeded AS BIGINT)       AS files_succeeded,
-    CAST(ibss.files_failed AS BIGINT)          AS files_failed,
-    CAST(ibss.total_records_loaded AS BIGINT)  AS total_records_loaded,
-    CAST(ibss.total_records_rejected AS BIGINT) AS total_records_rejected,
-    CAST(ibss.total_error_count AS BIGINT)     AS total_error_count,
-    CAST(ibss.sla_target_pct AS DECIMAL(5,2))  AS sla_target_pct,
-    CAST(ibss.sla_achieved_flag AS BOOLEAN)    AS sla_achieved_flag,
-    CAST(ibss.created_at AS TIMESTAMP)         AS created_at
-  FROM ingestion_batch_summary_silver ibss
-),
-dedup AS (
-  SELECT
-    b.*,
-    ROW_NUMBER() OVER (
-      PARTITION BY b.batch_id
-      ORDER BY b.created_at DESC
-    ) AS rn
-  FROM base b
-)
-SELECT
-  batch_id,
-  source_system,
-  batch_started_at,
-  batch_completed_at,
-  batch_status,
-  files_processed,
-  files_succeeded,
-  files_failed,
-  total_records_loaded,
-  total_records_rejected,
-  total_error_count,
-  sla_target_pct,
-  sla_achieved_flag,
-  created_at
-FROM dedup
-WHERE rn = 1
-"""
-df_gold_ingestion_batch_summary = spark.sql(sql_gold_ingestion_batch_summary)
 
 (
-    df_gold_ingestion_batch_summary.coalesce(1)
+    gold_order_items_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_ingestion_batch_summary.csv")
+    .options(**CSV_WRITE_OPTIONS)
+    .save(f"{TARGET_PATH}/gold_order_items.csv")
 )
 
-# =====================================================================================
-# SOURCE: silver.data_quality_results_silver (alias: dqrs)
-#         JOIN silver.ingestion_batch_summary_silver (alias: ibss)
-# TARGET: gold.gold_data_quality_results
-# =====================================================================================
-df_dqrs = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/data_quality_results_silver.{FILE_FORMAT}/")
+# -----------------------------------------------------------------------------------
+# TARGET TABLE: gold.gold_customers  (alias: gc)
+# Source: silver.silver_customers sc
+# Transformations: EXACT mapping (pass-through) with explicit CAST/DATE
+# -----------------------------------------------------------------------------------
+gold_customers_df = spark.sql(
+    """
+    SELECT
+        CAST(sc.customer_id AS STRING)     AS customer_id,
+        CAST(sc.customer_name AS STRING)   AS customer_name,
+        CAST(sc.customer_email AS STRING)  AS customer_email,
+        DATE(sc.customer_created_date)     AS customer_created_date
+    FROM silver_customers sc
+    """
 )
-df_dqrs.createOrReplaceTempView("data_quality_results_silver")
-
-# (re)create view for join safety (already created above, but kept explicit per-table)
-df_ibss.createOrReplaceTempView("ingestion_batch_summary_silver")
-
-sql_gold_data_quality_results = """
-WITH base AS (
-  SELECT
-    CAST(dqrs.dq_result_id AS BIGINT)          AS dq_result_id,
-    CAST(dqrs.batch_id AS STRING)             AS batch_id,
-    CAST(dqrs.source_system AS STRING)        AS source_system,
-    CAST(dqrs.redshift_schema AS STRING)      AS redshift_schema,
-    CAST(dqrs.redshift_table AS STRING)       AS redshift_table,
-    CAST(dqrs.check_name AS STRING)           AS check_name,
-    CAST(dqrs.check_type AS STRING)           AS check_type,
-    CAST(dqrs.check_status AS STRING)         AS check_status,
-    CAST(dqrs.failed_record_count AS BIGINT)  AS failed_record_count,
-    CAST(dqrs.failed_pct AS DECIMAL(9,4))     AS failed_pct,
-    CAST(dqrs.severity AS STRING)             AS severity,
-    CAST(dqrs.executed_at AS TIMESTAMP)       AS executed_at,
-    CAST(dqrs.details AS STRING)              AS details
-  FROM data_quality_results_silver dqrs
-  INNER JOIN ingestion_batch_summary_silver ibss
-    ON dqrs.batch_id = ibss.batch_id
-   AND dqrs.source_system = ibss.source_system
-),
-dedup AS (
-  SELECT
-    b.*,
-    ROW_NUMBER() OVER (
-      PARTITION BY b.dq_result_id
-      ORDER BY b.executed_at DESC
-    ) AS rn
-  FROM base b
-)
-SELECT
-  dq_result_id,
-  batch_id,
-  source_system,
-  redshift_schema,
-  redshift_table,
-  check_name,
-  check_type,
-  check_status,
-  failed_record_count,
-  failed_pct,
-  severity,
-  executed_at,
-  details
-FROM dedup
-WHERE rn = 1
-"""
-df_gold_data_quality_results = spark.sql(sql_gold_data_quality_results)
 
 (
-    df_gold_data_quality_results.coalesce(1)
+    gold_customers_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_data_quality_results.csv")
+    .options(**CSV_WRITE_OPTIONS)
+    .save(f"{TARGET_PATH}/gold_customers.csv")
 )
 
-# =====================================================================================
-# SOURCE: silver.sensitive_data_access_audit_silver (alias: sdaas)
-# TARGET: gold.gold_sensitive_data_access_audit
-# =====================================================================================
-df_sdaas = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/sensitive_data_access_audit_silver.{FILE_FORMAT}/")
+# -----------------------------------------------------------------------------------
+# TARGET TABLE: gold.gold_products  (alias: gp)
+# Source: silver.silver_products sp
+# Transformations: EXACT mapping (pass-through) with explicit CAST
+# -----------------------------------------------------------------------------------
+gold_products_df = spark.sql(
+    """
+    SELECT
+        CAST(sp.product_id AS STRING)         AS product_id,
+        CAST(sp.product_name AS STRING)       AS product_name,
+        CAST(sp.product_category AS STRING)   AS product_category
+    FROM silver_products sp
+    """
 )
-df_sdaas.createOrReplaceTempView("sensitive_data_access_audit_silver")
-
-sql_gold_sensitive_data_access_audit = """
-WITH base AS (
-  SELECT
-    CAST(sdaas.access_audit_id AS BIGINT)         AS access_audit_id,
-    CAST(sdaas.event_time AS TIMESTAMP)           AS event_time,
-    CAST(sdaas.actor AS STRING)                   AS actor,
-    CAST(sdaas.actor_role AS STRING)              AS actor_role,
-    CAST(sdaas.action AS STRING)                  AS action,
-    CAST(sdaas.object_type AS STRING)             AS object_type,
-    CAST(sdaas.redshift_schema AS STRING)         AS redshift_schema,
-    CAST(sdaas.redshift_table AS STRING)          AS redshift_table,
-    CAST(sdaas.column_name AS STRING)             AS column_name,
-    CAST(sdaas.sensitivity_classification AS STRING) AS sensitivity_classification,
-    CAST(sdaas.decision AS STRING)                AS decision,
-    CAST(sdaas.reason AS STRING)                  AS reason,
-    CAST(sdaas.request_id AS STRING)              AS request_id
-  FROM sensitive_data_access_audit_silver sdaas
-),
-dedup AS (
-  SELECT
-    b.*,
-    ROW_NUMBER() OVER (
-      PARTITION BY b.request_id, b.actor, b.action, b.object_type, b.redshift_schema, b.redshift_table, b.column_name, b.event_time
-      ORDER BY b.event_time DESC, b.access_audit_id DESC
-    ) AS rn
-  FROM base b
-)
-SELECT
-  access_audit_id,
-  event_time,
-  actor,
-  actor_role,
-  action,
-  object_type,
-  redshift_schema,
-  redshift_table,
-  column_name,
-  sensitivity_classification,
-  decision,
-  reason,
-  request_id
-FROM dedup
-WHERE rn = 1
-"""
-df_gold_sensitive_data_access_audit = spark.sql(sql_gold_sensitive_data_access_audit)
 
 (
-    df_gold_sensitive_data_access_audit.coalesce(1)
+    gold_products_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_sensitive_data_access_audit.csv")
+    .options(**CSV_WRITE_OPTIONS)
+    .save(f"{TARGET_PATH}/gold_products.csv")
+)
+
+# -----------------------------------------------------------------------------------
+# TARGET TABLE: gold.gold_daily_order_kpis  (alias: gdk)
+# Source: silver.silver_daily_order_kpis sdk
+# Transformations: EXACT mapping (pass-through) with explicit CAST/DATE
+# -----------------------------------------------------------------------------------
+gold_daily_order_kpis_df = spark.sql(
+    """
+    SELECT
+        DATE(sdk.order_date)                                AS order_date,
+        CAST(sdk.orders_count AS INT)                       AS orders_count,
+        CAST(sdk.unique_customers_count AS INT)             AS unique_customers_count,
+        CAST(sdk.gross_sales_amount AS DECIMAL(18,2))       AS gross_sales_amount,
+        CAST(sdk.discount_amount AS DECIMAL(18,2))          AS discount_amount,
+        CAST(sdk.tax_amount AS DECIMAL(18,2))               AS tax_amount,
+        CAST(sdk.shipping_amount AS DECIMAL(18,2))          AS shipping_amount,
+        CAST(sdk.net_sales_amount AS DECIMAL(18,2))         AS net_sales_amount
+    FROM silver_daily_order_kpis sdk
+    """
+)
+
+(
+    gold_daily_order_kpis_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .options(**CSV_WRITE_OPTIONS)
+    .save(f"{TARGET_PATH}/gold_daily_order_kpis.csv")
 )
 
 job.commit()
