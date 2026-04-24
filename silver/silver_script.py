@@ -7,349 +7,287 @@ from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 
 # --------------------------------------------------------------------------------------
-# Glue / Spark bootstrap
+# AWS Glue bootstrap
 # --------------------------------------------------------------------------------------
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
-sc = SparkContext.getOrCreate()
-glueContext = GlueContext(sc)
-spark: SparkSession = glueContext.spark_session
-job = Job(glueContext)
+sc = SparkContext()
+glue_context = GlueContext(sc)
+spark: SparkSession = glue_context.spark_session
+job = Job(glue_context)
 job.init(args["JOB_NAME"], args)
 
 # --------------------------------------------------------------------------------------
-# Config
+# Parameters (as provided)
 # --------------------------------------------------------------------------------------
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 FILE_FORMAT = "csv"
 
-# Recommended settings for CSV I/O
-spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
-spark.conf.set("spark.sql.session.timeZone", "UTC")
+# Recommended CSV options (adjust if your bronze has different settings)
+CSV_READ_OPTIONS = {
+    "header": "true",
+    "inferSchema": "true",
+    "multiLine": "false",
+    "quote": "\"",
+    "escape": "\"",
+}
 
-# ======================================================================================
-# SOURCE: bronze.ingestion_file_audit_bronze  -> TARGET: ingestion_file_audit_silver
-# ======================================================================================
-ingestion_file_audit_bronze_df = (
+# --------------------------------------------------------------------------------------
+# 1) Read source tables from S3 (Bronze)
+#    NOTE: Path MUST follow: .load(f"{SOURCE_PATH}/table_name.{FILE_FORMAT}/")
+# --------------------------------------------------------------------------------------
+products_bronze_df = (
     spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .option("inferSchema", "false")
-    .option("multiLine", "true")
-    .option("escape", "\"")
-    .option("quote", "\"")
-    .load(f"{SOURCE_PATH}/ingestion_file_audit_bronze.{FILE_FORMAT}/")
+    .options(**CSV_READ_OPTIONS)
+    .load(f"{SOURCE_PATH}/products_bronze.{FILE_FORMAT}/")
 )
-ingestion_file_audit_bronze_df.createOrReplaceTempView("ingestion_file_audit_bronze_df")
 
-spark.sql("""
-CREATE OR REPLACE TEMP VIEW bronze__ingestion_file_audit_bronze AS
-SELECT * FROM ingestion_file_audit_bronze_df
-""")
-
-ingestion_file_audit_silver_df = spark.sql("""
-WITH base AS (
-  SELECT
-    CAST(NULLIF(TRIM(audit_id),'') AS BIGINT) AS audit_id,
-    NULLIF(TRIM(source_system),'') AS source_system,
-    NULLIF(TRIM(s3_bucket),'') AS s3_bucket,
-    NULLIF(TRIM(s3_key),'') AS s3_key,
-    NULLIF(TRIM(file_name),'') AS file_name,
-    LOWER(NULLIF(TRIM(file_format),'')) AS file_format,
-    CAST(NULLIF(TRIM(file_size_bytes),'') AS BIGINT) AS file_size_bytes,
-    CAST(NULLIF(TRIM(file_row_count),'') AS BIGINT) AS file_row_count,
-    NULLIF(TRIM(file_checksum),'') AS file_checksum,
-    UPPER(NULLIF(TRIM(ingestion_status),'')) AS ingestion_status,
-    CAST(ingestion_started_at AS TIMESTAMP) AS ingestion_started_at,
-    CAST(ingestion_completed_at AS TIMESTAMP) AS ingestion_completed_at,
-    CAST(NULLIF(TRIM(records_loaded),'') AS BIGINT) AS records_loaded,
-    CAST(NULLIF(TRIM(records_rejected),'') AS BIGINT) AS records_rejected,
-    CAST(NULLIF(TRIM(error_count),'') AS BIGINT) AS error_count,
-    NULLIF(TRIM(error_message),'') AS error_message,
-    NULLIF(TRIM(redshift_schema),'') AS redshift_schema,
-    NULLIF(TRIM(redshift_table),'') AS redshift_table,
-    NULLIF(TRIM(batch_id),'') AS batch_id,
-    CAST(created_at AS TIMESTAMP) AS created_at
-  FROM bronze__ingestion_file_audit_bronze
-),
-dedup AS (
-  SELECT
-    *,
-    ROW_NUMBER() OVER (
-      PARTITION BY
-        COALESCE(s3_bucket,'~'),
-        COALESCE(s3_key,'~'),
-        COALESCE(file_checksum,'~'),
-        COALESCE(batch_id,'~')
-      ORDER BY created_at DESC, ingestion_started_at DESC
-    ) AS rn
-  FROM base
+customers_bronze_df = (
+    spark.read.format(FILE_FORMAT)
+    .options(**CSV_READ_OPTIONS)
+    .load(f"{SOURCE_PATH}/customers_bronze.{FILE_FORMAT}/")
 )
-SELECT DISTINCT
-  audit_id,
-  source_system,
-  s3_bucket,
-  s3_key,
-  file_name,
-  file_format,
-  file_size_bytes,
-  file_row_count,
-  file_checksum,
-  ingestion_status,
-  ingestion_started_at,
-  ingestion_completed_at,
-  records_loaded,
-  records_rejected,
-  error_count,
-  error_message,
-  redshift_schema,
-  redshift_table,
-  batch_id,
-  created_at
-FROM dedup
-WHERE rn = 1
-""")
 
+customer_orders_bronze_df = (
+    spark.read.format(FILE_FORMAT)
+    .options(**CSV_READ_OPTIONS)
+    .load(f"{SOURCE_PATH}/customer_orders_bronze.{FILE_FORMAT}/")
+)
+
+order_items_bronze_df = (
+    spark.read.format(FILE_FORMAT)
+    .options(**CSV_READ_OPTIONS)
+    .load(f"{SOURCE_PATH}/order_items_bronze.{FILE_FORMAT}/")
+)
+
+# --------------------------------------------------------------------------------------
+# 2) Create temp views (Bronze)
+# --------------------------------------------------------------------------------------
+products_bronze_df.createOrReplaceTempView("products_bronze")
+customers_bronze_df.createOrReplaceTempView("customers_bronze")
+customer_orders_bronze_df.createOrReplaceTempView("customer_orders_bronze")
+order_items_bronze_df.createOrReplaceTempView("order_items_bronze")
+
+# ======================================================================================
+# TABLE: silver_products
+# ======================================================================================
+
+# 3) SQL transformation (dedup + trim) using ROW_NUMBER
+silver_products_df = spark.sql(
+    """
+    WITH ranked AS (
+      SELECT
+        pb.product_id AS product_id,
+        TRIM(pb.product_name) AS product_name,
+        TRIM(pb.category) AS product_category,
+        ROW_NUMBER() OVER (
+          PARTITION BY pb.product_id
+          ORDER BY pb.product_id DESC
+        ) AS rn
+      FROM products_bronze pb
+      WHERE pb.product_id IS NOT NULL
+    )
+    SELECT
+      product_id,
+      product_name,
+      product_category
+    FROM ranked
+    WHERE rn = 1
+    """
+)
+
+# Create temp view for downstream joins
+silver_products_df.createOrReplaceTempView("silver_products")
+
+# 4) Save output as SINGLE CSV file directly under TARGET_PATH
 (
-    ingestion_file_audit_silver_df.coalesce(1)
+    silver_products_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/ingestion_file_audit_silver.csv")
+    .save(f"{TARGET_PATH}/silver_products.csv")
 )
 
 # ======================================================================================
-# SOURCE: bronze.ingestion_batch_summary_bronze  -> TARGET: ingestion_batch_summary_silver
+# TABLE: silver_customers
 # ======================================================================================
-ingestion_batch_summary_bronze_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .option("inferSchema", "false")
-    .option("multiLine", "true")
-    .option("escape", "\"")
-    .option("quote", "\"")
-    .load(f"{SOURCE_PATH}/ingestion_batch_summary_bronze.{FILE_FORMAT}/")
+
+# 3) SQL transformation (dedup + standardization) using ROW_NUMBER
+silver_customers_df = spark.sql(
+    """
+    WITH ranked AS (
+      SELECT
+        cb.customer_id AS customer_id,
+        TRIM(cb.customer_name) AS customer_name,
+        LOWER(TRIM(cb.customer_email)) AS customer_email,
+        CAST(cb.customer_created_date AS DATE) AS customer_created_date,
+        ROW_NUMBER() OVER (
+          PARTITION BY cb.customer_id
+          ORDER BY cb.customer_id DESC
+        ) AS rn
+      FROM customers_bronze cb
+      WHERE cb.customer_id IS NOT NULL
+    )
+    SELECT
+      customer_id,
+      customer_name,
+      customer_email,
+      customer_created_date
+    FROM ranked
+    WHERE rn = 1
+    """
 )
-ingestion_batch_summary_bronze_df.createOrReplaceTempView("ingestion_batch_summary_bronze_df")
 
-spark.sql("""
-CREATE OR REPLACE TEMP VIEW bronze__ingestion_batch_summary_bronze AS
-SELECT * FROM ingestion_batch_summary_bronze_df
-""")
+# Create temp view for downstream joins
+silver_customers_df.createOrReplaceTempView("silver_customers")
 
-ingestion_batch_summary_silver_df = spark.sql("""
-WITH base AS (
-  SELECT
-    NULLIF(TRIM(batch_id),'') AS batch_id,
-    NULLIF(TRIM(source_system),'') AS source_system,
-    CAST(batch_started_at AS TIMESTAMP) AS batch_started_at,
-    CAST(batch_completed_at AS TIMESTAMP) AS batch_completed_at,
-    UPPER(NULLIF(TRIM(batch_status),'')) AS batch_status,
-    CAST(NULLIF(TRIM(files_processed),'') AS BIGINT) AS files_processed,
-    CAST(NULLIF(TRIM(files_succeeded),'') AS BIGINT) AS files_succeeded,
-    CAST(NULLIF(TRIM(files_failed),'') AS BIGINT) AS files_failed,
-    CAST(NULLIF(TRIM(total_records_loaded),'') AS BIGINT) AS total_records_loaded,
-    CAST(NULLIF(TRIM(total_records_rejected),'') AS BIGINT) AS total_records_rejected,
-    CAST(NULLIF(TRIM(total_error_count),'') AS BIGINT) AS total_error_count,
-    CAST(NULLIF(TRIM(sla_target_pct),'') AS DECIMAL(5,2)) AS sla_target_pct,
-    CASE
-      WHEN UPPER(NULLIF(TRIM(sla_achieved_flag),'')) IN ('Y','YES','TRUE','1') THEN TRUE
-      WHEN UPPER(NULLIF(TRIM(sla_achieved_flag),'')) IN ('N','NO','FALSE','0') THEN FALSE
-      ELSE NULL
-    END AS sla_achieved_flag,
-    CAST(created_at AS TIMESTAMP) AS created_at
-  FROM bronze__ingestion_batch_summary_bronze
-),
-dedup AS (
-  SELECT
-    *,
-    ROW_NUMBER() OVER (
-      PARTITION BY COALESCE(batch_id,'~')
-      ORDER BY created_at DESC, batch_started_at DESC
-    ) AS rn
-  FROM base
-)
-SELECT DISTINCT
-  batch_id,
-  source_system,
-  batch_started_at,
-  batch_completed_at,
-  batch_status,
-  files_processed,
-  files_succeeded,
-  files_failed,
-  total_records_loaded,
-  total_records_rejected,
-  total_error_count,
-  sla_target_pct,
-  sla_achieved_flag,
-  created_at
-FROM dedup
-WHERE rn = 1
-""")
-
+# 4) Save output as SINGLE CSV file directly under TARGET_PATH
 (
-    ingestion_batch_summary_silver_df.coalesce(1)
+    silver_customers_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/ingestion_batch_summary_silver.csv")
+    .save(f"{TARGET_PATH}/silver_customers.csv")
 )
 
 # ======================================================================================
-# SOURCE: bronze.data_quality_results_bronze  -> TARGET: data_quality_results_silver
+# TABLE: silver_customer_orders
 # ======================================================================================
-data_quality_results_bronze_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .option("inferSchema", "false")
-    .option("multiLine", "true")
-    .option("escape", "\"")
-    .option("quote", "\"")
-    .load(f"{SOURCE_PATH}/data_quality_results_bronze.{FILE_FORMAT}/")
+
+# 3) SQL transformation (join to silver_customers, dedup, casts, normalization)
+silver_customer_orders_df = spark.sql(
+    """
+    WITH joined AS (
+      SELECT
+        cob.order_id AS order_id,
+        CAST(cob.order_date AS DATE) AS order_date,
+        sc.customer_id AS customer_id,
+        UPPER(TRIM(cob.order_status)) AS order_status,
+        UPPER(TRIM(cob.currency_code)) AS currency_code,
+        COALESCE(CAST(cob.order_subtotal_amount AS DECIMAL(18,2)), 0) AS order_subtotal_amount,
+        COALESCE(CAST(cob.order_tax_amount AS DECIMAL(18,2)), 0) AS order_tax_amount,
+        COALESCE(CAST(cob.order_shipping_amount AS DECIMAL(18,2)), 0) AS order_shipping_amount,
+        COALESCE(CAST(cob.order_discount_amount AS DECIMAL(18,2)), 0) AS order_discount_amount,
+        COALESCE(CAST(cob.order_total_amount AS DECIMAL(18,2)), 0) AS order_total_amount,
+        ROW_NUMBER() OVER (
+          PARTITION BY cob.order_id
+          ORDER BY cob.order_id DESC
+        ) AS rn
+      FROM customer_orders_bronze cob
+      LEFT JOIN silver_customers sc
+        ON cob.customer_id = sc.customer_id
+      WHERE cob.order_id IS NOT NULL
+    )
+    SELECT
+      order_id,
+      order_date,
+      customer_id,
+      order_status,
+      currency_code,
+      order_subtotal_amount,
+      order_tax_amount,
+      order_shipping_amount,
+      order_discount_amount,
+      order_total_amount
+    FROM joined
+    WHERE rn = 1
+    """
 )
-data_quality_results_bronze_df.createOrReplaceTempView("data_quality_results_bronze_df")
 
-spark.sql("""
-CREATE OR REPLACE TEMP VIEW bronze__data_quality_results_bronze AS
-SELECT * FROM data_quality_results_bronze_df
-""")
+# Create temp view for downstream aggregation
+silver_customer_orders_df.createOrReplaceTempView("silver_customer_orders")
 
-data_quality_results_silver_df = spark.sql("""
-WITH base AS (
-  SELECT
-    CAST(NULLIF(TRIM(dq_result_id),'') AS BIGINT) AS dq_result_id,
-    NULLIF(TRIM(batch_id),'') AS batch_id,
-    NULLIF(TRIM(source_system),'') AS source_system,
-    NULLIF(TRIM(redshift_schema),'') AS redshift_schema,
-    NULLIF(TRIM(redshift_table),'') AS redshift_table,
-    NULLIF(TRIM(check_name),'') AS check_name,
-    UPPER(NULLIF(TRIM(check_type),'')) AS check_type,
-    UPPER(NULLIF(TRIM(check_status),'')) AS check_status,
-    CAST(NULLIF(TRIM(failed_record_count),'') AS BIGINT) AS failed_record_count,
-    CAST(NULLIF(TRIM(failed_pct),'') AS DECIMAL(9,4)) AS failed_pct,
-    UPPER(NULLIF(TRIM(severity),'')) AS severity,
-    CAST(executed_at AS TIMESTAMP) AS executed_at,
-    NULLIF(TRIM(details),'') AS details
-  FROM bronze__data_quality_results_bronze
-),
-dedup AS (
-  SELECT
-    *,
-    ROW_NUMBER() OVER (
-      PARTITION BY
-        COALESCE(batch_id,'~'),
-        COALESCE(source_system,'~'),
-        COALESCE(redshift_schema,'~'),
-        COALESCE(redshift_table,'~'),
-        COALESCE(check_name,'~'),
-        COALESCE(executed_at, TIMESTAMP '1900-01-01')
-      ORDER BY executed_at DESC, dq_result_id DESC
-    ) AS rn
-  FROM base
-)
-SELECT DISTINCT
-  dq_result_id,
-  batch_id,
-  source_system,
-  redshift_schema,
-  redshift_table,
-  check_name,
-  check_type,
-  check_status,
-  failed_record_count,
-  failed_pct,
-  severity,
-  executed_at,
-  details
-FROM dedup
-WHERE rn = 1
-""")
-
+# 4) Save output as SINGLE CSV file directly under TARGET_PATH
 (
-    data_quality_results_silver_df.coalesce(1)
+    silver_customer_orders_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/data_quality_results_silver.csv")
+    .save(f"{TARGET_PATH}/silver_customer_orders.csv")
 )
 
 # ======================================================================================
-# SOURCE: bronze.sensitive_data_access_audit_bronze  -> TARGET: sensitive_data_access_audit_silver
+# TABLE: silver_order_items
 # ======================================================================================
-sensitive_data_access_audit_bronze_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .option("inferSchema", "false")
-    .option("multiLine", "true")
-    .option("escape", "\"")
-    .option("quote", "\"")
-    .load(f"{SOURCE_PATH}/sensitive_data_access_audit_bronze.{FILE_FORMAT}/")
+
+# 3) SQL transformation (join to silver_products, dedup, casts, normalization)
+silver_order_items_df = spark.sql(
+    """
+    WITH joined AS (
+      SELECT
+        oib.order_id AS order_id,
+        oib.order_item_id AS order_item_id,
+        sp.product_id AS product_id,
+        CAST(oib.quantity AS INTEGER) AS quantity,
+        CAST(oib.unit_price_amount AS DECIMAL(18,2)) AS unit_price_amount,
+        COALESCE(CAST(oib.line_discount_amount AS DECIMAL(18,2)), 0) AS line_discount_amount,
+        CAST(oib.line_total_amount AS DECIMAL(18,2)) AS line_total_amount,
+        ROW_NUMBER() OVER (
+          PARTITION BY oib.order_id, oib.order_item_id
+          ORDER BY oib.order_id DESC, oib.order_item_id DESC
+        ) AS rn
+      FROM order_items_bronze oib
+      LEFT JOIN silver_products sp
+        ON oib.product_id = sp.product_id
+      WHERE oib.order_id IS NOT NULL
+        AND oib.order_item_id IS NOT NULL
+    )
+    SELECT
+      order_id,
+      order_item_id,
+      product_id,
+      quantity,
+      unit_price_amount,
+      line_discount_amount,
+      line_total_amount
+    FROM joined
+    WHERE rn = 1
+    """
 )
-sensitive_data_access_audit_bronze_df.createOrReplaceTempView("sensitive_data_access_audit_bronze_df")
 
-spark.sql("""
-CREATE OR REPLACE TEMP VIEW bronze__sensitive_data_access_audit_bronze AS
-SELECT * FROM sensitive_data_access_audit_bronze_df
-""")
+# Create temp view (optional)
+silver_order_items_df.createOrReplaceTempView("silver_order_items")
 
-sensitive_data_access_audit_silver_df = spark.sql("""
-WITH base AS (
-  SELECT
-    CAST(NULLIF(TRIM(access_audit_id),'') AS BIGINT) AS access_audit_id,
-    CAST(event_time AS TIMESTAMP) AS event_time,
-    NULLIF(TRIM(actor),'') AS actor,
-    NULLIF(TRIM(actor_role),'') AS actor_role,
-    UPPER(NULLIF(TRIM(action),'')) AS action,
-    UPPER(NULLIF(TRIM(object_type),'')) AS object_type,
-    NULLIF(TRIM(redshift_schema),'') AS redshift_schema,
-    NULLIF(TRIM(redshift_table),'') AS redshift_table,
-    NULLIF(TRIM(column_name),'') AS column_name,
-    UPPER(NULLIF(TRIM(sensitivity_classification),'')) AS sensitivity_classification,
-    UPPER(NULLIF(TRIM(decision),'')) AS decision,
-    NULLIF(TRIM(reason),'') AS reason,
-    NULLIF(TRIM(request_id),'') AS request_id
-  FROM bronze__sensitive_data_access_audit_bronze
-),
-dedup AS (
-  SELECT
-    *,
-    ROW_NUMBER() OVER (
-      PARTITION BY
-        COALESCE(request_id,'~'),
-        COALESCE(actor,'~'),
-        COALESCE(action,'~'),
-        COALESCE(redshift_schema,'~'),
-        COALESCE(redshift_table,'~'),
-        COALESCE(column_name,'~'),
-        COALESCE(event_time, TIMESTAMP '1900-01-01')
-      ORDER BY event_time DESC, access_audit_id DESC
-    ) AS rn
-  FROM base
-)
-SELECT DISTINCT
-  access_audit_id,
-  event_time,
-  actor,
-  actor_role,
-  action,
-  object_type,
-  redshift_schema,
-  redshift_table,
-  column_name,
-  sensitivity_classification,
-  decision,
-  reason,
-  request_id
-FROM dedup
-WHERE rn = 1
-""")
-
+# 4) Save output as SINGLE CSV file directly under TARGET_PATH
 (
-    sensitive_data_access_audit_silver_df.coalesce(1)
+    silver_order_items_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/sensitive_data_access_audit_silver.csv")
+    .save(f"{TARGET_PATH}/silver_order_items.csv")
+)
+
+# ======================================================================================
+# TABLE: silver_daily_order_kpis
+# ======================================================================================
+
+# 3) SQL transformation (daily aggregation from silver_customer_orders)
+silver_daily_order_kpis_df = spark.sql(
+    """
+    SELECT
+      sco.order_date AS order_date,
+      COUNT(DISTINCT sco.order_id) AS orders_count,
+      COUNT(DISTINCT sco.customer_id) AS unique_customers_count,
+      SUM(sco.order_subtotal_amount) AS gross_sales_amount,
+      SUM(sco.order_discount_amount) AS discount_amount,
+      SUM(sco.order_tax_amount) AS tax_amount,
+      SUM(sco.order_shipping_amount) AS shipping_amount,
+      SUM(sco.order_total_amount) AS net_sales_amount
+    FROM silver_customer_orders sco
+    GROUP BY sco.order_date
+    """
+)
+
+# Create temp view (optional)
+silver_daily_order_kpis_df.createOrReplaceTempView("silver_daily_order_kpis")
+
+# 4) Save output as SINGLE CSV file directly under TARGET_PATH
+(
+    silver_daily_order_kpis_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/silver_daily_order_kpis.csv")
 )
 
 job.commit()
