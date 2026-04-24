@@ -16,7 +16,7 @@ metadata = {
             'target_table': 'customer_orders_bronze',
             'target_alias': 'cob',
             'mapping_details': 'sales_transactions_raw str',
-            'description': 'Bronze ingestion of customer order-level transactional events from sales_transactions_raw (transaction_id, store_id, product_id, quantity, sale_amount, transaction_time) with no joins or aggregations.'
+            'description': 'Bronze capture of order-level sales transactions from sales_transactions_raw (transaction_id, store_id, product_id, quantity, sale_amount, transaction_time) with no transformations, joins, or aggregations.'
         }
     ],
     'columns': [
@@ -90,39 +90,33 @@ metadata = {
     }
 }
 
-runtime_config = metadata.get('runtime_config', {})
-base_path = runtime_config.get('base_path')
-target_path = runtime_config.get('target_path')
-read_format = runtime_config.get('read_format')
-write_format = runtime_config.get('write_format')
-write_mode = runtime_config.get('write_mode')
+base_path = metadata['runtime_config']['base_path']
+target_path = metadata['runtime_config']['target_path']
+read_format = metadata['runtime_config']['read_format']
+write_format = metadata['runtime_config']['write_format']
+write_mode = metadata['runtime_config']['write_mode']
 
-for table in metadata.get('tables', []):
-    target_table = table.get('target_table')
-    target_alias = table.get('target_alias')
-
-    mapping_details = table.get('mapping_details', '').split()
-    source_table = mapping_details[0] if len(mapping_details) > 0 else None
-    source_alias = mapping_details[1] if len(mapping_details) > 1 else None
+for table in metadata['tables']:
+    mapping_details = table['mapping_details'].split()
+    source_table = mapping_details[0]
+    source_alias = mapping_details[1]
+    target_table = table['target_table']
+    target_alias = table['target_alias']
 
     reader = spark.read.format(read_format)
     if read_format == 'csv':
         reader = reader.option("header", "true").option("inferSchema", "true")
 
-    df = reader.load(base_path + f"{source_table}.{read_format}")
-
+    df = reader.load(base_path + source_table + "." + read_format)
     df = df.alias(source_alias)
 
     transformations = []
-    for col in metadata.get('columns', []):
-        if col.get('target_table') == target_alias:
-            transformation = col.get('transformation', '')
-            if '=' in transformation:
-                rhs = transformation.split('=', 1)[1].strip()
-            else:
-                rhs = transformation.strip()
-            target_column = col.get('target_column')
-            transformations.append(f"{rhs} as {target_column}")
+    for col_meta in metadata['columns']:
+        if col_meta.get('target_table') == target_alias:
+            transformation = col_meta.get('transformation', '')
+            rhs = transformation.split('=', 1)[1].strip()
+            target_col = col_meta.get('target_column')
+            transformations.append(f"{rhs} as {target_col}")
 
     df = df.selectExpr(*transformations)
 
@@ -130,6 +124,6 @@ for table in metadata.get('tables', []):
     if write_format == 'csv':
         writer = writer.option("header", "true")
 
-    writer.save(target_path + f"{target_table}.{write_format}")
+    writer.save(target_path + target_table + "." + write_format)
 
 job.commit()
