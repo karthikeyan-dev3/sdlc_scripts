@@ -1,189 +1,122 @@
 ```python
 import sys
-from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
-from awsglue.job import Job
+from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 
-# ------------------------------------------------------------------------------------
-# AWS Glue Setup
-# ------------------------------------------------------------------------------------
-args = getResolvedOptions(sys.argv, ["JOB_NAME"])
+# --------------------------------------------------------------------------------------
+# AWS Glue Context
+# --------------------------------------------------------------------------------------
 sc = SparkContext.getOrCreate()
-glueContext = GlueContext(sc)
-spark: SparkSession = glueContext.spark_session
-job = Job(glueContext)
-job.init(args["JOB_NAME"], args)
+glue_context = GlueContext(sc)
+spark = glue_context.spark_session
+spark.conf.set("spark.sql.session.timeZone", "UTC")
 
-SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
-TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
+# --------------------------------------------------------------------------------------
+# Parameters / Constants
+# --------------------------------------------------------------------------------------
+SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver"
+TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold"
 FILE_FORMAT = "csv"
 
-# Ensure "single CSV file" output per target
-spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
-spark.conf.set("spark.sql.shuffle.partitions", "1")
+# ======================================================================================
+# Target Table: gold.customer_orders_gold
+# ======================================================================================
 
-# ------------------------------------------------------------------------------------
-# 1) Read source tables from S3 (STRICT PATH FORMAT)
-# ------------------------------------------------------------------------------------
-customer_orders_df = (
+# --------------------------------------------------------------------------------------
+# 1) Read source tables from S3 (STRICT FORMAT)
+# --------------------------------------------------------------------------------------
+cos_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/customer_orders.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/customer_orders_silver.{FILE_FORMAT}/")
 )
-customer_orders_df.createOrReplaceTempView("customer_orders")
 
-customer_order_line_items_df = (
+cs_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/customer_order_line_items.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/customers_silver.{FILE_FORMAT}/")
 )
-customer_order_line_items_df.createOrReplaceTempView("customer_order_line_items")
 
-etl_batch_run_metadata_df = (
+ps_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/etl_batch_run_metadata.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/products_silver.{FILE_FORMAT}/")
 )
-etl_batch_run_metadata_df.createOrReplaceTempView("etl_batch_run_metadata")
 
-data_quality_results_df = (
+oss_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/data_quality_results.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/order_status_silver.{FILE_FORMAT}/")
 )
-data_quality_results_df.createOrReplaceTempView("data_quality_results")
 
-customer_sensitive_access_map_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/customer_sensitive_access_map.{FILE_FORMAT}/")
+# --------------------------------------------------------------------------------------
+# 2) Create temp views
+# --------------------------------------------------------------------------------------
+cos_df.createOrReplaceTempView("customer_orders_silver")
+cs_df.createOrReplaceTempView("customers_silver")
+ps_df.createOrReplaceTempView("products_silver")
+oss_df.createOrReplaceTempView("order_status_silver")
+
+# --------------------------------------------------------------------------------------
+# 3) Transform using Spark SQL (EXACT mappings + ROW_NUMBER dedup)
+#    Base grain: (order_id, product_id)
+# --------------------------------------------------------------------------------------
+customer_orders_gold_df = spark.sql("""
+WITH joined AS (
+    SELECT
+        -- Mappings (as specified)
+        CAST(cos.order_id AS STRING)                        AS order_id,
+        CAST(cos.order_date AS DATE)                        AS order_date,
+        CAST(cs.customer_id AS STRING)                      AS customer_id,
+        CAST(ps.product_id AS STRING)                       AS product_id,
+        CAST(cos.quantity AS INT)                           AS quantity,
+        CAST(cos.unit_price AS DECIMAL(38, 10))             AS unit_price,
+        CAST(cos.order_amount AS DECIMAL(38, 10))           AS order_amount,
+        CAST(oss.order_status AS STRING)                    AS order_status,
+        CAST(cos.s3_ingest_date AS DATE)                    AS s3_ingest_date,
+        CAST(cos.etl_load_ts AS TIMESTAMP)                  AS etl_load_ts,
+
+        ROW_NUMBER() OVER (
+            PARTITION BY cos.order_id, cos.product_id
+            ORDER BY cos.etl_load_ts DESC
+        ) AS rn
+    FROM customer_orders_silver cos
+    LEFT JOIN customers_silver cs
+        ON cos.customer_id = cs.customer_id
+    LEFT JOIN products_silver ps
+        ON cos.product_id = ps.product_id
+    LEFT JOIN order_status_silver oss
+        ON cos.order_status = oss.order_status
 )
-customer_sensitive_access_map_df.createOrReplaceTempView("customer_sensitive_access_map")
-
-# ------------------------------------------------------------------------------------
-# Target: gold.gold_customer_orders (gco) from silver.customer_orders (sco)
-# ------------------------------------------------------------------------------------
-gold_customer_orders_sql = """
 SELECT
-  CAST(sco.order_id AS STRING)            AS order_id,
-  CAST(sco.order_date AS DATE)            AS order_date,
-  CAST(sco.customer_id AS STRING)         AS customer_id,
-  CAST(sco.order_status AS STRING)        AS order_status,
-  CAST(sco.currency_code AS STRING)       AS currency_code,
-  CAST(sco.order_total_amount AS DECIMAL(38, 18)) AS order_total_amount,
-  CAST(sco.source_system AS STRING)       AS source_system,
-  CAST(sco.ingestion_date AS DATE)        AS ingestion_date
-FROM customer_orders sco
-"""
-gold_customer_orders_out_df = spark.sql(gold_customer_orders_sql)
+    order_id,
+    order_date,
+    customer_id,
+    product_id,
+    quantity,
+    unit_price,
+    order_amount,
+    order_status,
+    s3_ingest_date,
+    etl_load_ts
+FROM joined
+WHERE rn = 1
+""")
 
+# --------------------------------------------------------------------------------------
+# 4) Write output as SINGLE CSV directly under TARGET_PATH (STRICT FORMAT)
+# --------------------------------------------------------------------------------------
 (
-    gold_customer_orders_out_df.coalesce(1)
+    customer_orders_gold_df.coalesce(1)
     .write.mode("overwrite")
+    .format("csv")
     .option("header", "true")
-    .csv(f"{TARGET_PATH}/gold_customer_orders.csv")
+    .save(f"{TARGET_PATH}/customer_orders_gold.csv")
 )
-
-# ------------------------------------------------------------------------------------
-# Target: gold.gold_customer_orders_line_items (gcoli) from silver.customer_order_line_items (scoli)
-# ------------------------------------------------------------------------------------
-gold_customer_orders_line_items_sql = """
-SELECT
-  CAST(scoli.order_id AS STRING)          AS order_id,
-  CAST(scoli.order_line_id AS STRING)     AS order_line_id,
-  CAST(scoli.product_id AS STRING)        AS product_id,
-  CAST(scoli.quantity AS INT)             AS quantity,
-  CAST(scoli.unit_price_amount AS DECIMAL(38, 18)) AS unit_price_amount,
-  CAST(scoli.line_total_amount AS DECIMAL(38, 18)) AS line_total_amount,
-  CAST(scoli.ingestion_date AS DATE)      AS ingestion_date
-FROM customer_order_line_items scoli
-"""
-gold_customer_orders_line_items_out_df = spark.sql(gold_customer_orders_line_items_sql)
-
-(
-    gold_customer_orders_line_items_out_df.coalesce(1)
-    .write.mode("overwrite")
-    .option("header", "true")
-    .csv(f"{TARGET_PATH}/gold_customer_orders_line_items.csv")
-)
-
-# ------------------------------------------------------------------------------------
-# Target: gold.gold_etl_batch_run_metadata (gebrm) from silver.etl_batch_run_metadata (sebrm)
-# ------------------------------------------------------------------------------------
-gold_etl_batch_run_metadata_sql = """
-SELECT
-  CAST(sebrm.batch_id AS STRING)          AS batch_id,
-  CAST(sebrm.pipeline_name AS STRING)     AS pipeline_name,
-  CAST(sebrm.run_date AS DATE)            AS run_date,
-  CAST(sebrm.source_s3_path AS STRING)    AS source_s3_path,
-  CAST(sebrm.start_timestamp AS TIMESTAMP) AS start_timestamp,
-  CAST(sebrm.end_timestamp AS TIMESTAMP)   AS end_timestamp,
-  CAST(sebrm.records_read AS BIGINT)      AS records_read,
-  CAST(sebrm.records_loaded AS BIGINT)    AS records_loaded,
-  CAST(sebrm.run_status AS STRING)        AS run_status
-FROM etl_batch_run_metadata sebrm
-"""
-gold_etl_batch_run_metadata_out_df = spark.sql(gold_etl_batch_run_metadata_sql)
-
-(
-    gold_etl_batch_run_metadata_out_df.coalesce(1)
-    .write.mode("overwrite")
-    .option("header", "true")
-    .csv(f"{TARGET_PATH}/gold_etl_batch_run_metadata.csv")
-)
-
-# ------------------------------------------------------------------------------------
-# Target: gold.gold_data_quality_results (gdqr) from silver.data_quality_results (sdqr)
-# ------------------------------------------------------------------------------------
-gold_data_quality_results_sql = """
-SELECT
-  CAST(sdqr.batch_id AS STRING)           AS batch_id,
-  CAST(sdqr.run_date AS DATE)             AS run_date,
-  CAST(sdqr.check_name AS STRING)         AS check_name,
-  CAST(sdqr.check_type AS STRING)         AS check_type,
-  CAST(sdqr.target_table AS STRING)       AS target_table,
-  CAST(sdqr.records_evaluated AS BIGINT)  AS records_evaluated,
-  CAST(sdqr.records_failed AS BIGINT)     AS records_failed,
-  CAST(sdqr.quality_score_pct AS DECIMAL(38, 18)) AS quality_score_pct,
-  CAST(sdqr.result_status AS STRING)      AS result_status
-FROM data_quality_results sdqr
-"""
-gold_data_quality_results_out_df = spark.sql(gold_data_quality_results_sql)
-
-(
-    gold_data_quality_results_out_df.coalesce(1)
-    .write.mode("overwrite")
-    .option("header", "true")
-    .csv(f"{TARGET_PATH}/gold_data_quality_results.csv")
-)
-
-# ------------------------------------------------------------------------------------
-# Target: gold.gold_customer_sensitive_access_map (gcsam) from silver.customer_sensitive_access_map (scsam)
-# ------------------------------------------------------------------------------------
-gold_customer_sensitive_access_map_sql = """
-SELECT
-  CAST(scsam.customer_id AS STRING)       AS customer_id,
-  CAST(scsam.is_sensitive AS BOOLEAN)     AS is_sensitive,
-  CAST(scsam.masking_policy_name AS STRING) AS masking_policy_name,
-  CAST(scsam.effective_start_date AS DATE) AS effective_start_date,
-  CAST(scsam.effective_end_date AS DATE)   AS effective_end_date
-FROM customer_sensitive_access_map scsam
-"""
-gold_customer_sensitive_access_map_out_df = spark.sql(gold_customer_sensitive_access_map_sql)
-
-(
-    gold_customer_sensitive_access_map_out_df.coalesce(1)
-    .write.mode("overwrite")
-    .option("header", "true")
-    .csv(f"{TARGET_PATH}/gold_customer_sensitive_access_map.csv")
-)
-
-job.commit()
 ```
