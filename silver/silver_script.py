@@ -1,230 +1,265 @@
 ```python
 import sys
-from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
-from awsglue.job import Job
+from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 
-# -----------------------------------------------------------------------------------
-# AWS Glue Bootstrap
-# -----------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------
+# AWS Glue bootstrap
+# --------------------------------------------------------------------------------
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
-
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark: SparkSession = glueContext.spark_session
-job = Job(glueContext)
-job.init(args["JOB_NAME"], args)
+spark.sparkContext.setLogLevel("WARN")
 
-# -----------------------------------------------------------------------------------
-# Config
-# -----------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------
+# Parameters (as provided)
+# --------------------------------------------------------------------------------
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 FILE_FORMAT = "csv"
 
-spark.conf.set("spark.sql.session.timeZone", "UTC")
-spark.conf.set("spark.sql.shuffle.partitions", "200")
-
-# -----------------------------------------------------------------------------------
-# 1) Read Source Tables (Bronze) + Temp Views
-#    (Paths MUST follow: .load(f"{SOURCE_PATH}/table_name.{FILE_FORMAT}/")
-# -----------------------------------------------------------------------------------
-customer_orders_bronze_df = (
+# --------------------------------------------------------------------------------
+# 1) Read source tables from S3 (Bronze)
+#    IMPORTANT: path format must be: .load(f"{SOURCE_PATH}/table_name.{FILE_FORMAT}/")
+# --------------------------------------------------------------------------------
+transactions_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/customer_orders_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/transactions_bronze.{FILE_FORMAT}/")
 )
-customer_orders_bronze_df.createOrReplaceTempView("customer_orders_bronze")
 
-customer_order_items_bronze_df = (
+stores_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/customer_order_items_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/stores_bronze.{FILE_FORMAT}/")
 )
-customer_order_items_bronze_df.createOrReplaceTempView("customer_order_items_bronze")
 
-etl_data_quality_results_bronze_df = (
+products_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/etl_data_quality_results_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/products_bronze.{FILE_FORMAT}/")
 )
-etl_data_quality_results_bronze_df.createOrReplaceTempView("etl_data_quality_results_bronze")
 
-# ===================================================================================
-# TARGET TABLE: silver.customer_orders_silver
-# - De-duplicate by transaction_id keeping latest transaction_time
-# - order_id = transaction_id
-# - order_date = CAST(transaction_time AS DATE)
-# - customer_id = store_id
-# - order_status = CASE WHEN sale_amount IS NOT NULL THEN 'COMPLETED' ELSE 'UNKNOWN' END
-# - order_total_amount = COALESCE(sale_amount,0)
-# - currency_code = 'USD'
-# - item_count = NULL
-# - source_system = 'sales_transactions_raw'
-# - load_date = CURRENT_DATE
-# ===================================================================================
-customer_orders_silver_sql = """
-WITH dedup AS (
+# --------------------------------------------------------------------------------
+# 2) Create temp views
+# --------------------------------------------------------------------------------
+transactions_bronze_df.createOrReplaceTempView("transactions_bronze")
+stores_bronze_df.createOrReplaceTempView("stores_bronze")
+products_bronze_df.createOrReplaceTempView("products_bronze")
+
+# =================================================================================
+# TARGET TABLE: silver.transactions_silver
+# =================================================================================
+transactions_silver_sql = """
+WITH base AS (
   SELECT
-    cob.*,
+    -- Exact UDT transformations
+    CAST(DATE(tb.transaction_time) AS DATE)                          AS sales_date,
+    CAST(tb.transaction_id AS STRING)                                AS transaction_id,
+    CAST(tb.store_id AS STRING)                                      AS store_id,
+    CAST(tb.product_id AS STRING)                                    AS product_id,
+    CAST(tb.quantity AS INT)                                         AS quantity,
+    CAST(tb.sale_amount AS DECIMAL(38, 10))                          AS sale_amount,
+    TRIM(sb.store_name)                                              AS store_name,
+    TRIM(sb.city)                                                    AS city,
+    TRIM(sb.state)                                                   AS state,
+    TRIM(sb.store_type)                                              AS store_type,
+    TRIM(pb.product_name)                                            AS product_name,
+    TRIM(pb.brand)                                                   AS brand,
+    UPPER(TRIM(pb.category))                                         AS category,
+
+    -- For dedup ordering and filtering
+    tb.transaction_time                                              AS transaction_time,
+    pb.is_active                                                     AS is_active,
+
     ROW_NUMBER() OVER (
-      PARTITION BY cob.transaction_id
-      ORDER BY cob.transaction_time DESC
+      PARTITION BY tb.transaction_id
+      ORDER BY tb.transaction_time DESC
     ) AS rn
-  FROM customer_orders_bronze cob
-)
-SELECT
-  CAST(dedup.transaction_id AS STRING)                                     AS order_id,
-  CAST(dedup.transaction_time AS DATE)                                     AS order_date,
-  CAST(dedup.store_id AS STRING)                                           AS customer_id,
-  CASE
-    WHEN dedup.sale_amount IS NOT NULL THEN 'COMPLETED'
-    ELSE 'UNKNOWN'
-  END                                                                      AS order_status,
-  CAST(COALESCE(dedup.sale_amount, 0) AS DECIMAL(38, 10))                  AS order_total_amount,
-  'USD'                                                                    AS currency_code,
-  CAST(NULL AS INT)                                                        AS item_count,
-  'sales_transactions_raw'                                                 AS source_system,
-  CURRENT_DATE                                                             AS load_date
-FROM dedup
-WHERE rn = 1
-"""
-customer_orders_silver_df = spark.sql(customer_orders_silver_sql)
-
-customer_orders_silver_output_path = f"{TARGET_PATH}/customer_orders_silver.csv"
-(
-    customer_orders_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .option("header", "true")
-    .csv(customer_orders_silver_output_path)
-)
-
-# ===================================================================================
-# TARGET TABLE: silver.customer_order_items_silver
-# - Join: coib INNER JOIN cob ON transaction_id
-# - De-duplicate by (transaction_id, product_id) keeping max quantity
-# - order_id = coib.transaction_id
-# - order_item_id = MD5(CONCAT(transaction_id,'|',COALESCE(product_id,'UNKNOWN')))
-# - product_id = COALESCE(product_id,'UNKNOWN')
-# - quantity = COALESCE(quantity,0)
-# - unit_price = CASE WHEN quantity>0 THEN cob.sale_amount/quantity ELSE NULL END
-# - line_amount = CASE WHEN quantity>0 THEN (cob.sale_amount/quantity)*quantity ELSE 0 END
-# - currency_code = 'USD'
-# - order_date = CAST(cob.transaction_time AS DATE)
-# - customer_id = cob.store_id
-# - load_date = CURRENT_DATE
-# - source_system = 'sales_transactions_raw'
-# ===================================================================================
-customer_order_items_silver_sql = """
-WITH joined AS (
-  SELECT
-    coib.transaction_id,
-    coib.product_id,
-    coib.quantity,
-    cob.sale_amount,
-    cob.transaction_time,
-    cob.store_id
-  FROM customer_order_items_bronze coib
-  INNER JOIN customer_orders_bronze cob
-    ON coib.transaction_id = cob.transaction_id
+  FROM transactions_bronze tb
+  LEFT JOIN stores_bronze sb
+    ON tb.store_id = sb.store_id
+  LEFT JOIN products_bronze pb
+    ON tb.product_id = pb.product_id
 ),
-dedup AS (
+filtered AS (
   SELECT
-    joined.*,
-    ROW_NUMBER() OVER (
-      PARTITION BY joined.transaction_id, COALESCE(joined.product_id, 'UNKNOWN')
-      ORDER BY COALESCE(joined.quantity, 0) DESC
-    ) AS rn
-  FROM joined
+    sales_date,
+    transaction_id,
+    store_id,
+    product_id,
+    quantity,
+    sale_amount,
+    store_name,
+    city,
+    state,
+    store_type,
+    product_name,
+    brand,
+    category
+  FROM base
+  WHERE 1=1
+    -- Non-null constraints (UDT: not_accepted)
+    AND transaction_id IS NOT NULL
+    AND store_id IS NOT NULL
+    AND product_id IS NOT NULL
+
+    -- Dedup keep latest
+    AND rn = 1
+
+    -- Business rules from description: coerce null metrics to 0 and exclude negatives
+    AND COALESCE(quantity, 0) >= 0
+    AND COALESCE(sale_amount, CAST(0 AS DECIMAL(38, 10))) >= CAST(0 AS DECIMAL(38, 10))
+
+    -- Include only active products when pb.is_active is true
+    AND COALESCE(is_active, false) = true
 )
 SELECT
-  CAST(dedup.transaction_id AS STRING)                                                     AS order_id,
-  MD5(CONCAT(CAST(dedup.transaction_id AS STRING), '|', COALESCE(CAST(dedup.product_id AS STRING), 'UNKNOWN')))
-                                                                                           AS order_item_id,
-  COALESCE(CAST(dedup.product_id AS STRING), 'UNKNOWN')                                     AS product_id,
-  CAST(COALESCE(dedup.quantity, 0) AS INT)                                                  AS quantity,
-  CAST(
-    CASE
-      WHEN COALESCE(dedup.quantity, 0) > 0 THEN dedup.sale_amount / COALESCE(dedup.quantity, 0)
-      ELSE NULL
-    END
-    AS DECIMAL(38, 10)
-  )                                                                                         AS unit_price,
-  CAST(
-    CASE
-      WHEN COALESCE(dedup.quantity, 0) > 0 THEN (dedup.sale_amount / COALESCE(dedup.quantity, 0)) * COALESCE(dedup.quantity, 0)
-      ELSE 0
-    END
-    AS DECIMAL(38, 10)
-  )                                                                                         AS line_amount,
-  'USD'                                                                                     AS currency_code,
-  CAST(dedup.transaction_time AS DATE)                                                      AS order_date,
-  CAST(dedup.store_id AS STRING)                                                            AS customer_id,
-  CURRENT_DATE                                                                              AS load_date,
-  'sales_transactions_raw'                                                                  AS source_system
-FROM dedup
-WHERE rn = 1
+  sales_date,
+  transaction_id,
+  store_id,
+  product_id,
+  CAST(COALESCE(quantity, 0) AS INT)                                 AS quantity,
+  CAST(COALESCE(sale_amount, CAST(0 AS DECIMAL(38, 10))) AS DECIMAL(38, 10)) AS sale_amount,
+  store_name,
+  city,
+  state,
+  store_type,
+  product_name,
+  brand,
+  category
+FROM filtered
 """
-customer_order_items_silver_df = spark.sql(customer_order_items_silver_sql)
 
-customer_order_items_silver_output_path = f"{TARGET_PATH}/customer_order_items_silver.csv"
+transactions_silver_df = spark.sql(transactions_silver_sql)
+
+# Write as a SINGLE CSV file directly under TARGET_PATH (no subfolders)
 (
-    customer_order_items_silver_df.coalesce(1)
+    transactions_silver_df.coalesce(1)
     .write.mode("overwrite")
+    .format("csv")
     .option("header", "true")
-    .csv(customer_order_items_silver_output_path)
+    .save(f"{TARGET_PATH}/transactions_silver.csv")
 )
 
-# ===================================================================================
-# TARGET TABLE: silver.etl_data_quality_results_silver
-# - De-duplicate by (source_transaction_id, dq_rule_name) keeping latest source_transaction_time
-# - process_date = CAST(source_transaction_time AS DATE)
-# - dataset_name = 'customer_orders'
-# - load_status = CASE WHEN dq_pass_flag THEN 'PASS' ELSE 'FAIL' END
-# - (Also include dq_rule_name, source_transaction_id, dq_pass_flag, source_transaction_time)
-# - source_system = 'sales_transactions_raw'
-# - load_date = CURRENT_DATE
-# ===================================================================================
-etl_data_quality_results_silver_sql = """
-WITH staged AS (
+# =================================================================================
+# TARGET TABLE: silver.stores_silver
+# =================================================================================
+stores_silver_sql = """
+WITH base AS (
   SELECT
-    edqrb.*,
+    -- Exact UDT transformations
+    CAST(sb.store_id AS STRING)                       AS store_id,
+    TRIM(sb.store_name)                               AS store_name,
+    TRIM(sb.city)                                     AS city,
+    TRIM(sb.state)                                    AS state,
+    TRIM(sb.store_type)                               AS store_type,
+    CAST(sb.open_date AS DATE)                        AS open_date,
+    CAST('USA' AS STRING)                             AS country,
+
     ROW_NUMBER() OVER (
-      PARTITION BY edqrb.source_transaction_id, edqrb.dq_rule_name
-      ORDER BY edqrb.source_transaction_time DESC
+      PARTITION BY sb.store_id
+      ORDER BY sb.open_date DESC
     ) AS rn
-  FROM etl_data_quality_results_bronze edqrb
+  FROM stores_bronze sb
 )
 SELECT
-  CAST(staged.source_transaction_id AS STRING)                                 AS source_transaction_id,
-  TRIM(CAST(staged.dq_rule_name AS STRING))                                    AS dq_rule_name,
-  CAST(staged.dq_pass_flag AS BOOLEAN)                                         AS dq_pass_flag,
-  staged.source_transaction_time                                               AS source_transaction_time,
-  CAST(staged.source_transaction_time AS DATE)                                 AS process_date,
-  'customer_orders'                                                            AS dataset_name,
-  CASE
-    WHEN CAST(staged.dq_pass_flag AS BOOLEAN) THEN 'PASS'
-    ELSE 'FAIL'
-  END                                                                          AS load_status,
-  'sales_transactions_raw'                                                     AS source_system,
-  CURRENT_DATE                                                                 AS load_date
-FROM staged
-WHERE rn = 1
+  store_id,
+  store_name,
+  city,
+  state,
+  store_type,
+  open_date,
+  country
+FROM base
+WHERE 1=1
+  -- Non-null constraint (UDT: not_accepted)
+  AND store_id IS NOT NULL
+  -- Dedup keep latest
+  AND rn = 1
 """
-etl_data_quality_results_silver_df = spark.sql(etl_data_quality_results_silver_sql)
 
-etl_data_quality_results_silver_output_path = f"{TARGET_PATH}/etl_data_quality_results_silver.csv"
+stores_silver_df = spark.sql(stores_silver_sql)
+
 (
-    etl_data_quality_results_silver_df.coalesce(1)
+    stores_silver_df.coalesce(1)
     .write.mode("overwrite")
+    .format("csv")
     .option("header", "true")
-    .csv(etl_data_quality_results_silver_output_path)
+    .save(f"{TARGET_PATH}/stores_silver.csv")
 )
 
-job.commit()
+# =================================================================================
+# TARGET TABLE: silver.products_silver
+# =================================================================================
+products_silver_sql = """
+WITH base AS (
+  SELECT
+    -- Exact UDT transformations
+    CAST(pb.product_id AS STRING)                      AS product_id,
+    TRIM(pb.product_name)                              AS product_name,
+    TRIM(pb.brand)                                     AS brand,
+    UPPER(TRIM(pb.category))                            AS category,
+    CAST(pb.price AS DECIMAL(38, 10))                  AS price,
+    CAST(pb.is_active AS BOOLEAN)                      AS is_active,
+
+    ROW_NUMBER() OVER (
+      PARTITION BY pb.product_id
+      ORDER BY pb.product_id
+    ) AS rn
+  FROM products_bronze pb
+)
+SELECT
+  product_id,
+  product_name,
+  brand,
+  category,
+  price,
+  is_active
+FROM base
+WHERE 1=1
+  -- Non-null constraint (UDT: not_accepted)
+  AND product_id IS NOT NULL
+  -- Dedup keep one record per product_id
+  AND rn = 1
+"""
+
+products_silver_df = spark.sql(products_silver_sql)
+
+(
+    products_silver_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/products_silver.csv")
+)
+
+# =================================================================================
+# TARGET TABLE: silver.categories_silver
+# =================================================================================
+categories_silver_sql = """
+SELECT DISTINCT
+  -- Exact UDT transformation
+  UPPER(TRIM(pb.category)) AS category
+FROM products_bronze pb
+WHERE 1=1
+  AND pb.category IS NOT NULL
+  AND TRIM(pb.category) <> ''
+"""
+
+categories_silver_df = spark.sql(categories_silver_sql)
+
+(
+    categories_silver_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/categories_silver.csv")
+)
 ```
