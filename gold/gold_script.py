@@ -6,9 +6,9 @@ from awsglue.job import Job
 from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 
-# --------------------------------------------------------------------------------------
-# AWS Glue bootstrap
-# --------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------
+# Job setup (AWS Glue)
+# -----------------------------------------------------------------------------------
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
 sc = SparkContext()
 glueContext = GlueContext(sc)
@@ -16,172 +16,246 @@ spark: SparkSession = glueContext.spark_session
 job = Job(glueContext)
 job.init(args["JOB_NAME"], args)
 
-# --------------------------------------------------------------------------------------
-# Config
-# --------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------
+# Parameters (as provided)
+# -----------------------------------------------------------------------------------
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-# CSV read options (adjust if your silver files differ)
-csv_read_options = {
-    "header": "true",
-    "inferSchema": "true",
-    "mode": "PERMISSIVE"
-}
-
-# --------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------
 # 1) Read source tables from S3 (Silver)
-#    IMPORTANT: path format must be: .load(f"{SOURCE_PATH}/table_name.{FILE_FORMAT}/")
-# --------------------------------------------------------------------------------------
-customer_orders_silver_df = (
+#    SOURCE READING RULE:
+#      .load(f"{SOURCE_PATH}/table_name.{FILE_FORMAT}/")
+# -----------------------------------------------------------------------------------
+transactions_silver_df = (
     spark.read.format(FILE_FORMAT)
-    .options(**csv_read_options)
-    .load(f"{SOURCE_PATH}/customer_orders_silver.{FILE_FORMAT}/")
+    .option("header", "true")
+    .option("inferSchema", "true")
+    .load(f"{SOURCE_PATH}/transactions_silver.{FILE_FORMAT}/")
 )
 
-customer_order_items_silver_df = (
+stores_silver_df = (
     spark.read.format(FILE_FORMAT)
-    .options(**csv_read_options)
-    .load(f"{SOURCE_PATH}/customer_order_items_silver.{FILE_FORMAT}/")
+    .option("header", "true")
+    .option("inferSchema", "true")
+    .load(f"{SOURCE_PATH}/stores_silver.{FILE_FORMAT}/")
 )
 
-etl_data_quality_results_silver_df = (
+products_silver_df = (
     spark.read.format(FILE_FORMAT)
-    .options(**csv_read_options)
-    .load(f"{SOURCE_PATH}/etl_data_quality_results_silver.{FILE_FORMAT}/")
+    .option("header", "true")
+    .option("inferSchema", "true")
+    .load(f"{SOURCE_PATH}/products_silver.{FILE_FORMAT}/")
 )
 
-# --------------------------------------------------------------------------------------
+categories_silver_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .option("inferSchema", "true")
+    .load(f"{SOURCE_PATH}/categories_silver.{FILE_FORMAT}/")
+)
+
+# -----------------------------------------------------------------------------------
 # 2) Create temp views
-# --------------------------------------------------------------------------------------
-customer_orders_silver_df.createOrReplaceTempView("customer_orders_silver")
-customer_order_items_silver_df.createOrReplaceTempView("customer_order_items_silver")
-etl_data_quality_results_silver_df.createOrReplaceTempView("etl_data_quality_results_silver")
+# -----------------------------------------------------------------------------------
+transactions_silver_df.createOrReplaceTempView("transactions_silver")
+stores_silver_df.createOrReplaceTempView("stores_silver")
+products_silver_df.createOrReplaceTempView("products_silver")
+categories_silver_df.createOrReplaceTempView("categories_silver")
 
-# ======================================================================================
-# TARGET TABLE: gold.gold_customer_orders (gco)
-# Source mapping:
-# silver.customer_orders_silver cos
-# LEFT JOIN (SELECT order_id, COUNT(*) AS item_count FROM silver.customer_order_items_silver GROUP BY order_id) cois_cnt
-#   ON cos.order_id = cois_cnt.order_id
-# ======================================================================================
-gold_customer_orders_sql = """
-WITH cois_cnt AS (
-  SELECT
-    CAST(TRIM(order_id) AS STRING) AS order_id,
-    CAST(COUNT(1) AS INT) AS item_count
-  FROM customer_order_items_silver
-  GROUP BY CAST(TRIM(order_id) AS STRING)
-)
+# ===================================================================================
+# TARGET TABLE 1: gold_store_daily_sales
+# Mapping: transactions_silver ts LEFT JOIN stores_silver ss ON ts.store_id = ss.store_id
+# Transformations (EXACT from UDT):
+#   gsds.sales_date = ts.sales_date
+#   gsds.store_id = ts.store_id
+#   gsds.store_name = ss.store_name
+#   gsds.city = ss.city
+#   gsds.state = ss.state
+#   gsds.country = ss.country
+#   gsds.store_type = ss.store_type
+#   gsds.total_revenue = SUM(ts.sale_amount)
+#   gsds.total_quantity_sold = SUM(ts.quantity)
+#   gsds.transaction_count = COUNT(DISTINCT ts.transaction_id)
+# ===================================================================================
+gold_store_daily_sales_sql = """
 SELECT
-  CAST(TRIM(cos.order_id) AS STRING)                                         AS order_id,
-  CAST(cos.order_date AS DATE)                                               AS order_date,
-  CAST(cos.customer_id AS STRING)                                            AS customer_id,
-  CAST(TRIM(cos.order_status) AS STRING)                                     AS order_status,
-  CAST(cos.order_total_amount AS DECIMAL(38, 10))                            AS order_total_amount,
-  CAST(TRIM(cos.currency_code) AS STRING)                                    AS currency_code,
-  CAST(cois_cnt.item_count AS INT)                                           AS item_count,
-  CAST(TRIM(cos.source_system) AS STRING)                                    AS source_system,
-  CAST(cos.load_date AS DATE)                                                AS load_date
-FROM customer_orders_silver cos
-LEFT JOIN cois_cnt
-  ON CAST(TRIM(cos.order_id) AS STRING) = cois_cnt.order_id
-"""
-
-gold_customer_orders_df = spark.sql(gold_customer_orders_sql)
-
-# --------------------------------------------------------------------------------------
-# 4) Save output (SINGLE CSV file directly under TARGET_PATH)
-#     Output path MUST be: TARGET_PATH + "/" + target_table.csv
-# --------------------------------------------------------------------------------------
-(
-    gold_customer_orders_df.coalesce(1)
-    .write.mode("overwrite")
-    .option("header", "true")
-    .csv(f"{TARGET_PATH}/gold_customer_orders.csv")
-)
-
-# ======================================================================================
-# TARGET TABLE: gold.gold_customer_order_items (gcoi)
-# Source mapping:
-# silver.customer_order_items_silver cois
-# ======================================================================================
-gold_customer_order_items_sql = """
-SELECT
-  CAST(TRIM(cois.order_id) AS STRING)                                        AS order_id,
-  CAST(TRIM(cois.order_item_id) AS STRING)                                   AS order_item_id,
-  CAST(TRIM(cois.product_id) AS STRING)                                      AS product_id,
-  CAST(cois.quantity AS INT)                                                 AS quantity,
-  CAST(cois.unit_price AS DECIMAL(38, 10))                                   AS unit_price,
-  CAST(cois.line_amount AS DECIMAL(38, 10))                                  AS line_amount,
-  CAST(TRIM(cois.currency_code) AS STRING)                                   AS currency_code,
-  CAST(cois.order_date AS DATE)                                              AS order_date,
-  CAST(cois.customer_id AS STRING)                                           AS customer_id,
-  CAST(cois.load_date AS DATE)                                               AS load_date
-FROM customer_order_items_silver cois
-"""
-
-gold_customer_order_items_df = spark.sql(gold_customer_order_items_sql)
-
-(
-    gold_customer_order_items_df.coalesce(1)
-    .write.mode("overwrite")
-    .option("header", "true")
-    .csv(f"{TARGET_PATH}/gold_customer_order_items.csv")
-)
-
-# ======================================================================================
-# TARGET TABLE: gold.gold_etl_data_quality_results (gedqr)
-# Source mapping:
-# silver.etl_data_quality_results_silver edqrs
-# Transformations:
-# - total_records      = COUNT(edqrs.load_status)
-# - valid_records      = SUM(CASE WHEN load_status='PASS' THEN 1 ELSE 0 END)
-# - invalid_records    = SUM(CASE WHEN load_status='FAIL' THEN 1 ELSE 0 END)
-# - accuracy_rate_pct  = (valid_records * 100.0) / total_records
-# - load_status        = CASE WHEN invalid_records=0 THEN 'PASS' ELSE 'FAIL' END
-# ======================================================================================
-gold_etl_data_quality_results_sql = """
-SELECT
-  CAST(edqrs.process_date AS DATE) AS process_date,
-  CAST(TRIM(edqrs.dataset_name) AS STRING) AS dataset_name,
-
-  CAST(COUNT(edqrs.load_status) AS INT) AS total_records,
-
-  CAST(SUM(CASE WHEN TRIM(edqrs.load_status) = 'PASS' THEN 1 ELSE 0 END) AS INT) AS valid_records,
-
-  CAST(SUM(CASE WHEN TRIM(edqrs.load_status) = 'FAIL' THEN 1 ELSE 0 END) AS INT) AS invalid_records,
-
-  CAST(
-    (
-      SUM(CASE WHEN TRIM(edqrs.load_status) = 'PASS' THEN 1 ELSE 0 END) * 100.0
-    ) / COUNT(edqrs.load_status)
-    AS DECIMAL(38, 10)
-  ) AS accuracy_rate_pct,
-
-  CAST(
-    CASE
-      WHEN SUM(CASE WHEN TRIM(edqrs.load_status) = 'FAIL' THEN 1 ELSE 0 END) = 0 THEN 'PASS'
-      ELSE 'FAIL'
-    END
-    AS STRING
-  ) AS load_status
-
-FROM etl_data_quality_results_silver edqrs
+  CAST(ts.sales_date AS DATE)                                         AS sales_date,
+  CAST(ts.store_id AS STRING)                                         AS store_id,
+  CAST(ss.store_name AS STRING)                                       AS store_name,
+  CAST(ss.city AS STRING)                                             AS city,
+  CAST(ss.state AS STRING)                                            AS state,
+  CAST(ss.country AS STRING)                                          AS country,
+  CAST(ss.store_type AS STRING)                                       AS store_type,
+  SUM(CAST(ts.sale_amount AS DECIMAL(38, 10)))                        AS total_revenue,
+  SUM(CAST(ts.quantity AS INT))                                       AS total_quantity_sold,
+  CAST(COUNT(DISTINCT ts.transaction_id) AS INT)                      AS transaction_count
+FROM transactions_silver ts
+LEFT JOIN stores_silver ss
+  ON ts.store_id = ss.store_id
 GROUP BY
-  CAST(edqrs.process_date AS DATE),
-  CAST(TRIM(edqrs.dataset_name) AS STRING)
+  CAST(ts.sales_date AS DATE),
+  CAST(ts.store_id AS STRING),
+  CAST(ss.store_name AS STRING),
+  CAST(ss.city AS STRING),
+  CAST(ss.state AS STRING),
+  CAST(ss.country AS STRING),
+  CAST(ss.store_type AS STRING)
 """
 
-gold_etl_data_quality_results_df = spark.sql(gold_etl_data_quality_results_sql)
+gold_store_daily_sales_df = spark.sql(gold_store_daily_sales_sql)
+
+# Write as SINGLE CSV file directly under TARGET_PATH (no subfolders)
+gold_store_daily_sales_output_tmp = f"{TARGET_PATH}/gold_store_daily_sales_tmp/"
+gold_store_daily_sales_output_final = f"{TARGET_PATH}/gold_store_daily_sales.csv"
 
 (
-    gold_etl_data_quality_results_df.coalesce(1)
+    gold_store_daily_sales_df.coalesce(1)
     .write.mode("overwrite")
+    .format("csv")
     .option("header", "true")
-    .csv(f"{TARGET_PATH}/gold_etl_data_quality_results.csv")
+    .save(gold_store_daily_sales_output_tmp)
 )
+
+# Move single part file to required final path (single CSV directly under TARGET_PATH)
+_tmp_files_1 = sc._jvm.org.apache.hadoop.fs.FileSystem.get(
+    sc._jsc.hadoopConfiguration()
+).listStatus(sc._jvm.org.apache.hadoop.fs.Path(gold_store_daily_sales_output_tmp))
+_part_file_1 = None
+for f in _tmp_files_1:
+    p = f.getPath().getName()
+    if p.startswith("part-") and p.endswith(".csv"):
+        _part_file_1 = f.getPath().toString()
+
+fs1 = sc._jvm.org.apache.hadoop.fs.FileSystem.get(sc._jsc.hadoopConfiguration())
+fs1.delete(sc._jvm.org.apache.hadoop.fs.Path(gold_store_daily_sales_output_final), True)
+fs1.rename(
+    sc._jvm.org.apache.hadoop.fs.Path(_part_file_1),
+    sc._jvm.org.apache.hadoop.fs.Path(gold_store_daily_sales_output_final),
+)
+fs1.delete(sc._jvm.org.apache.hadoop.fs.Path(gold_store_daily_sales_output_tmp), True)
+
+# ===================================================================================
+# TARGET TABLE 2: gold_product_daily_sales
+# Mapping: transactions_silver ts LEFT JOIN products_silver ps ON ts.product_id = ps.product_id
+# Transformations (EXACT from UDT):
+#   gpds.sales_date = ts.sales_date
+#   gpds.product_id = ts.product_id
+#   gpds.product_name = ps.product_name
+#   gpds.brand = ps.brand
+#   gpds.category = ps.category
+#   gpds.total_revenue = SUM(ts.sale_amount)
+#   gpds.total_quantity_sold = SUM(ts.quantity)
+#   gpds.transaction_count = COUNT(DISTINCT ts.transaction_id)
+# ===================================================================================
+gold_product_daily_sales_sql = """
+SELECT
+  CAST(ts.sales_date AS DATE)                                         AS sales_date,
+  CAST(ts.product_id AS STRING)                                       AS product_id,
+  CAST(ps.product_name AS STRING)                                     AS product_name,
+  CAST(ps.brand AS STRING)                                            AS brand,
+  CAST(ps.category AS STRING)                                         AS category,
+  SUM(CAST(ts.sale_amount AS DECIMAL(38, 10)))                        AS total_revenue,
+  SUM(CAST(ts.quantity AS INT))                                       AS total_quantity_sold,
+  CAST(COUNT(DISTINCT ts.transaction_id) AS INT)                      AS transaction_count
+FROM transactions_silver ts
+LEFT JOIN products_silver ps
+  ON ts.product_id = ps.product_id
+GROUP BY
+  CAST(ts.sales_date AS DATE),
+  CAST(ts.product_id AS STRING),
+  CAST(ps.product_name AS STRING),
+  CAST(ps.brand AS STRING),
+  CAST(ps.category AS STRING)
+"""
+
+gold_product_daily_sales_df = spark.sql(gold_product_daily_sales_sql)
+
+# Write as SINGLE CSV file directly under TARGET_PATH (no subfolders)
+gold_product_daily_sales_output_tmp = f"{TARGET_PATH}/gold_product_daily_sales_tmp/"
+gold_product_daily_sales_output_final = f"{TARGET_PATH}/gold_product_daily_sales.csv"
+
+(
+    gold_product_daily_sales_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(gold_product_daily_sales_output_tmp)
+)
+
+_tmp_files_2 = sc._jvm.org.apache.hadoop.fs.FileSystem.get(
+    sc._jsc.hadoopConfiguration()
+).listStatus(sc._jvm.org.apache.hadoop.fs.Path(gold_product_daily_sales_output_tmp))
+_part_file_2 = None
+for f in _tmp_files_2:
+    p = f.getPath().getName()
+    if p.startswith("part-") and p.endswith(".csv"):
+        _part_file_2 = f.getPath().toString()
+
+fs2 = sc._jvm.org.apache.hadoop.fs.FileSystem.get(sc._jsc.hadoopConfiguration())
+fs2.delete(sc._jvm.org.apache.hadoop.fs.Path(gold_product_daily_sales_output_final), True)
+fs2.rename(
+    sc._jvm.org.apache.hadoop.fs.Path(_part_file_2),
+    sc._jvm.org.apache.hadoop.fs.Path(gold_product_daily_sales_output_final),
+)
+fs2.delete(sc._jvm.org.apache.hadoop.fs.Path(gold_product_daily_sales_output_tmp), True)
+
+# ===================================================================================
+# TARGET TABLE 3: gold_category_daily_sales
+# Mapping: transactions_silver ts INNER JOIN categories_silver cs ON ts.category = cs.category
+# Transformations (EXACT from UDT):
+#   gcds.sales_date = ts.sales_date
+#   gcds.category = cs.category
+#   gcds.total_revenue = SUM(ts.sale_amount)
+#   gcds.total_quantity_sold = SUM(ts.quantity)
+#   gcds.transaction_count = COUNT(DISTINCT ts.transaction_id)
+# ===================================================================================
+gold_category_daily_sales_sql = """
+SELECT
+  CAST(ts.sales_date AS DATE)                                         AS sales_date,
+  CAST(cs.category AS STRING)                                         AS category,
+  SUM(CAST(ts.sale_amount AS DECIMAL(38, 10)))                        AS total_revenue,
+  SUM(CAST(ts.quantity AS INT))                                       AS total_quantity_sold,
+  CAST(COUNT(DISTINCT ts.transaction_id) AS INT)                      AS transaction_count
+FROM transactions_silver ts
+INNER JOIN categories_silver cs
+  ON ts.category = cs.category
+GROUP BY
+  CAST(ts.sales_date AS DATE),
+  CAST(cs.category AS STRING)
+"""
+
+gold_category_daily_sales_df = spark.sql(gold_category_daily_sales_sql)
+
+# Write as SINGLE CSV file directly under TARGET_PATH (no subfolders)
+gold_category_daily_sales_output_tmp = f"{TARGET_PATH}/gold_category_daily_sales_tmp/"
+gold_category_daily_sales_output_final = f"{TARGET_PATH}/gold_category_daily_sales.csv"
+
+(
+    gold_category_daily_sales_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(gold_category_daily_sales_output_tmp)
+)
+
+_tmp_files_3 = sc._jvm.org.apache.hadoop.fs.FileSystem.get(
+    sc._jsc.hadoopConfiguration()
+).listStatus(sc._jvm.org.apache.hadoop.fs.Path(gold_category_daily_sales_output_tmp))
+_part_file_3 = None
+for f in _tmp_files_3:
+    p = f.getPath().getName()
+    if p.startswith("part-") and p.endswith(".csv"):
+        _part_file_3 = f.getPath().toString()
+
+fs3 = sc._jvm.org.apache.hadoop.fs.FileSystem.get(sc._jsc.hadoopConfiguration())
+fs3.delete(sc._jvm.org.apache.hadoop.fs.Path(gold_category_daily_sales_output_final), True)
+fs3.rename(
+    sc._jvm.org.apache.hadoop.fs.Path(_part_file_3),
+    sc._jvm.org.apache.hadoop.fs.Path(gold_category_daily_sales_output_final),
+)
+fs3.delete(sc._jvm.org.apache.hadoop.fs.Path(gold_category_daily_sales_output_tmp), True)
 
 job.commit()
 ```
