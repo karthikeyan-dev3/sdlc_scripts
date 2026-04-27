@@ -1,289 +1,132 @@
 ```python
 import sys
-from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
 from awsglue.job import Job
+from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 
-# --------------------------------------------------------------------------------------
-# AWS Glue bootstrap
-# --------------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------------
+# Glue / Spark setup
+# ------------------------------------------------------------------------------------
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
-sc = SparkContext.getOrCreate()
-glueContext = GlueContext(sc)
-spark: SparkSession = glueContext.spark_session
-job = Job(glueContext)
+sc = SparkContext()
+glue_context = GlueContext(sc)
+spark: SparkSession = glue_context.spark_session
+job = Job(glue_context)
 job.init(args["JOB_NAME"], args)
 
-# --------------------------------------------------------------------------------------
-# Config
-# --------------------------------------------------------------------------------------
-SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze"
-TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver"
+# ------------------------------------------------------------------------------------
+# Parameters (as provided)
+# ------------------------------------------------------------------------------------
+SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
+TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 FILE_FORMAT = "csv"
 
-# CSV handling (typical bronze exports). Adjust options only if needed.
-read_options = {
-    "header": "true",
-    "inferSchema": "true",
-    "mode": "PERMISSIVE",
-}
-
-# --------------------------------------------------------------------------------------
-# 1) Read source tables from S3
-#    (STRICT SOURCE READING RULE: .load(f"{SOURCE_PATH}/table_name.{FILE_FORMAT}/"))
-# --------------------------------------------------------------------------------------
-orders_bronze_df = (
+# ------------------------------------------------------------------------------------
+# SOURCE READS + TEMP VIEWS
+# (Path format is STRICT: .load(f"{SOURCE_PATH}/table_name.{FILE_FORMAT}/")
+# ------------------------------------------------------------------------------------
+stores_bronze_df = (
     spark.read.format(FILE_FORMAT)
-    .options(**read_options)
-    .load(f"{SOURCE_PATH}/orders_bronze.{FILE_FORMAT}/")
+    .option("header", "true")
+    .option("inferSchema", "false")
+    .load(f"{SOURCE_PATH}/stores_bronze.{FILE_FORMAT}/")
 )
+stores_bronze_df.createOrReplaceTempView("stores_bronze")
 
-order_items_bronze_df = (
+products_bronze_df = (
     spark.read.format(FILE_FORMAT)
-    .options(**read_options)
-    .load(f"{SOURCE_PATH}/order_items_bronze.{FILE_FORMAT}/")
-)
-
-# --------------------------------------------------------------------------------------
-# 2) Create temp views
-# --------------------------------------------------------------------------------------
-orders_bronze_df.createOrReplaceTempView("orders_bronze")
-order_items_bronze_df.createOrReplaceTempView("order_items_bronze")
-
-# ======================================================================================
-# TABLE: orders_silver
-# ======================================================================================
-# 3) SQL transform (dedup + mappings + validations)
-orders_silver_df = spark.sql(
-    """
-    WITH joined AS (
-        SELECT
-            ob.transaction_id,
-            ob.transaction_time,
-            ob.store_id,
-            ob.sale_amount,
-
-            oib.product_id,
-
-            -- pass-through metadata if present in bronze; will be NULL if not present
-            ob.source_s3_file_path AS source_s3_file_path,
-            CAST(ob.ingestion_date AS DATE) AS ingestion_date
-        FROM orders_bronze ob
-        LEFT JOIN order_items_bronze oib
-            ON ob.transaction_id = oib.transaction_id
-    ),
-    aggregated AS (
-        SELECT
-            -- keys & core fields
-            CAST(transaction_id AS STRING) AS order_id,
-            CAST(transaction_time AS DATE) AS order_date,
-            CAST(store_id AS STRING) AS customer_id,
-            CAST(sale_amount AS DECIMAL(38, 10)) AS order_total_amount,
-
-            -- defaults (not present in bronze)
-            CAST('COMPLETED' AS STRING) AS order_status,
-            CAST('USD' AS STRING) AS currency_code,
-
-            -- UDT required: COUNT(DISTINCT oib.product_id) OVER (PARTITION BY ob.transaction_id)
-            -- implemented as window over joined rows
-            CAST(
-                COUNT(DISTINCT product_id) OVER (PARTITION BY transaction_id)
-                AS INT
-            ) AS items_count,
-
-            source_s3_file_path,
-            ingestion_date,
-
-            current_timestamp() AS load_timestamp,
-
-            -- Deduplicate on (transaction_id) keep latest by transaction_time
-            ROW_NUMBER() OVER (
-                PARTITION BY transaction_id
-                ORDER BY transaction_time DESC, ingestion_date DESC, source_s3_file_path DESC
-            ) AS rn
-        FROM joined
-    )
-    SELECT
-        order_id,
-        order_date,
-        customer_id,
-        order_status,
-        order_total_amount,
-        currency_code,
-        items_count,
-        source_s3_file_path,
-        ingestion_date,
-        load_timestamp
-    FROM aggregated
-    WHERE rn = 1
-      AND order_id IS NOT NULL
-      AND order_date IS NOT NULL
-      AND customer_id IS NOT NULL
-      AND order_total_amount IS NOT NULL
-      AND order_total_amount >= 0
-    """
-)
-
-# 4) Save output (STRICT OUTPUT RULE: single CSV file directly under TARGET_PATH)
-(
-    orders_silver_df.coalesce(1)
-    .write.mode("overwrite")
     .option("header", "true")
-    .csv(f"{TARGET_PATH}/orders_silver.csv")
+    .option("inferSchema", "false")
+    .load(f"{SOURCE_PATH}/products_bronze.{FILE_FORMAT}/")
 )
+products_bronze_df.createOrReplaceTempView("products_bronze")
 
-# ======================================================================================
-# TABLE: order_items_silver
-# ======================================================================================
-# 3) SQL transform (dedup + mappings + validations)
-order_items_silver_df = spark.sql(
-    """
-    WITH joined AS (
-        SELECT
-            oib.transaction_id,
-            oib.product_id,
-            oib.quantity,
-
-            ob.transaction_time,
-            CAST(ob.transaction_time AS DATE) AS order_date,
-
-            -- pass-through metadata if present in bronze; will be NULL if not present
-            oib.source_s3_file_path AS source_s3_file_path,
-            CAST(oib.ingestion_date AS DATE) AS ingestion_date
-        FROM order_items_bronze oib
-        INNER JOIN orders_bronze ob
-            ON oib.transaction_id = ob.transaction_id
-    ),
-    numbered AS (
-        SELECT
-            CAST(transaction_id AS STRING) AS order_id,
-
-            -- UDT required unique id:
-            -- CONCAT(transaction_id,'-',product_id,'-',ROW_NUMBER() OVER (PARTITION BY transaction_id,product_id ORDER BY transaction_time))
-            CONCAT(
-                CAST(transaction_id AS STRING), '-',
-                CAST(product_id AS STRING), '-',
-                CAST(
-                    ROW_NUMBER() OVER (
-                        PARTITION BY transaction_id, product_id
-                        ORDER BY transaction_time
-                    ) AS STRING
-                )
-            ) AS order_item_id,
-
-            CAST(product_id AS STRING) AS product_id,
-            CAST(quantity AS INT) AS quantity,
-
-            -- not available / not computable in bronze
-            CAST(NULL AS DECIMAL(38, 10)) AS unit_price,
-            CAST(NULL AS DECIMAL(38, 10)) AS line_amount,
-
-            CAST('USD' AS STRING) AS currency_code,
-
-            CAST(order_date AS DATE) AS order_date,
-
-            -- not available
-            CAST(NULL AS STRING) AS customer_id,
-
-            source_s3_file_path,
-            ingestion_date,
-
-            current_timestamp() AS load_timestamp,
-
-            -- Deduplicate on (transaction_id, product_id, quantity) keep latest by transaction_time
-            ROW_NUMBER() OVER (
-                PARTITION BY transaction_id, product_id, quantity
-                ORDER BY transaction_time DESC, ingestion_date DESC, source_s3_file_path DESC
-            ) AS rn
-        FROM joined
-    )
+# ------------------------------------------------------------------------------------
+# TARGET TABLE: stores_silver
+# - Apply UDT transformations exactly:
+#     ss.store_id=sb.store_id
+#     ss.store_name=sb.store_name
+#     ss.region=sb.state
+# - Include dedup with ROW_NUMBER (latest cannot be determined from UDT, so stable pick)
+# ------------------------------------------------------------------------------------
+stores_silver_df = spark.sql("""
+WITH base AS (
     SELECT
-        order_id,
-        order_item_id,
-        product_id,
-        quantity,
-        unit_price,
-        line_amount,
-        currency_code,
-        order_date,
-        customer_id,
-        source_s3_file_path,
-        ingestion_date,
-        load_timestamp
-    FROM numbered
-    WHERE rn = 1
-      AND order_id IS NOT NULL
-      AND order_item_id IS NOT NULL
-      AND product_id IS NOT NULL
-      AND quantity IS NOT NULL
-      AND quantity > 0
-      AND order_date IS NOT NULL
-    """
-)
-
-# 4) Save output (STRICT OUTPUT RULE: single CSV file directly under TARGET_PATH)
-(
-    order_items_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .option("header", "true")
-    .csv(f"{TARGET_PATH}/order_items_silver.csv")
-)
-
-# ======================================================================================
-# TABLE: customers_silver
-# ======================================================================================
-# 3) SQL transform (dedup + mappings + validations)
-customers_silver_df = spark.sql(
-    """
-    WITH base AS (
-        SELECT
-            CAST(ob.store_id AS STRING) AS customer_id,
-
-            CAST(NULL AS STRING) AS customer_name,
-            CAST(NULL AS STRING) AS customer_email,
-
-            -- UDT required: MIN(CAST(ob.transaction_time AS DATE)) OVER (PARTITION BY ob.store_id)
-            CAST(
-                MIN(CAST(ob.transaction_time AS DATE)) OVER (PARTITION BY ob.store_id)
-                AS DATE
-            ) AS customer_created_date,
-
-            CAST('ACTIVE' AS STRING) AS customer_status,
-
-            current_timestamp() AS load_timestamp,
-
-            -- For dedup: keep earliest created date and latest load timestamp.
-            -- Since load_timestamp is generated, use a stable rule: pick one row per store_id.
-            ROW_NUMBER() OVER (
-                PARTITION BY ob.store_id
-                ORDER BY CAST(ob.transaction_time AS DATE) ASC, ob.transaction_time ASC
-            ) AS rn
-        FROM orders_bronze ob
-        WHERE ob.store_id IS NOT NULL
-          AND ob.transaction_time IS NOT NULL
-    )
+        CAST(TRIM(sb.store_id) AS STRING)      AS store_id,
+        CAST(TRIM(sb.store_name) AS STRING)    AS store_name,
+        CAST(TRIM(sb.state) AS STRING)         AS region
+    FROM stores_bronze sb
+),
+dedup AS (
     SELECT
-        customer_id,
-        customer_name,
-        customer_email,
-        customer_created_date,
-        customer_status,
-        load_timestamp
+        store_id,
+        store_name,
+        region,
+        ROW_NUMBER() OVER (
+            PARTITION BY store_id
+            ORDER BY store_id
+        ) AS rn
     FROM base
-    WHERE rn = 1
-      AND customer_id IS NOT NULL
-      AND customer_created_date IS NOT NULL
-    """
 )
+SELECT
+    store_id,
+    store_name,
+    region
+FROM dedup
+WHERE rn = 1
+""")
 
-# 4) Save output (STRICT OUTPUT RULE: single CSV file directly under TARGET_PATH)
+# Write SINGLE CSV file directly under TARGET_PATH (no subfolders)
 (
-    customers_silver_df.coalesce(1)
+    stores_silver_df.coalesce(1)
     .write.mode("overwrite")
     .option("header", "true")
-    .csv(f"{TARGET_PATH}/customers_silver.csv")
+    .csv(f"{TARGET_PATH}/stores_silver.csv")
+)
+
+# ------------------------------------------------------------------------------------
+# TARGET TABLE: products_silver
+# - Apply UDT transformations exactly:
+#     ps.product_id=pb.product_id
+#     ps.product_name=pb.product_name
+#     ps.standard_category=pb.category
+# - Include dedup with ROW_NUMBER (latest cannot be determined from UDT, so stable pick)
+# ------------------------------------------------------------------------------------
+products_silver_df = spark.sql("""
+WITH base AS (
+    SELECT
+        CAST(TRIM(pb.product_id) AS STRING)     AS product_id,
+        CAST(TRIM(pb.product_name) AS STRING)   AS product_name,
+        CAST(TRIM(pb.category) AS STRING)       AS standard_category
+    FROM products_bronze pb
+),
+dedup AS (
+    SELECT
+        product_id,
+        product_name,
+        standard_category,
+        ROW_NUMBER() OVER (
+            PARTITION BY product_id
+            ORDER BY product_id
+        ) AS rn
+    FROM base
+)
+SELECT
+    product_id,
+    product_name,
+    standard_category
+FROM dedup
+WHERE rn = 1
+""")
+
+# Write SINGLE CSV file directly under TARGET_PATH (no subfolders)
+(
+    products_silver_df.coalesce(1)
+    .write.mode("overwrite")
+    .option("header", "true")
+    .csv(f"{TARGET_PATH}/products_silver.csv")
 )
 
 job.commit()
