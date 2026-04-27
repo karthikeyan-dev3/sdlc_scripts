@@ -1,17 +1,17 @@
 ```python
 import sys
-from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
 from awsglue.job import Job
+from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 
 # -----------------------------------------------------------------------------------
-# Glue job bootstrap
+# Glue / Spark bootstrap
 # -----------------------------------------------------------------------------------
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
 
-sc = SparkContext()
+sc = SparkContext.getOrCreate()
 glueContext = GlueContext(sc)
 spark: SparkSession = glueContext.spark_session
 job = Job(glueContext)
@@ -24,121 +24,101 @@ SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-# -----------------------------------------------------------------------------------
-# Source reads (S3) + Temp Views
-# NOTE: Paths must follow: .load(f"{SOURCE_PATH}/table_name.{FILE_FORMAT}/")
-# -----------------------------------------------------------------------------------
-orders_silver_df = (
+# Recommended for deterministic single-file writes (best-effort)
+spark.conf.set("spark.sql.shuffle.partitions", "1")
+
+# ===================================================================================
+# SOURCE READS + TEMP VIEWS
+# ===================================================================================
+
+# silver.customer_orders_silver
+df_customer_orders_silver = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/orders_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/customer_orders_silver.{FILE_FORMAT}/")
 )
-orders_silver_df.createOrReplaceTempView("orders_silver")
+df_customer_orders_silver.createOrReplaceTempView("customer_orders_silver")
 
-order_items_silver_df = (
+# silver.customer_order_items_silver
+df_customer_order_items_silver = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/order_items_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/customer_order_items_silver.{FILE_FORMAT}/")
 )
-order_items_silver_df.createOrReplaceTempView("order_items_silver")
+df_customer_order_items_silver.createOrReplaceTempView("customer_order_items_silver")
 
-orders_data_quality_daily_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/orders_data_quality_daily_silver.{FILE_FORMAT}/")
+# ===================================================================================
+# TARGET TABLE 1: gold.gold_customer_orders
+# Mapping: silver.customer_orders_silver cos
+#          LEFT JOIN (SELECT order_id, COUNT(*) AS items_count FROM silver.customer_order_items_silver GROUP BY order_id) cois_agg
+#          ON cos.order_id = cois_agg.order_id
+# ===================================================================================
+
+df_gold_customer_orders = spark.sql(
+    """
+    WITH cois_agg AS (
+      SELECT
+        CAST(order_id AS STRING) AS order_id,
+        CAST(COUNT(*) AS INT) AS items_count
+      FROM customer_order_items_silver
+      GROUP BY CAST(order_id AS STRING)
+    )
+    SELECT
+      CAST(cos.order_id AS STRING) AS order_id,
+      CAST(cos.order_date AS DATE) AS order_date,
+      CAST(cos.customer_id AS STRING) AS customer_id,
+      CAST(cos.order_status AS STRING) AS order_status,
+      CAST(cos.currency_code AS STRING) AS currency_code,
+      CAST(cos.order_total_amount AS DECIMAL(38, 10)) AS order_total_amount,
+      CAST(COALESCE(cois_agg.items_count, 0) AS INT) AS items_count,
+      CAST(cos.payment_method AS STRING) AS payment_method,
+      CAST(cos.shipping_country_code AS STRING) AS shipping_country_code,
+      CAST(cos.source_system AS STRING) AS source_system,
+      CAST(cos.ingestion_date AS DATE) AS ingestion_date
+    FROM customer_orders_silver cos
+    LEFT JOIN cois_agg
+      ON CAST(cos.order_id AS STRING) = cois_agg.order_id
+    """
 )
-orders_data_quality_daily_silver_df.createOrReplaceTempView("orders_data_quality_daily_silver")
 
-# -----------------------------------------------------------------------------------
-# Target: gold.gold_orders
-# Description:
-# - Select from silver.orders_silver at order header grain
-# - Map order_id, order_date, order_status, order_total_amount, currency_code,
-#   source_system, ingestion_date directly from os
-# - Set customer_id = NULL
-# -----------------------------------------------------------------------------------
-gold_orders_df = spark.sql("""
-SELECT
-  CAST(os.order_id AS STRING)                        AS order_id,
-  CAST(os.order_date AS DATE)                        AS order_date,
-  CAST(os.order_status AS STRING)                    AS order_status,
-  CAST(os.order_total_amount AS DECIMAL(38, 10))     AS order_total_amount,
-  CAST(os.currency_code AS STRING)                   AS currency_code,
-  CAST(os.source_system AS STRING)                   AS source_system,
-  CAST(os.ingestion_date AS DATE)                    AS ingestion_date,
-  CAST(NULL AS STRING)                               AS customer_id
-FROM orders_silver os
-""")
-
-# Write as SINGLE CSV file directly under TARGET_PATH (no subfolders)
+# Write as SINGLE CSV file directly under TARGET_PATH
 (
-    gold_orders_df.coalesce(1)
+    df_gold_customer_orders.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_orders.csv")
+    .save(f"{TARGET_PATH}/gold_customer_orders.csv")
 )
 
-# -----------------------------------------------------------------------------------
-# Target: gold.gold_order_items
-# Description:
-# - Select from silver.order_items_silver at order line grain
-# - Map order_id, order_item_id, product_id, quantity, unit_price, line_amount,
-#   currency_code, ingestion_date directly from ois
-# -----------------------------------------------------------------------------------
-gold_order_items_df = spark.sql("""
-SELECT
-  CAST(ois.order_id AS STRING)                    AS order_id,
-  CAST(ois.order_item_id AS INT)                  AS order_item_id,
-  CAST(ois.product_id AS STRING)                  AS product_id,
-  CAST(ois.quantity AS INT)                       AS quantity,
-  CAST(ois.unit_price AS DECIMAL(38, 10))         AS unit_price,
-  CAST(ois.line_amount AS DECIMAL(38, 10))        AS line_amount,
-  CAST(ois.currency_code AS STRING)               AS currency_code,
-  CAST(ois.ingestion_date AS DATE)                AS ingestion_date
-FROM order_items_silver ois
-""")
+# ===================================================================================
+# TARGET TABLE 2: gold.gold_customer_order_items
+# Mapping: silver.customer_order_items_silver cois
+# ===================================================================================
 
-# Write as SINGLE CSV file directly under TARGET_PATH (no subfolders)
+df_gold_customer_order_items = spark.sql(
+    """
+    SELECT
+      CAST(cois.order_id AS STRING) AS order_id,
+      CAST(cois.order_item_id AS STRING) AS order_item_id,
+      CAST(cois.product_id AS STRING) AS product_id,
+      CAST(cois.quantity AS INT) AS quantity,
+      CAST(cois.unit_price_amount AS DECIMAL(38, 10)) AS unit_price_amount,
+      CAST(cois.line_total_amount AS DECIMAL(38, 10)) AS line_total_amount,
+      CAST(cois.currency_code AS STRING) AS currency_code,
+      CAST(cois.ingestion_date AS DATE) AS ingestion_date
+    FROM customer_order_items_silver cois
+    """
+)
+
+# Write as SINGLE CSV file directly under TARGET_PATH
 (
-    gold_order_items_df.coalesce(1)
+    df_gold_customer_order_items.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_order_items.csv")
-)
-
-# -----------------------------------------------------------------------------------
-# Target: gold.gold_orders_data_quality_daily
-# Description:
-# - Select from silver.orders_data_quality_daily_silver at (run_date, source_system) grain
-# - Map run_date, source_system, total_records, valid_records, invalid_records,
-#   accuracy_percent, load_start_ts, load_end_ts, latency_minutes directly from odqds
-# -----------------------------------------------------------------------------------
-gold_orders_data_quality_daily_df = spark.sql("""
-SELECT
-  CAST(odqds.run_date AS DATE)                     AS run_date,
-  CAST(odqds.source_system AS STRING)              AS source_system,
-  CAST(odqds.total_records AS INT)                 AS total_records,
-  CAST(odqds.valid_records AS INT)                 AS valid_records,
-  CAST(odqds.invalid_records AS INT)               AS invalid_records,
-  CAST(odqds.accuracy_percent AS DECIMAL(38, 10))  AS accuracy_percent,
-  CAST(odqds.load_start_ts AS TIMESTAMP)           AS load_start_ts,
-  CAST(odqds.load_end_ts AS TIMESTAMP)             AS load_end_ts,
-  CAST(odqds.latency_minutes AS INT)               AS latency_minutes
-FROM orders_data_quality_daily_silver odqds
-""")
-
-# Write as SINGLE CSV file directly under TARGET_PATH (no subfolders)
-(
-    gold_orders_data_quality_daily_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_orders_data_quality_daily.csv")
+    .save(f"{TARGET_PATH}/gold_customer_order_items.csv")
 )
 
 job.commit()
