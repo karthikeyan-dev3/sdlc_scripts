@@ -1,14 +1,13 @@
 import sys
-from awsglue.transforms import *
-from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
 from awsglue.job import Job
+from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
 
-sc = SparkContext()
+sc = SparkContext.getOrCreate()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
 job = Job(glueContext)
@@ -18,152 +17,201 @@ SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-# --------------------------------------------------------------------------------------
-# 1) Read source tables (S3) + create temp views
-# --------------------------------------------------------------------------------------
-customer_orders_silver_df = (
+# ------------------------------------------------------------------------------------
+# Read Source Tables
+# ------------------------------------------------------------------------------------
+silver_ingestion_kpi_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/customer_orders_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/silver_ingestion_kpi.{FILE_FORMAT}/")
 )
-customer_orders_silver_df.createOrReplaceTempView("customer_orders_silver")
+silver_ingestion_kpi_df.createOrReplaceTempView("silver_ingestion_kpi")
 
-customer_order_line_items_silver_df = (
+silver_pipeline_run_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/customer_order_line_items_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/silver_pipeline_run.{FILE_FORMAT}/")
 )
-customer_order_line_items_silver_df.createOrReplaceTempView("customer_order_line_items_silver")
+silver_pipeline_run_df.createOrReplaceTempView("silver_pipeline_run")
 
-etl_batch_quality_metrics_silver_df = (
+silver_data_quality_score_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/etl_batch_quality_metrics_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/silver_data_quality_score.{FILE_FORMAT}/")
 )
-etl_batch_quality_metrics_silver_df.createOrReplaceTempView("etl_batch_quality_metrics_silver")
+silver_data_quality_score_df.createOrReplaceTempView("silver_data_quality_score")
 
-# --------------------------------------------------------------------------------------
-# TARGET: gold.gold_customer_orders (gco)
-# Source: silver.customer_orders_silver (cos)
-# --------------------------------------------------------------------------------------
-gold_customer_orders_df = spark.sql(
-    """
-    WITH ranked AS (
-        SELECT
-            CAST(cos.order_id AS STRING) AS order_id,
-            CAST(cos.order_date AS DATE) AS order_date,
-            CAST(cos.order_timestamp AS TIMESTAMP) AS order_timestamp,
-            CAST(cos.order_total_amount AS DECIMAL(38,10)) AS order_total_amount,
-            cos.ingestion_date AS ingestion_date,
-            ROW_NUMBER() OVER (
-                PARTITION BY CAST(cos.order_id AS STRING)
-                ORDER BY CAST(cos.order_timestamp AS TIMESTAMP) DESC
-            ) AS rn
-        FROM customer_orders_silver cos
-    )
-    SELECT
-        order_id,
-        order_date,
-        order_timestamp,
-        order_total_amount,
-        ingestion_date
-    FROM ranked
-    WHERE rn = 1
-    """
+silver_dataset_catalog_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .option("inferSchema", "true")
+    .load(f"{SOURCE_PATH}/silver_dataset_catalog.{FILE_FORMAT}/")
 )
+silver_dataset_catalog_df.createOrReplaceTempView("silver_dataset_catalog")
+
+silver_data_access_audit_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .option("inferSchema", "true")
+    .load(f"{SOURCE_PATH}/silver_data_access_audit.{FILE_FORMAT}/")
+)
+silver_data_access_audit_df.createOrReplaceTempView("silver_data_access_audit")
+
+# ------------------------------------------------------------------------------------
+# Target: gold_ingestion_kpi
+# Mapping: silver.silver_ingestion_kpi sik
+# ------------------------------------------------------------------------------------
+gold_ingestion_kpi_sql = """
+SELECT
+  CAST(sik.dataset_id AS STRING) AS dataset_id,
+  CAST(sik.source_system AS STRING) AS source_system,
+  CAST(sik.ingestion_method AS STRING) AS ingestion_method,
+  CAST(sik.load_type AS STRING) AS load_type,
+  CAST(sik.event_date AS DATE) AS event_date,
+  CAST(sik.batch_id AS STRING) AS batch_id,
+  CAST(sik.ingest_start_ts AS TIMESTAMP) AS ingest_start_ts,
+  CAST(sik.ingest_end_ts AS TIMESTAMP) AS ingest_end_ts,
+  CAST(sik.ingestion_latency_minutes AS DECIMAL(38,18)) AS ingestion_latency_minutes,
+  CAST(sik.records_ingested AS INT) AS records_ingested,
+  CAST(sik.bytes_ingested AS DECIMAL(38,18)) AS bytes_ingested,
+  CAST(sik.ingestion_status AS STRING) AS ingestion_status
+FROM silver_ingestion_kpi sik
+"""
+gold_ingestion_kpi_df = spark.sql(gold_ingestion_kpi_sql)
 
 (
-    gold_customer_orders_df.coalesce(1)
+    gold_ingestion_kpi_df.coalesce(1)
     .write.mode("overwrite")
+    .format("csv")
     .option("header", "true")
-    .csv(f"{TARGET_PATH}/gold_customer_orders.csv")
+    .save(f"{TARGET_PATH}/gold_ingestion_kpi.csv")
 )
 
-# --------------------------------------------------------------------------------------
-# TARGET: gold.gold_customer_order_line_items (gcoli)
-# Source: silver.customer_order_line_items_silver (colis)
-# --------------------------------------------------------------------------------------
-gold_customer_order_line_items_df = spark.sql(
-    """
-    WITH ranked AS (
-        SELECT
-            CAST(colis.order_id AS STRING) AS order_id,
-            CAST(colis.line_item_id AS STRING) AS line_item_id,
-            CAST(colis.product_id AS STRING) AS product_id,
-            CAST(colis.quantity AS INT) AS quantity,
-            CAST(colis.line_total_amount AS DECIMAL(38,10)) AS line_total_amount,
-            colis.ingestion_date AS ingestion_date,
-            ROW_NUMBER() OVER (
-                PARTITION BY CAST(colis.order_id AS STRING), CAST(colis.line_item_id AS STRING)
-                ORDER BY colis.ingestion_date DESC
-            ) AS rn
-        FROM customer_order_line_items_silver colis
-    )
-    SELECT
-        order_id,
-        line_item_id,
-        product_id,
-        quantity,
-        line_total_amount,
-        ingestion_date
-    FROM ranked
-    WHERE rn = 1
-    """
-)
+# ------------------------------------------------------------------------------------
+# Target: gold_pipeline_run
+# Mapping: silver.silver_pipeline_run spr
+# ------------------------------------------------------------------------------------
+gold_pipeline_run_sql = """
+SELECT
+  CAST(spr.pipeline_id AS STRING) AS pipeline_id,
+  CAST(spr.pipeline_name AS STRING) AS pipeline_name,
+  CAST(spr.orchestrator_tool AS STRING) AS orchestrator_tool,
+  CAST(spr.run_id AS STRING) AS run_id,
+  CAST(spr.trigger_type AS STRING) AS trigger_type,
+  CAST(spr.run_start_ts AS TIMESTAMP) AS run_start_ts,
+  CAST(spr.run_end_ts AS TIMESTAMP) AS run_end_ts,
+  CAST(spr.run_status AS STRING) AS run_status,
+  CAST(spr.error_code AS STRING) AS error_code,
+  CAST(spr.error_message AS STRING) AS error_message,
+  CAST(spr.records_processed AS INT) AS records_processed,
+  CAST(spr.sla_minutes AS INT) AS sla_minutes,
+  CAST(spr.sla_met_flag AS BOOLEAN) AS sla_met_flag
+FROM silver_pipeline_run spr
+"""
+gold_pipeline_run_df = spark.sql(gold_pipeline_run_sql)
 
 (
-    gold_customer_order_line_items_df.coalesce(1)
+    gold_pipeline_run_df.coalesce(1)
     .write.mode("overwrite")
+    .format("csv")
     .option("header", "true")
-    .csv(f"{TARGET_PATH}/gold_customer_order_line_items.csv")
+    .save(f"{TARGET_PATH}/gold_pipeline_run.csv")
 )
 
-# --------------------------------------------------------------------------------------
-# TARGET: gold.gold_etl_batch_quality_metrics (geqbqm)
-# Source: silver.etl_batch_quality_metrics_silver (ebqms)
-# --------------------------------------------------------------------------------------
-gold_etl_batch_quality_metrics_df = spark.sql(
-    """
-    WITH ranked AS (
-        SELECT
-            CAST(ebqms.batch_date AS DATE) AS batch_date,
-            ebqms.source_system AS source_system,
-            CAST(ebqms.records_received AS BIGINT) AS records_received,
-            CAST(ebqms.records_loaded AS BIGINT) AS records_loaded,
-            ebqms.records_rejected AS records_rejected,
-            ebqms.data_quality_score AS data_quality_score,
-            CAST(ebqms.ingestion_start_ts AS TIMESTAMP) AS ingestion_start_ts,
-            CAST(ebqms.ingestion_end_ts AS TIMESTAMP) AS ingestion_end_ts,
-            ebqms.ingestion_duration_minutes AS ingestion_duration_minutes,
-            ROW_NUMBER() OVER (
-                PARTITION BY CAST(ebqms.batch_date AS DATE), ebqms.source_system
-                ORDER BY CAST(ebqms.ingestion_end_ts AS TIMESTAMP) DESC
-            ) AS rn
-        FROM etl_batch_quality_metrics_silver ebqms
-    )
-    SELECT
-        batch_date,
-        source_system,
-        records_received,
-        records_loaded,
-        records_rejected,
-        data_quality_score,
-        ingestion_start_ts,
-        ingestion_end_ts,
-        ingestion_duration_minutes
-    FROM ranked
-    WHERE rn = 1
-    """
-)
+# ------------------------------------------------------------------------------------
+# Target: gold_data_quality_score
+# Mapping: silver.silver_data_quality_score sdqs
+# ------------------------------------------------------------------------------------
+gold_data_quality_score_sql = """
+SELECT
+  CAST(sdqs.dataset_id AS STRING) AS dataset_id,
+  CAST(sdqs.check_suite_id AS STRING) AS check_suite_id,
+  CAST(sdqs.check_run_id AS STRING) AS check_run_id,
+  CAST(sdqs.check_date AS DATE) AS check_date,
+  CAST(sdqs.check_start_ts AS TIMESTAMP) AS check_start_ts,
+  CAST(sdqs.check_end_ts AS TIMESTAMP) AS check_end_ts,
+  CAST(sdqs.total_checks AS INT) AS total_checks,
+  CAST(sdqs.passed_checks AS INT) AS passed_checks,
+  CAST(sdqs.failed_checks AS INT) AS failed_checks,
+  CAST(sdqs.quality_score_pct AS DECIMAL(38,18)) AS quality_score_pct,
+  CAST(sdqs.severity_high_fail_count AS INT) AS severity_high_fail_count,
+  CAST(sdqs.severity_medium_fail_count AS INT) AS severity_medium_fail_count,
+  CAST(sdqs.severity_low_fail_count AS INT) AS severity_low_fail_count
+FROM silver_data_quality_score sdqs
+"""
+gold_data_quality_score_df = spark.sql(gold_data_quality_score_sql)
 
 (
-    gold_etl_batch_quality_metrics_df.coalesce(1)
+    gold_data_quality_score_df.coalesce(1)
     .write.mode("overwrite")
+    .format("csv")
     .option("header", "true")
-    .csv(f"{TARGET_PATH}/gold_etl_batch_quality_metrics.csv")
+    .save(f"{TARGET_PATH}/gold_data_quality_score.csv")
+)
+
+# ------------------------------------------------------------------------------------
+# Target: gold_dataset_catalog
+# Mapping: silver.silver_dataset_catalog sdc
+# ------------------------------------------------------------------------------------
+gold_dataset_catalog_sql = """
+SELECT
+  CAST(sdc.dataset_id AS STRING) AS dataset_id,
+  CAST(sdc.dataset_name AS STRING) AS dataset_name,
+  CAST(sdc.data_layer AS STRING) AS data_layer,
+  CAST(sdc.domain AS STRING) AS domain,
+  CAST(sdc.owner_team AS STRING) AS owner_team,
+  CAST(sdc.description AS STRING) AS description,
+  CAST(sdc.source_system AS STRING) AS source_system,
+  CAST(sdc.ingestion_method AS STRING) AS ingestion_method,
+  CAST(sdc.update_frequency AS STRING) AS update_frequency,
+  CAST(sdc.pii_flag AS BOOLEAN) AS pii_flag,
+  CAST(sdc.classification AS STRING) AS classification,
+  CAST(sdc.retention_days AS INT) AS retention_days,
+  CAST(sdc.schema_version AS STRING) AS schema_version,
+  CAST(sdc.cataloged_ts AS TIMESTAMP) AS cataloged_ts,
+  CAST(sdc.active_flag AS BOOLEAN) AS active_flag
+FROM silver_dataset_catalog sdc
+"""
+gold_dataset_catalog_df = spark.sql(gold_dataset_catalog_sql)
+
+(
+    gold_dataset_catalog_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/gold_dataset_catalog.csv")
+)
+
+# ------------------------------------------------------------------------------------
+# Target: gold_data_access_audit
+# Mapping: silver.silver_data_access_audit sdaa
+# ------------------------------------------------------------------------------------
+gold_data_access_audit_sql = """
+SELECT
+  CAST(sdaa.request_id AS STRING) AS request_id,
+  CAST(sdaa.request_ts AS TIMESTAMP) AS request_ts,
+  CAST(sdaa.principal_id AS STRING) AS principal_id,
+  CAST(sdaa.principal_type AS STRING) AS principal_type,
+  CAST(sdaa.api_endpoint AS STRING) AS api_endpoint,
+  CAST(sdaa.http_method AS STRING) AS http_method,
+  CAST(sdaa.dataset_id AS STRING) AS dataset_id,
+  CAST(sdaa.action AS STRING) AS action,
+  CAST(sdaa.authz_decision AS STRING) AS authz_decision,
+  CAST(sdaa.response_status_code AS INT) AS response_status_code,
+  CAST(sdaa.response_time_ms AS INT) AS response_time_ms
+FROM silver_data_access_audit sdaa
+"""
+gold_data_access_audit_df = spark.sql(gold_data_access_audit_sql)
+
+(
+    gold_data_access_audit_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/gold_data_access_audit.csv")
 )
 
 job.commit()
