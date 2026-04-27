@@ -6,7 +6,6 @@ from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
-
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark: SparkSession = glueContext.spark_session
@@ -17,158 +16,162 @@ SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-# --------------------------------------------------------------------------------------
-# Read source tables (S3)
-# --------------------------------------------------------------------------------------
-customer_orders_silver_df = (
+spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
+spark.conf.set("spark.sql.shuffle.partitions", "200")
+
+# -----------------------------------------------------------------------------------
+# Source: silver.customer_orders_silver (cos)
+# -----------------------------------------------------------------------------------
+cos_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .option("inferSchema", "true")
     .load(f"{SOURCE_PATH}/customer_orders_silver.{FILE_FORMAT}/")
 )
-customer_orders_silver_df.createOrReplaceTempView("customer_orders_silver")
+cos_df.createOrReplaceTempView("customer_orders_silver")
 
-customer_order_items_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/customer_order_items_silver.{FILE_FORMAT}/")
-)
-customer_order_items_silver_df.createOrReplaceTempView("customer_order_items_silver")
-
-etl_data_quality_results_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/etl_data_quality_results_silver.{FILE_FORMAT}/")
-)
-etl_data_quality_results_silver_df.createOrReplaceTempView("etl_data_quality_results_silver")
-
-# --------------------------------------------------------------------------------------
-# Target: gold.gold_customer_orders
-# Mapping: customer_orders_silver cos LEFT JOIN aggregated customer_order_items_silver
-# --------------------------------------------------------------------------------------
-gold_customer_orders_df = spark.sql(
+gcod_df = spark.sql(
     """
-    WITH cois_agg AS (
+    WITH base AS (
         SELECT
-            CAST(order_id AS STRING) AS order_id,
-            COUNT(*) AS item_count
-        FROM customer_order_items_silver
-        GROUP BY CAST(order_id AS STRING)
+            CAST(cos.order_date AS DATE)                         AS order_date,
+            CAST(cos.order_id AS STRING)                         AS order_id,
+            CAST(cos.customer_id AS STRING)                      AS customer_id,
+            CAST(cos.order_status AS STRING)                     AS order_status,
+            CAST(cos.order_total_amount AS DECIMAL(38,10))       AS order_total_amount,
+            CAST(cos.currency_code AS STRING)                    AS currency_code,
+            CAST(cos.item_count AS INT)                          AS item_count,
+            CAST(cos.ingested_at AS TIMESTAMP)                   AS ingested_at,
+            CAST(cos.source_file_name AS STRING)                 AS source_file_name
+        FROM customer_orders_silver cos
+    ),
+    dedup AS (
+        SELECT
+            *,
+            ROW_NUMBER() OVER (
+                PARTITION BY order_id
+                ORDER BY ingested_at DESC, source_file_name DESC
+            ) AS rn
+        FROM base
     )
     SELECT
-        CAST(cos.order_id AS STRING) AS order_id,
-        CAST(cos.order_date AS DATE) AS order_date,
-        CAST(cos.order_total_amount AS DECIMAL(18,2)) AS order_total_amount,
-        CAST(cois_agg.item_count AS INT) AS item_count,
-        CAST(cos.source_system AS STRING) AS source_system,
-        CAST(cos.ingestion_date AS DATE) AS ingestion_date
-    FROM customer_orders_silver cos
-    LEFT JOIN cois_agg
-        ON CAST(cos.order_id AS STRING) = cois_agg.order_id
+        order_date,
+        order_id,
+        customer_id,
+        order_status,
+        order_total_amount,
+        currency_code,
+        item_count,
+        ingested_at,
+        source_file_name
+    FROM dedup
+    WHERE rn = 1
     """
 )
 
 (
-    gold_customer_orders_df.coalesce(1)
+    gcod_df.coalesce(1)
     .write.mode("overwrite")
-    .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_customer_orders.csv")
+    .csv(f"{TARGET_PATH}/gold_customer_orders_daily.csv")
 )
 
-# --------------------------------------------------------------------------------------
-# Target: gold.gold_customer_order_items
-# Mapping: customer_order_items_silver cois
-# --------------------------------------------------------------------------------------
-gold_customer_order_items_df = spark.sql(
+# -----------------------------------------------------------------------------------
+# Source: silver.customer_orders_daily_dq_summary_silver (codqs)
+# -----------------------------------------------------------------------------------
+codqs_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .option("inferSchema", "true")
+    .load(f"{SOURCE_PATH}/customer_orders_daily_dq_summary_silver.{FILE_FORMAT}/")
+)
+codqs_df.createOrReplaceTempView("customer_orders_daily_dq_summary_silver")
+
+gcodqs_df = spark.sql(
     """
+    WITH base AS (
+        SELECT
+            CAST(codqs.order_date AS DATE)                   AS order_date,
+            CAST(codqs.total_records AS INT)                 AS total_records,
+            CAST(codqs.valid_records AS INT)                 AS valid_records,
+            CAST(codqs.invalid_records AS INT)               AS invalid_records,
+            CAST(codqs.data_quality_rate AS DECIMAL(38,10))  AS data_quality_rate,
+            CAST(codqs.processed_at AS TIMESTAMP)            AS processed_at
+        FROM customer_orders_daily_dq_summary_silver codqs
+    ),
+    dedup AS (
+        SELECT
+            *,
+            ROW_NUMBER() OVER (
+                PARTITION BY order_date
+                ORDER BY processed_at DESC
+            ) AS rn
+        FROM base
+    )
     SELECT
-        CAST(cois.order_id AS STRING) AS order_id,
-        CAST(cois.order_item_id AS STRING) AS order_item_id,
-        CAST(cois.product_id AS STRING) AS product_id,
-        CAST(cois.quantity AS INT) AS quantity,
-        CAST(cois.unit_price_amount AS DECIMAL(18,2)) AS unit_price_amount,
-        CAST(cois.line_total_amount AS DECIMAL(18,2)) AS line_total_amount
-    FROM customer_order_items_silver cois
+        order_date,
+        total_records,
+        valid_records,
+        invalid_records,
+        data_quality_rate,
+        processed_at
+    FROM dedup
+    WHERE rn = 1
     """
 )
 
 (
-    gold_customer_order_items_df.coalesce(1)
+    gcodqs_df.coalesce(1)
     .write.mode("overwrite")
-    .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_customer_order_items.csv")
+    .csv(f"{TARGET_PATH}/gold_customer_orders_daily_dq_summary.csv")
 )
 
-# --------------------------------------------------------------------------------------
-# Target: gold.gold_etl_data_quality_results
-# Mapping: aggregated etl_data_quality_results_silver dqrs
-# --------------------------------------------------------------------------------------
-gold_etl_data_quality_results_df = spark.sql(
+# -----------------------------------------------------------------------------------
+# Source: silver.customer_orders_daily_sla_silver (coslas)
+# -----------------------------------------------------------------------------------
+coslas_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .option("inferSchema", "true")
+    .load(f"{SOURCE_PATH}/customer_orders_daily_sla_silver.{FILE_FORMAT}/")
+)
+coslas_df.createOrReplaceTempView("customer_orders_daily_sla_silver")
+
+gcodsla_df = spark.sql(
     """
+    WITH base AS (
+        SELECT
+            CAST(coslas.order_date AS DATE)                 AS order_date,
+            CAST(coslas.expected_complete_by AS TIMESTAMP)  AS expected_complete_by,
+            CAST(coslas.actual_complete_at AS TIMESTAMP)    AS actual_complete_at,
+            CAST(coslas.sla_met_flag AS BOOLEAN)            AS sla_met_flag
+        FROM customer_orders_daily_sla_silver coslas
+    ),
+    dedup AS (
+        SELECT
+            *,
+            ROW_NUMBER() OVER (
+                PARTITION BY order_date
+                ORDER BY actual_complete_at DESC, expected_complete_by DESC
+            ) AS rn
+        FROM base
+    )
     SELECT
-        CAST(dqrs.detected_at AS DATE) AS run_date,
-        CAST(dqrs.source_table AS STRING) AS dataset_name,
-        CAST(COUNT(DISTINCT dqrs.record_id) AS BIGINT) AS total_records,
-        CAST(
-            COUNT(DISTINCT CASE
-                WHEN dqrs.record_id IS NOT NULL
-                 AND dqrs.record_id NOT IN (
-                    SELECT record_id
-                    FROM etl_data_quality_results_silver
-                    WHERE CAST(detected_at AS DATE) = CAST(dqrs.detected_at AS DATE)
-                      AND source_table = dqrs.source_table
-                      AND check_status = 'FAIL'
-                 )
-                THEN dqrs.record_id
-            END) AS BIGINT
-        ) AS valid_records,
-        CAST(
-            COUNT(DISTINCT dqrs.record_id)
-            - COUNT(DISTINCT CASE
-                WHEN dqrs.record_id IS NOT NULL
-                 AND dqrs.record_id NOT IN (
-                    SELECT record_id
-                    FROM etl_data_quality_results_silver
-                    WHERE CAST(detected_at AS DATE) = CAST(dqrs.detected_at AS DATE)
-                      AND source_table = dqrs.source_table
-                      AND check_status = 'FAIL'
-                 )
-                THEN dqrs.record_id
-            END) AS BIGINT
-        ) AS invalid_records,
-        CAST(
-            (
-                COUNT(DISTINCT CASE
-                    WHEN dqrs.record_id IS NOT NULL
-                     AND dqrs.record_id NOT IN (
-                        SELECT record_id
-                        FROM etl_data_quality_results_silver
-                        WHERE CAST(detected_at AS DATE) = CAST(dqrs.detected_at AS DATE)
-                          AND source_table = dqrs.source_table
-                          AND check_status = 'FAIL'
-                     )
-                    THEN dqrs.record_id
-                END) * 100.0
-            ) / NULLIF(COUNT(DISTINCT dqrs.record_id), 0)
-            AS DECIMAL(5,2)
-        ) AS validation_accuracy_pct
-    FROM etl_data_quality_results_silver dqrs
-    GROUP BY
-        CAST(dqrs.detected_at AS DATE),
-        CAST(dqrs.source_table AS STRING)
+        order_date,
+        expected_complete_by,
+        actual_complete_at,
+        sla_met_flag
+    FROM dedup
+    WHERE rn = 1
     """
 )
 
 (
-    gold_etl_data_quality_results_df.coalesce(1)
+    gcodsla_df.coalesce(1)
     .write.mode("overwrite")
-    .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_etl_data_quality_results.csv")
+    .csv(f"{TARGET_PATH}/gold_customer_orders_daily_sla.csv")
 )
 
 job.commit()
