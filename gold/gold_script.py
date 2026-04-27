@@ -1,6 +1,5 @@
 import sys
 from awsglue.context import GlueContext
-from awsglue.job import Job
 from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
@@ -10,302 +9,293 @@ args = getResolvedOptions(sys.argv, ["JOB_NAME"])
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
-job = Job(glueContext)
-job.init(args["JOB_NAME"], args)
+spark.conf.set("spark.sql.session.timeZone", "UTC")
 
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-# -----------------------------
-# 1) Read source tables from S3
-# -----------------------------
-pipeline_run_silver_df = (
+# ------------------------------------------------------------------------------------
+# Read Source Tables (S3)
+# ------------------------------------------------------------------------------------
+pipeline_run_metrics_silver_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/pipeline_run_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/pipeline_run_metrics_silver.{FILE_FORMAT}/")
 )
+pipeline_run_metrics_silver_df.createOrReplaceTempView("pipeline_run_metrics_silver")
 
-dataset_silver_df = (
+data_quality_results_silver_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/dataset_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/data_quality_results_silver.{FILE_FORMAT}/")
 )
+data_quality_results_silver_df.createOrReplaceTempView("data_quality_results_silver")
 
-dataset_lineage_silver_df = (
+data_catalog_assets_silver_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/dataset_lineage_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/data_catalog_assets_silver.{FILE_FORMAT}/")
 )
+data_catalog_assets_silver_df.createOrReplaceTempView("data_catalog_assets_silver")
 
-data_quality_check_result_silver_df = (
+data_access_audit_silver_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/data_quality_check_result_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/data_access_audit_silver.{FILE_FORMAT}/")
 )
+data_access_audit_silver_df.createOrReplaceTempView("data_access_audit_silver")
 
-access_audit_event_silver_df = (
+sla_availability_daily_silver_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/access_audit_event_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/sla_availability_daily_silver.{FILE_FORMAT}/")
 )
+sla_availability_daily_silver_df.createOrReplaceTempView("sla_availability_daily_silver")
 
-governance_policy_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/governance_policy_silver.{FILE_FORMAT}/")
-)
-
-system_availability_sla_daily_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/system_availability_sla_daily_silver.{FILE_FORMAT}/")
-)
-
-ingestion_feed_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/ingestion_feed_silver.{FILE_FORMAT}/")
-)
-
-# -----------------------------
-# 2) Create temp views
-# -----------------------------
-pipeline_run_silver_df.createOrReplaceTempView("pipeline_run_silver")
-dataset_silver_df.createOrReplaceTempView("dataset_silver")
-dataset_lineage_silver_df.createOrReplaceTempView("dataset_lineage_silver")
-data_quality_check_result_silver_df.createOrReplaceTempView("data_quality_check_result_silver")
-access_audit_event_silver_df.createOrReplaceTempView("access_audit_event_silver")
-governance_policy_silver_df.createOrReplaceTempView("governance_policy_silver")
-system_availability_sla_daily_silver_df.createOrReplaceTempView("system_availability_sla_daily_silver")
-ingestion_feed_silver_df.createOrReplaceTempView("ingestion_feed_silver")
-
-# ============================================================
-# TARGET: pipeline_run_gold
-# ============================================================
-pipeline_run_gold_df = spark.sql(
+# ------------------------------------------------------------------------------------
+# Target: gold_pipeline_run_metrics
+# ------------------------------------------------------------------------------------
+gold_pipeline_run_metrics_df = spark.sql(
     """
+    WITH base AS (
+        SELECT
+            CAST(prm_s.pipeline_name AS STRING)    AS pipeline_name,
+            CAST(prm_s.run_id AS STRING)           AS run_id,
+            CAST(prm_s.run_start_ts AS TIMESTAMP)  AS run_start_ts,
+            CAST(prm_s.run_end_ts AS TIMESTAMP)    AS run_end_ts,
+            CAST(prm_s.run_status AS STRING)       AS run_status,
+            CAST(prm_s.records_read AS BIGINT)     AS records_read,
+            CAST(prm_s.records_written AS BIGINT)  AS records_written,
+            CAST(prm_s.latency_seconds AS BIGINT)  AS latency_seconds
+        FROM pipeline_run_metrics_silver prm_s
+    ),
+    dedup AS (
+        SELECT
+            *,
+            ROW_NUMBER() OVER (
+                PARTITION BY pipeline_name, run_id
+                ORDER BY run_end_ts DESC
+            ) AS rn
+        FROM base
+    )
     SELECT
-        CAST(prs.pipeline_run_id AS STRING)                AS pipeline_run_id,
-        CAST(prs.pipeline_id AS STRING)                    AS pipeline_id,
-        CAST(prs.orchestrator_tool AS STRING)              AS orchestrator_tool,
-        CAST(prs.run_status AS STRING)                     AS run_status,
-        CAST(prs.run_start_ts AS TIMESTAMP)                AS run_start_ts,
-        CAST(prs.run_end_ts AS TIMESTAMP)                  AS run_end_ts,
-        CAST(prs.records_processed_count AS INT)           AS records_processed_count,
-        CAST(prs.error_message AS STRING)                  AS error_message,
-        CAST(prs.data_freshness_lag_seconds AS INT)        AS data_freshness_lag_seconds
-    FROM pipeline_run_silver prs
+        pipeline_name,
+        run_id,
+        run_start_ts,
+        run_end_ts,
+        run_status,
+        records_read,
+        records_written,
+        latency_seconds
+    FROM dedup
+    WHERE rn = 1
     """
 )
 
 (
-    pipeline_run_gold_df.coalesce(1)
+    gold_pipeline_run_metrics_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/pipeline_run_gold.csv")
+    .save(f"{TARGET_PATH}/gold_pipeline_run_metrics.csv")
 )
 
-# ============================================================
-# TARGET: dataset_gold
-# ============================================================
-dataset_gold_df = spark.sql(
+# ------------------------------------------------------------------------------------
+# Target: gold_data_quality_results
+# ------------------------------------------------------------------------------------
+gold_data_quality_results_df = spark.sql(
     """
+    WITH base AS (
+        SELECT
+            CAST(dqr_s.dataset_name AS STRING)            AS dataset_name,
+            CAST(dqr_s.check_ts AS TIMESTAMP)             AS check_ts,
+            CAST(dqr_s.check_name AS STRING)              AS check_name,
+            CAST(dqr_s.check_status AS STRING)            AS check_status,
+            CAST(dqr_s.quality_score_percent AS DECIMAL(38,18)) AS quality_score_percent,
+            CAST(dqr_s.failed_record_count AS BIGINT)     AS failed_record_count,
+            CAST(dqr_s.total_record_count AS BIGINT)      AS total_record_count
+        FROM data_quality_results_silver dqr_s
+    ),
+    dedup AS (
+        SELECT
+            *,
+            ROW_NUMBER() OVER (
+                PARTITION BY dataset_name, check_ts, check_name
+                ORDER BY check_ts DESC
+            ) AS rn
+        FROM base
+    )
     SELECT
-        CAST(ds.dataset_id AS STRING)        AS dataset_id,
-        CAST(ds.dataset_name AS STRING)      AS dataset_name,
-        CAST(ds.layer AS STRING)             AS layer,
-        CAST(ds.source_system AS STRING)     AS source_system,
-        CAST(ds.domain AS STRING)            AS domain,
-        CAST(ds.owner_role AS STRING)        AS owner_role,
-        CAST(ds.created_ts AS TIMESTAMP)     AS created_ts,
-        CAST(ds.is_active AS BOOLEAN)        AS is_active
-    FROM dataset_silver ds
+        dataset_name,
+        check_ts,
+        check_name,
+        check_status,
+        quality_score_percent,
+        failed_record_count,
+        total_record_count
+    FROM dedup
+    WHERE rn = 1
     """
 )
 
 (
-    dataset_gold_df.coalesce(1)
+    gold_data_quality_results_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/dataset_gold.csv")
+    .save(f"{TARGET_PATH}/gold_data_quality_results.csv")
 )
 
-# ============================================================
-# TARGET: dataset_lineage_gold
-# ============================================================
-dataset_lineage_gold_df = spark.sql(
+# ------------------------------------------------------------------------------------
+# Target: gold_data_catalog_assets
+# ------------------------------------------------------------------------------------
+gold_data_catalog_assets_df = spark.sql(
     """
+    WITH base AS (
+        SELECT
+            CAST(dca_s.asset_id AS STRING)                     AS asset_id,
+            CAST(dca_s.asset_name AS STRING)                   AS asset_name,
+            CAST(dca_s.asset_type AS STRING)                   AS asset_type,
+            CAST(dca_s.storage_layer AS STRING)                AS storage_layer,
+            CAST(dca_s.database_name AS STRING)                AS database_name,
+            CAST(dca_s.schema_name AS STRING)                  AS schema_name,
+            CAST(dca_s.table_name AS STRING)                   AS table_name,
+            CAST(dca_s.owner AS STRING)                        AS owner,
+            CAST(dca_s.sensitivity_classification AS STRING)   AS sensitivity_classification,
+            CAST(dca_s.retention_policy_days AS INT)           AS retention_policy_days,
+            CAST(dca_s.is_pii AS BOOLEAN)                      AS is_pii,
+            CAST(dca_s.effective_from_ts AS TIMESTAMP)         AS effective_from_ts,
+            CAST(dca_s.effective_to_ts AS TIMESTAMP)           AS effective_to_ts
+        FROM data_catalog_assets_silver dca_s
+    ),
+    dedup AS (
+        SELECT
+            *,
+            ROW_NUMBER() OVER (
+                PARTITION BY asset_id, effective_from_ts
+                ORDER BY COALESCE(effective_to_ts, TIMESTAMP('2999-12-31 00:00:00')) DESC
+            ) AS rn
+        FROM base
+    )
     SELECT
-        CAST(dls.upstream_dataset_id AS STRING)      AS upstream_dataset_id,
-        CAST(dls.downstream_dataset_id AS STRING)    AS downstream_dataset_id,
-        CAST(dls.lineage_type AS STRING)             AS lineage_type,
-        CAST(dls.effective_start_ts AS TIMESTAMP)    AS effective_start_ts,
-        CAST(dls.effective_end_ts AS TIMESTAMP)      AS effective_end_ts
-    FROM dataset_lineage_silver dls
-    INNER JOIN dataset_silver uds
-        ON dls.upstream_dataset_id = uds.dataset_id
-    INNER JOIN dataset_silver dds
-        ON dls.downstream_dataset_id = dds.dataset_id
+        asset_id,
+        asset_name,
+        asset_type,
+        storage_layer,
+        database_name,
+        schema_name,
+        table_name,
+        owner,
+        sensitivity_classification,
+        retention_policy_days,
+        is_pii,
+        effective_from_ts,
+        effective_to_ts
+    FROM dedup
+    WHERE rn = 1
     """
 )
 
 (
-    dataset_lineage_gold_df.coalesce(1)
+    gold_data_catalog_assets_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/dataset_lineage_gold.csv")
+    .save(f"{TARGET_PATH}/gold_data_catalog_assets.csv")
 )
 
-# ============================================================
-# TARGET: data_quality_check_result_gold
-# ============================================================
-data_quality_check_result_gold_df = spark.sql(
+# ------------------------------------------------------------------------------------
+# Target: gold_data_access_audit
+# ------------------------------------------------------------------------------------
+gold_data_access_audit_df = spark.sql(
     """
+    WITH base AS (
+        SELECT
+            CAST(daa_s.access_ts AS TIMESTAMP)     AS access_ts,
+            CAST(daa_s.principal_id AS STRING)     AS principal_id,
+            CAST(daa_s.principal_type AS STRING)   AS principal_type,
+            CAST(daa_s.asset_id AS STRING)         AS asset_id,
+            CAST(daa_s.action AS STRING)           AS action,
+            CAST(daa_s.access_method AS STRING)    AS access_method,
+            CAST(daa_s.is_authorized AS BOOLEAN)   AS is_authorized,
+            CAST(daa_s.decision_reason AS STRING)  AS decision_reason
+        FROM data_access_audit_silver daa_s
+    ),
+    dedup AS (
+        SELECT
+            *,
+            ROW_NUMBER() OVER (
+                PARTITION BY access_ts, principal_id, asset_id, action
+                ORDER BY access_ts DESC
+            ) AS rn
+        FROM base
+    )
     SELECT
-        CAST(dqrs.dq_result_id AS STRING)     AS dq_result_id,
-        CAST(dqrs.dataset_id AS STRING)      AS dataset_id,
-        CAST(dqrs.pipeline_run_id AS STRING) AS pipeline_run_id,
-        CAST(dqrs.check_name AS STRING)      AS check_name,
-        CAST(dqrs.check_type AS STRING)      AS check_type,
-        CAST(dqrs.severity AS STRING)        AS severity,
-        CAST(dqrs.threshold_value AS DECIMAL(38,18)) AS threshold_value,
-        CAST(dqrs.actual_value AS DECIMAL(38,18))    AS actual_value,
-        CAST(dqrs.check_status AS STRING)    AS check_status,
-        CAST(dqrs.evaluated_ts AS TIMESTAMP) AS evaluated_ts
-    FROM data_quality_check_result_silver dqrs
-    INNER JOIN dataset_silver ds
-        ON dqrs.dataset_id = ds.dataset_id
-    INNER JOIN pipeline_run_silver prs
-        ON dqrs.pipeline_run_id = prs.pipeline_run_id
+        access_ts,
+        principal_id,
+        principal_type,
+        asset_id,
+        action,
+        access_method,
+        is_authorized,
+        decision_reason
+    FROM dedup
+    WHERE rn = 1
     """
 )
 
 (
-    data_quality_check_result_gold_df.coalesce(1)
+    gold_data_access_audit_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/data_quality_check_result_gold.csv")
+    .save(f"{TARGET_PATH}/gold_data_access_audit.csv")
 )
 
-# ============================================================
-# TARGET: access_audit_event_gold
-# ============================================================
-access_audit_event_gold_df = spark.sql(
+# ------------------------------------------------------------------------------------
+# Target: gold_sla_availability_daily
+# ------------------------------------------------------------------------------------
+gold_sla_availability_daily_df = spark.sql(
     """
+    WITH base AS (
+        SELECT
+            CAST(sad_s.sla_date AS DATE)                     AS sla_date,
+            CAST(sad_s.pipeline_name AS STRING)              AS pipeline_name,
+            CAST(sad_s.expected_runs AS INT)                 AS expected_runs,
+            CAST(sad_s.successful_runs AS INT)               AS successful_runs,
+            CAST(sad_s.availability_rate_percent AS DECIMAL(38,18)) AS availability_rate_percent
+        FROM sla_availability_daily_silver sad_s
+    ),
+    dedup AS (
+        SELECT
+            *,
+            ROW_NUMBER() OVER (
+                PARTITION BY sla_date, pipeline_name
+                ORDER BY sla_date DESC
+            ) AS rn
+        FROM base
+    )
     SELECT
-        CAST(aaes.audit_event_id AS STRING)   AS audit_event_id,
-        CAST(aaes.event_ts AS TIMESTAMP)      AS event_ts,
-        CAST(aaes.actor_role AS STRING)       AS actor_role,
-        CAST(aaes.action_type AS STRING)      AS action_type,
-        CAST(aaes.dataset_id AS STRING)       AS dataset_id,
-        CAST(aaes.access_channel AS STRING)   AS access_channel,
-        CAST(aaes.access_result AS STRING)    AS access_result,
-        CAST(aaes.policy_id AS STRING)        AS policy_id
-    FROM access_audit_event_silver aaes
-    INNER JOIN dataset_silver ds
-        ON aaes.dataset_id = ds.dataset_id
-    LEFT JOIN governance_policy_silver gps
-        ON aaes.policy_id = gps.policy_id
+        sla_date,
+        pipeline_name,
+        expected_runs,
+        successful_runs,
+        availability_rate_percent
+    FROM dedup
+    WHERE rn = 1
     """
 )
 
 (
-    access_audit_event_gold_df.coalesce(1)
+    gold_sla_availability_daily_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/access_audit_event_gold.csv")
+    .save(f"{TARGET_PATH}/gold_sla_availability_daily.csv")
 )
-
-# ============================================================
-# TARGET: governance_policy_gold
-# ============================================================
-governance_policy_gold_df = spark.sql(
-    """
-    SELECT
-        CAST(gps.policy_id AS STRING)              AS policy_id,
-        CAST(gps.policy_name AS STRING)            AS policy_name,
-        CAST(gps.policy_type AS STRING)            AS policy_type,
-        CAST(gps.applies_to_layer AS STRING)       AS applies_to_layer,
-        CAST(gps.applies_to_domain AS STRING)      AS applies_to_domain,
-        CAST(gps.required_control AS STRING)       AS required_control,
-        CAST(gps.effective_start_ts AS TIMESTAMP)  AS effective_start_ts,
-        CAST(gps.effective_end_ts AS TIMESTAMP)    AS effective_end_ts,
-        CAST(gps.policy_owner_role AS STRING)      AS policy_owner_role
-    FROM governance_policy_silver gps
-    """
-)
-
-(
-    governance_policy_gold_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/governance_policy_gold.csv")
-)
-
-# ============================================================
-# TARGET: system_availability_sla_daily_gold
-# ============================================================
-system_availability_sla_daily_gold_df = spark.sql(
-    """
-    SELECT
-        CAST(sas.sla_date AS DATE)                 AS sla_date,
-        CAST(sas.service_name AS STRING)           AS service_name,
-        CAST(sas.uptime_seconds AS INT)            AS uptime_seconds,
-        CAST(sas.downtime_seconds AS INT)          AS downtime_seconds,
-        CAST(sas.availability_pct AS DECIMAL(38,18)) AS availability_pct
-    FROM system_availability_sla_daily_silver sas
-    """
-)
-
-(
-    system_availability_sla_daily_gold_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/system_availability_sla_daily_gold.csv")
-)
-
-# ============================================================
-# TARGET: ingestion_feed_gold
-# ============================================================
-ingestion_feed_gold_df = spark.sql(
-    """
-    SELECT
-        CAST(ifs.feed_id AS STRING)                  AS feed_id,
-        CAST(ifs.feed_name AS STRING)                AS feed_name,
-        CAST(ifs.ingestion_method AS STRING)         AS ingestion_method,
-        CAST(ifs.source_system AS STRING)            AS source_system,
-        CAST(ifs.target_dataset_id AS STRING)        AS target_dataset_id,
-        CAST(ifs.expected_frequency_minutes AS INT)  AS expected_frequency_minutes,
-        CAST(ifs.last_success_ts AS TIMESTAMP)       AS last_success_ts,
-        CAST(ifs.current_status AS STRING)           AS current_status
-    FROM ingestion_feed_silver ifs
-    INNER JOIN dataset_silver ds
-        ON ifs.target_dataset_id = ds.dataset_id
-    """
-)
-
-(
-    ingestion_feed_gold_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/ingestion_feed_gold.csv")
-)
-
-job.commit()
