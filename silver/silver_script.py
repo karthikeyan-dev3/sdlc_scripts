@@ -1,7 +1,6 @@
 import sys
-from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
-from awsglue.job import Job
+from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 
@@ -9,165 +8,240 @@ args = getResolvedOptions(sys.argv, ["JOB_NAME"])
 
 sc = SparkContext()
 glueContext = GlueContext(sc)
-spark = glueContext.spark_session
-job = Job(glueContext)
-job.init(args["JOB_NAME"], args)
+spark: SparkSession = glueContext.spark_session
 
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 FILE_FORMAT = "csv"
 
+spark.conf.set("spark.sql.session.timeZone", "UTC")
+spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
+
 # ------------------------------------------------------------------------------------
-# Source Reads + Temp Views
+# 1) READ SOURCE TABLES (S3) + CREATE TEMP VIEWS
 # ------------------------------------------------------------------------------------
-customer_orders_src_df = (
+
+customer_orders_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/customer_orders.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/customer_orders_bronze.{FILE_FORMAT}/")
 )
-customer_orders_src_df.createOrReplaceTempView("customer_orders")
+customer_orders_bronze_df.createOrReplaceTempView("customer_orders_bronze")
 
-customer_orders_dq_summary_src_df = (
+customer_order_items_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/customer_orders_dq_summary.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/customer_order_items_bronze.{FILE_FORMAT}/")
 )
-customer_orders_dq_summary_src_df.createOrReplaceTempView("customer_orders_dq_summary")
+customer_order_items_bronze_df.createOrReplaceTempView("customer_order_items_bronze")
+
+etl_data_quality_results_bronze_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .option("inferSchema", "true")
+    .load(f"{SOURCE_PATH}/etl_data_quality_results_bronze.{FILE_FORMAT}/")
+)
+etl_data_quality_results_bronze_df.createOrReplaceTempView("etl_data_quality_results_bronze")
 
 # ------------------------------------------------------------------------------------
-# Target: silver.customer_orders
+# TARGET: silver.customer_orders_silver
+# Sources:
+#   bronze.customer_orders_bronze cob
+#   LEFT JOIN bronze.etl_data_quality_results_bronze dqrb
+# Dedup: latest by transaction_time (and detected_at as tiebreaker) per transaction_id
 # ------------------------------------------------------------------------------------
-customer_orders_out_df = spark.sql(
+
+customer_orders_silver_df = spark.sql(
     """
     WITH base AS (
-        SELECT
-            co.transaction_id AS order_id,
-            CAST(co.transaction_time AS DATE) AS order_date,
-            co.store_id AS customer_id,
-            co.product_id AS product_id,
-            CAST(co.quantity AS INT) AS quantity,
-            CASE
-                WHEN co.quantity IS NOT NULL AND CAST(co.quantity AS DOUBLE) <> 0
-                    THEN CAST(co.sale_amount AS DECIMAL(38, 10)) / CAST(co.quantity AS DECIMAL(38, 10))
-                ELSE NULL
-            END AS unit_price,
-            CAST(co.sale_amount AS DECIMAL(38, 10)) AS order_amount,
-            'COMPLETED' AS order_status,
-            CAST(co.transaction_time AS DATE) AS source_file_date,
-            CURRENT_TIMESTAMP AS load_timestamp,
-            co.transaction_time AS transaction_time_ts
-        FROM customer_orders co
+      SELECT
+        cob.*,
+        dqrb.detected_at AS dq_detected_at,
+        dqrb.source_table AS dq_source_table
+      FROM customer_orders_bronze cob
+      LEFT JOIN etl_data_quality_results_bronze dqrb
+        ON dqrb.record_id = cob.transaction_id
+       AND dqrb.source_table = 'sales_transactions_raw'
     ),
-    dedup AS (
-        SELECT
-            order_id,
-            order_date,
-            customer_id,
-            product_id,
-            quantity,
-            unit_price,
-            order_amount,
-            order_status,
-            source_file_date,
-            load_timestamp,
-            ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY transaction_time_ts DESC) AS rn
-        FROM base
+    ranked AS (
+      SELECT
+        CAST(transaction_id AS STRING) AS order_id,
+        CAST(transaction_time AS DATE) AS order_date,
+        CAST(sale_amount AS DECIMAL(18,2)) AS order_total_amount,
+        CAST(GREATEST(dq_detected_at, transaction_time) AS DATE) AS ingestion_date,
+        CAST(dq_source_table AS STRING) AS source_system,
+
+        CAST(NULL AS STRING) AS customer_id,
+        CAST(NULL AS STRING) AS order_status,
+        CAST(NULL AS STRING) AS currency_code,
+        CAST(NULL AS STRING) AS payment_method,
+        CAST(NULL AS STRING) AS shipping_country,
+        CAST(NULL AS STRING) AS shipping_state,
+        CAST(NULL AS STRING) AS shipping_city,
+
+        ROW_NUMBER() OVER (
+          PARTITION BY transaction_id
+          ORDER BY transaction_time DESC, dq_detected_at DESC
+        ) AS rn
+      FROM base
     )
     SELECT
-        order_id,
-        order_date,
-        customer_id,
-        product_id,
-        quantity,
-        unit_price,
-        order_amount,
-        order_status,
-        source_file_date,
-        load_timestamp
-    FROM dedup
+      order_id,
+      order_date,
+      order_total_amount,
+      customer_id,
+      order_status,
+      currency_code,
+      payment_method,
+      shipping_country,
+      shipping_state,
+      shipping_city,
+      source_system,
+      ingestion_date
+    FROM ranked
     WHERE rn = 1
     """
 )
 
 (
-    customer_orders_out_df.coalesce(1)
+    customer_orders_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/customer_orders.csv")
+    .save(f"{TARGET_PATH}/customer_orders_silver.csv")
 )
 
 # ------------------------------------------------------------------------------------
-# Target: silver.customer_orders_dq_summary
+# TARGET: silver.customer_order_items_silver
+# Sources:
+#   bronze.customer_order_items_bronze coib
+#   INNER JOIN bronze.customer_orders_bronze cob
+# Dedup/Aggregate: sum quantity per (transaction_id, product_id); keep latest event per key
 # ------------------------------------------------------------------------------------
-customer_orders_dq_summary_out_df = spark.sql(
+
+customer_order_items_silver_df = spark.sql(
     """
+    WITH joined AS (
+      SELECT
+        coib.*,
+        cob.sale_amount,
+        cob.transaction_time
+      FROM customer_order_items_bronze coib
+      INNER JOIN customer_orders_bronze cob
+        ON cob.transaction_id = coib.transaction_id
+    ),
+    cleaned AS (
+      SELECT
+        CAST(transaction_id AS STRING) AS order_id,
+        TRIM(CAST(product_id AS STRING)) AS product_id,
+        COALESCE(CAST(quantity AS INT), 0) AS quantity,
+        CAST(sale_amount AS DECIMAL(18,2)) AS sale_amount,
+        transaction_time
+      FROM joined
+      WHERE COALESCE(CAST(quantity AS INT), 0) >= 0
+    ),
+    aggregated AS (
+      SELECT
+        order_id,
+        product_id,
+        SUM(quantity) AS quantity,
+        MAX(sale_amount) AS sale_amount,
+        MAX(transaction_time) AS transaction_time
+      FROM cleaned
+      GROUP BY order_id, product_id
+    ),
+    priced AS (
+      SELECT
+        order_id,
+        product_id,
+        quantity,
+        CAST(
+          sale_amount / NULLIF(SUM(quantity) OVER (PARTITION BY order_id), 0)
+          AS DECIMAL(18,2)
+        ) AS unit_price_amount,
+        CAST(
+          (
+            sale_amount / NULLIF(SUM(quantity) OVER (PARTITION BY order_id), 0)
+          ) * quantity
+          AS DECIMAL(18,2)
+        ) AS line_total_amount,
+        ROW_NUMBER() OVER (
+          PARTITION BY order_id, product_id
+          ORDER BY transaction_time DESC
+        ) AS rn
+      FROM aggregated
+    )
     SELECT
-        CAST(codq.transaction_time AS DATE) AS process_date,
-        COUNT(*) AS total_records,
-        SUM(
-            CASE
-                WHEN codq.transaction_id IS NOT NULL
-                 AND codq.store_id IS NOT NULL
-                 AND codq.product_id IS NOT NULL
-                 AND codq.quantity IS NOT NULL
-                 AND CAST(codq.quantity AS INT) > 0
-                 AND codq.sale_amount IS NOT NULL
-                 AND CAST(codq.sale_amount AS DECIMAL(38, 10)) >= 0
-                 AND codq.transaction_time IS NOT NULL
-                THEN 1 ELSE 0
-            END
-        ) AS valid_records,
-        COUNT(*) - SUM(
-            CASE
-                WHEN codq.transaction_id IS NOT NULL
-                 AND codq.store_id IS NOT NULL
-                 AND codq.product_id IS NOT NULL
-                 AND codq.quantity IS NOT NULL
-                 AND CAST(codq.quantity AS INT) > 0
-                 AND codq.sale_amount IS NOT NULL
-                 AND CAST(codq.sale_amount AS DECIMAL(38, 10)) >= 0
-                 AND codq.transaction_time IS NOT NULL
-                THEN 1 ELSE 0
-            END
-        ) AS invalid_records,
-        CASE
-            WHEN COUNT(*) = 0 THEN CAST(0 AS DECIMAL(18, 4))
-            ELSE
-                (
-                    CAST(
-                        SUM(
-                            CASE
-                                WHEN codq.transaction_id IS NOT NULL
-                                 AND codq.store_id IS NOT NULL
-                                 AND codq.product_id IS NOT NULL
-                                 AND codq.quantity IS NOT NULL
-                                 AND CAST(codq.quantity AS INT) > 0
-                                 AND codq.sale_amount IS NOT NULL
-                                 AND CAST(codq.sale_amount AS DECIMAL(38, 10)) >= 0
-                                 AND codq.transaction_time IS NOT NULL
-                                THEN 1 ELSE 0
-                            END
-                        ) AS DECIMAL(18, 4)
-                    )
-                    / CAST(COUNT(*) AS DECIMAL(18, 4))
-                ) * CAST(100 AS DECIMAL(18, 4))
-        END AS data_quality_score_pct,
-        CAST((unix_timestamp(CURRENT_TIMESTAMP) - unix_timestamp(MAX(codq.transaction_time))) / 60 AS INT) AS ingestion_latency_minutes,
-        CURRENT_TIMESTAMP AS loaded_to_redshift_timestamp
-    FROM customer_orders_dq_summary codq
-    GROUP BY CAST(codq.transaction_time AS DATE)
+      order_id,
+      CAST(xxhash64(order_id, product_id) AS STRING) AS order_item_id,
+      product_id,
+      quantity,
+      unit_price_amount,
+      line_total_amount
+    FROM priced
+    WHERE rn = 1
     """
 )
 
 (
-    customer_orders_dq_summary_out_df.coalesce(1)
+    customer_order_items_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/customer_orders_dq_summary.csv")
+    .save(f"{TARGET_PATH}/customer_order_items_silver.csv")
 )
 
-job.commit()
+# ------------------------------------------------------------------------------------
+# TARGET: silver.etl_data_quality_results_silver
+# Source:
+#   bronze.etl_data_quality_results_bronze dqrb
+# Dedup: one row per (source_table, record_id, check_name, detected_at)
+# ------------------------------------------------------------------------------------
+
+etl_data_quality_results_silver_df = spark.sql(
+    """
+    WITH standardized AS (
+      SELECT
+        dqrb.detected_at AS detected_at,
+        CAST(TRIM(dqrb.source_table) AS STRING) AS source_table,
+        CAST(TRIM(dqrb.record_id) AS STRING) AS record_id,
+        CAST(TRIM(dqrb.check_name) AS STRING) AS check_name,
+        CAST(UPPER(TRIM(dqrb.check_status)) AS STRING) AS check_status,
+        CAST(dqrb.check_message AS STRING) AS check_message
+      FROM etl_data_quality_results_bronze dqrb
+    ),
+    ranked AS (
+      SELECT
+        detected_at,
+        source_table,
+        record_id,
+        check_name,
+        check_status,
+        check_message,
+        ROW_NUMBER() OVER (
+          PARTITION BY source_table, record_id, check_name, detected_at
+          ORDER BY detected_at DESC
+        ) AS rn
+      FROM standardized
+    )
+    SELECT
+      detected_at,
+      source_table,
+      record_id,
+      check_name,
+      check_status,
+      check_message
+    FROM ranked
+    WHERE rn = 1
+    """
+)
+
+(
+    etl_data_quality_results_silver_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/etl_data_quality_results_silver.csv")
+)
