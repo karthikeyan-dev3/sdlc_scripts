@@ -1,144 +1,176 @@
 ```python
-import sys
-from pyspark.context import SparkContext
+from pyspark.sql import SparkSession
 from awsglue.context import GlueContext
 from awsglue.transforms import *
-from awsglue.utils import getResolvedOptions
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import coalesce, greatest, expr, row_number
-from pyspark.sql.window import Window
+from pyspark.sql.functions import *
 
-# Initialize AWS Glue Spark Context
-sc = SparkContext.getOrCreate()
-glueContext = GlueContext(sc)
-spark = glueContext.spark_session
+# Initialize Spark and Glue Context
+spark = SparkSession.builder.appName("GlueJob").getOrCreate()
+glueContext = GlueContext(spark.sparkContext)
 
-# Define source and target paths
-SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
-TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
+# Define source path and file format
+SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze"
+TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver"
 FILE_FORMAT = "csv"
 
-# Define temp views for each input source table
-pos_sales_event_bronze = spark.read.load(f"{SOURCE_PATH}/pos_sales_event_bronze.{FILE_FORMAT}/")
-payment_gateway_payment_event_bronze = spark.read.load(f"{SOURCE_PATH}/payment_gateway_payment_event_bronze.{FILE_FORMAT}/")
-inventory_system_inventory_event_bronze = spark.read.load(f"{SOURCE_PATH}/inventory_system_inventory_event_bronze.{FILE_FORMAT}/")
-sensor_footfall_event_bronze = spark.read.load(f"{SOURCE_PATH}/sensor_footfall_event_bronze.{FILE_FORMAT}/")
+# Load Source Tables
+pos_sales_event_bronze_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/pos_sales_event_bronze.{FILE_FORMAT}/")
+payment_gateway_event_bronze_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/payment_gateway_event_bronze.{FILE_FORMAT}/")
+inventory_event_bronze_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/inventory_event_bronze.{FILE_FORMAT}/")
+footfall_event_bronze_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/footfall_event_bronze.{FILE_FORMAT}/")
 
-# Create temp views for source tables
-pos_sales_event_bronze.createOrReplaceTempView("pseb")
-payment_gateway_payment_event_bronze.createOrReplaceTempView("pgpeb")
-inventory_system_inventory_event_bronze.createOrReplaceTempView("isieb")
-sensor_footfall_event_bronze.createOrReplaceTempView("sfeb")
+# Create Temp Views
+pos_sales_event_bronze_df.createOrReplaceTempView("pseb")
+payment_gateway_event_bronze_df.createOrReplaceTempView("pgeb")
+inventory_event_bronze_df.createOrReplaceTempView("ieb")
+footfall_event_bronze_df.createOrReplaceTempView("feb")
 
-# Transformation and loading for data_pipeline_silver
-data_pipeline_silver = spark.sql("""
+# Data Pipelines Silver Transformation
+data_pipelines_silver_df = spark.sql("""
     SELECT 
-        COALESCE(pseb.source_system, pgpeb.source_system, isieb.source_system, sfeb.source_system) AS source_system,
-        GREATEST(pseb.ingestion_timestamp, pgpeb.ingestion_timestamp, isieb.ingestion_timestamp, sfeb.ingestion_timestamp) AS last_run_time
+        CONCAT(source_system, '-', event_type, '-', event_id) AS pipeline_id,
+        source_system AS source_name,
+        ingestion_timestamp,
+        CASE 
+            WHEN is_deleted = TRUE THEN 'DELETED' 
+            WHEN event_action IN ('CANCEL', 'VOID') THEN 'CANCELLED' 
+            ELSE 'PROCESSED'
+        END AS processing_status,
+        NULL AS processing_duration, 
+        NULL AS error_logs
+    FROM (
+        SELECT pseb.source_system, pseb.event_type, pseb.event_id, pseb.ingestion_timestamp, pseb.is_deleted, pseb.event_action
+        FROM pseb
+        UNION ALL
+        SELECT pgeb.source_system, pgeb.event_type, pgeb.event_id, pgeb.ingestion_timestamp, pgeb.is_deleted, NULL AS event_action
+        FROM pgeb
+        UNION ALL
+        SELECT ieb.source_system, ieb.event_type, ieb.event_id, ieb.ingestion_timestamp, ieb.is_deleted, NULL AS event_action
+        FROM ieb
+        UNION ALL
+        SELECT feb.source_system, feb.event_type, feb.event_id, feb.ingestion_timestamp, feb.is_deleted, NULL AS event_action
+        FROM feb
+    ) AS combined
+""")
+data_pipelines_silver_df.write.mode("overwrite").csv(f"{TARGET_PATH}/data_pipelines_silver.csv", header=True)
+
+# Validation Rules Silver Transformation
+validation_rules_silver_df = spark.sql("""
+    SELECT DISTINCT 
+        'SALES_TOTAL_NONNEGATIVE' AS rule_id,
+        'RANGE_CHECK' AS validation_type,
+        CASE WHEN pseb.total_amount >= 0 AND pseb.unit_price >= 0 AND pseb.quantity > 0 THEN 'PASS' ELSE 'FAIL' END AS status,
+        pseb.ingestion_timestamp AS last_validated,
+        NULL AS failure_count,
+        NULL AS corrective_action
     FROM pseb
     UNION ALL
-    SELECT 
-        COALESCE(pseb.source_system, pgpeb.source_system, isieb.source_system, sfeb.source_system) AS source_system,
-        GREATEST(pseb.ingestion_timestamp, pgpeb.ingestion_timestamp, isieb.ingestion_timestamp, sfeb.ingestion_timestamp) AS last_run_time
-    FROM pgpeb
+    SELECT DISTINCT 
+        'PAYMENT_MATCH' AS rule_id,
+        'RECONCILIATION' AS validation_type,
+        CASE WHEN pseb.total_amount = pgeb.amount THEN 'PASS' ELSE 'FAIL' END AS status,
+        greatest(pseb.ingestion_timestamp, pgeb.ingestion_timestamp) AS last_validated,
+        NULL AS failure_count,
+        NULL AS corrective_action
+    FROM pseb
+    LEFT JOIN pgeb ON pseb.payment_id = pgeb.payment_id AND pgeb.is_deleted = FALSE
     UNION ALL
-    SELECT 
-        COALESCE(pseb.source_system, pgpeb.source_system, isieb.source_system, sfeb.source_system) AS source_system,
-        GREATEST(pseb.ingestion_timestamp, pgpeb.ingestion_timestamp, isieb.ingestion_timestamp, sfeb.ingestion_timestamp) AS last_run_time
-    FROM isieb
+    SELECT DISTINCT 
+        'INVENTORY_NONNEGATIVE' AS rule_id,
+        'RANGE_CHECK' AS validation_type,
+        CASE WHEN ieb.current_stock >= 0 THEN 'PASS' ELSE 'FAIL' END AS status,
+        ieb.ingestion_timestamp AS last_validated,
+        NULL AS failure_count,
+        NULL AS corrective_action
+    FROM ieb
     UNION ALL
-    SELECT 
-        COALESCE(pseb.source_system, pgpeb.source_system, isieb.source_system, sfeb.source_system) AS source_system,
-        GREATEST(pseb.ingestion_timestamp, pgpeb.ingestion_timestamp, isieb.ingestion_timestamp, sfeb.ingestion_timestamp) AS last_run_time
-    FROM sfeb
+    SELECT DISTINCT 
+        'FOOTFALL_NONNEGATIVE' AS rule_id,
+        'RANGE_CHECK' AS validation_type,
+        CASE WHEN feb.entry_count >= 0 AND feb.exit_count >= 0 THEN 'PASS' ELSE 'FAIL' END AS status,
+        feb.ingestion_timestamp AS last_validated,
+        NULL AS failure_count,
+        NULL AS corrective_action
+    FROM feb
 """)
+validation_rules_silver_df.write.mode("overwrite").csv(f"{TARGET_PATH}/validation_rules_silver.csv", header=True)
 
-# Deduplication using ROW_NUMBER
-window_spec = Window.partitionBy("source_system").orderBy(data_pipeline_silver.last_run_time.desc())
-data_pipeline_silver_deduped = data_pipeline_silver.withColumn("row_num", row_number().over(window_spec)).filter(expr("row_num = 1")).drop("row_num")
+# SLA Records Silver Transformation
+# For this transformation, we need to create or assume another temporary view of data_pipelines_silver
 
-# Save result to target path
-data_pipeline_silver_deduped.write.mode("overwrite").csv(f"{TARGET_PATH}/data_pipeline_silver.csv")
+data_pipelines_silver_df.createOrReplaceTempView("dps")
 
-# Process for data_governance_policy_silver
-data_governance_policy_silver = spark.sql("""
+sla_records_silver_df = spark.sql("""
     SELECT 
-        governance_policy_id, 
-        policy_name, 
-        compliance_level, 
-        validation_rules,
-        last_updated
-    FROM VALUES
-    (
-        ('POLICY_001', 'Privacy Policy', 'High', '{"rule": "data_encryption"}', '2023-10-01')
-    ) AS dgp (governance_policy_id, policy_name, compliance_level, validation_rules, last_updated)
+        dps.source_name AS sla_id,
+        COUNT(*) / COUNT(*) AS data_availability,
+        AVG(CASE WHEN dps.processing_status = 'PROCESSED' THEN 1 ELSE 0 END) AS uptime_percentage,
+        NULL AS downtime_incidents,
+        MAX(dps.ingestion_timestamp) AS last_measured
+    FROM dps
+    GROUP BY dps.source_name
 """)
+sla_records_silver_df.write.mode("overwrite").csv(f"{TARGET_PATH}/sla_records_silver.csv", header=True)
 
-# Deduplication for data_governance_policy_silver
-window_spec_dgp = Window.partitionBy("governance_policy_id").orderBy(data_governance_policy_silver.last_updated.desc())
-data_governance_policy_silver_deduped = data_governance_policy_silver.withColumn("row_num", row_number().over(window_spec_dgp)).filter(expr("row_num = 1")).drop("row_num")
+# Metadata Catalog Silver Transformation
 
-# Save result to target path
-data_governance_policy_silver_deduped.write.mode("overwrite").csv(f"{TARGET_PATH}/data_governance_policy_silver.csv")
-
-# Process for data_validation_rule_silver
-data_validation_rule_silver = spark.sql("""
+metadata_catalog_silver_df = spark.sql("""
     SELECT 
-        validation_id,
-        field_name,
-        validation_type,
-        error_message,
-        last_validated
-    FROM VALUES
-    (
-        ('VALID_001', 'email', 'format_check', 'Invalid email format', '2023-10-01')
-    ) AS dvr (validation_id, field_name, validation_type, error_message, last_validated)
+        CONCAT(source_system, '_', 'event') AS dataset_id,
+        '' AS metadata_details, -- Assuming retrieval and creation of metadata_details is handled separately
+        MAX(ingestion_timestamp) AS last_updated,
+        NULL AS created_by,
+        NULL AS access_permissions
+    FROM (
+        SELECT pseb.source_system, pseb.ingestion_timestamp FROM pseb
+        UNION ALL
+        SELECT pgeb.source_system, pgeb.ingestion_timestamp FROM pgeb
+        UNION ALL
+        SELECT ieb.source_system, ieb.ingestion_timestamp FROM ieb
+        UNION ALL
+        SELECT feb.source_system, feb.ingestion_timestamp FROM feb
+    ) AS combined
+    GROUP BY source_system
 """)
+metadata_catalog_silver_df.write.mode("overwrite").csv(f"{TARGET_PATH}/metadata_catalog_silver.csv", header=True)
 
-# Deduplication for data_validation_rule_silver
-window_spec_dvr = Window.partitionBy("validation_id").orderBy(data_validation_rule_silver.last_validated.desc())
-data_validation_rule_silver_deduped = data_validation_rule_silver.withColumn("row_num", row_number().over(window_spec_dvr)).filter(expr("row_num = 1")).drop("row_num")
+# Enrichment Records Silver Transformation
+# For this transformation, assume or create another view or load of metadata_catalog_silver before using
+metadata_catalog_silver_df.createOrReplaceTempView("mcs")
 
-# Save result to target path
-data_validation_rule_silver_deduped.write.mode("overwrite").csv(f"{TARGET_PATH}/data_validation_rule_silver.csv")
-
-# Process for data_access_api_silver
-data_access_api_silver = spark.sql("""
+enrichment_records_silver_df = spark.sql("""
     SELECT 
-        api_id,
-        endpoint,
-        access_level,
-        response_time,
-        last_accessed
-    FROM VALUES
-    (
-        ('API_001', '/user/login', 'Public', 200, '2023-10-01')
-    ) AS daa (api_id, endpoint, access_level, response_time, last_accessed)
+        mcs.dataset_id,
+        '' AS enrichment_details, -- Assuming retrieval and creation of enrichment_details is handled separately
+        'MEDIUM' AS value_added,
+        current_timestamp() AS enrichment_timestamp,
+        'LLM_Model_1' AS enriched_by
+    FROM mcs
 """)
+enrichment_records_silver_df.write.mode("overwrite").csv(f"{TARGET_PATH}/enrichment_records_silver.csv", header=True)
 
-# Deduplication for data_access_api_silver
-window_spec_daa = Window.partitionBy("api_id").orderBy(data_access_api_silver.last_accessed.desc())
-data_access_api_silver_deduped = data_access_api_silver.withColumn("row_num", row_number().over(window_spec_daa)).filter(expr("row_num = 1")).drop("row_num")
+# Governance Policies Silver Transformation
+# For this transformation, assume validation_rules_silver and metadata_catalog_silver views are available
+validation_rules_silver_df.createOrReplaceTempView("vrs")
 
-# Save result to target path
-data_access_api_silver_deduped.write.mode("overwrite").csv(f"{TARGET_PATH}/data_access_api_silver.csv")
-
-# Process for metadata_catalog_silver
-metadata_catalog_silver = spark.sql("""
-    SELECT 
-        dataset_id, 
-        catalog_date, 
-        associated_policies
-    FROM VALUES
-    (
-        ('DS_001', '2023-10-01', '["POLICY_001", "POLICY_002"]')
-    ) AS mc (dataset_id, catalog_date, associated_policies)
+governance_policies_silver_df = spark.sql("""
+    SELECT DISTINCT 
+        CASE 
+            WHEN vrs.rule_id = 'PAYMENT_MATCH' THEN 'PAYMENT_RECONCILIATION' 
+            ELSE vrs.rule_id 
+        END AS policy_id,
+        CASE 
+            WHEN vrs.rule_id = 'PAYMENT_MATCH' THEN 'PAYMENT_RECONCILIATION' 
+            ELSE vrs.rule_id 
+        END AS policy_name,
+        CASE 
+            WHEN vrs.status = 'PASS' THEN 'COMPLIANT' 
+            ELSE 'NON_COMPLIANT' 
+        END AS compliance_status,
+        current_timestamp() AS last_reviewed,
+        NULL AS responsible_party
+    FROM vrs
+    LEFT JOIN mcs ON 1=1 -- Assumed logic for LEFT JOIN with mcs
 """)
-
-# Deduplication for metadata_catalog_silver
-window_spec_mc = Window.partitionBy("dataset_id").orderBy(metadata_catalog_silver.catalog_date.desc())
-metadata_catalog_silver_deduped = metadata_catalog_silver.withColumn("row_num", row_number().over(window_spec_mc)).filter(expr("row_num = 1")).drop("row_num")
-
-# Save result to target path
-metadata_catalog_silver_deduped.write.mode("overwrite").csv(f"{TARGET_PATH}/metadata_catalog_silver.csv")
+governance_policies_silver_df.write.mode("overwrite").csv(f"{TARGET_PATH}/governance_policies_silver.csv", header=True)
 ```
