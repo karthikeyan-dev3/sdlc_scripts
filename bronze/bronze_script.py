@@ -9,77 +9,17 @@ spark = glueContext.spark_session
 job = Job(glueContext)
 job.init("bronze_job", {})
 
+# Metadata
 metadata = {
     'tables': [
-        {
-            'target_schema': 'bronze',
-            'target_table': 'order_bronze',
-            'target_alias': 'ob',
-            'mapping_details': 'sales_transactions_raw str',
-            'description': 'Bronze-level ingestion of order/transaction records from sales_transactions_raw. Maps transaction_id, store_id, product_id, quantity, sale_amount, transaction_time as-is without transformations, joins, or aggregations.'
-        }
+        {'target_schema': 'bronze', 'target_table': 'pos_sales_event_bronze', 'target_alias': 'pseb', 'mapping_details': "source_event_stream.event_metadata + source_event_stream.sales_event WHERE event_metadata.event_type = 'sales'", 'description': 'Raw POS sales events at event-granularity. Store all fields from event_metadata (event_id, event_type, source_system, event_timestamp, ingestion_timestamp, batch_id, is_deleted) along with sales_event fields (transaction_id, order_id, store_id, terminal_id, cashier_id, product_id, product_name, category, sub_category, quantity, unit_price, discount, total_amount, payment_id, event_action). No deduplication or normalization (e.g., category case) applied in bronze.'},
+        {'target_schema': 'bronze', 'target_table': 'payment_gateway_payment_event_bronze', 'target_alias': 'pgpeb', 'mapping_details': "source_event_stream.event_metadata + source_event_stream.payment_event WHERE event_metadata.event_type = 'payment'", 'description': 'Raw payment gateway payment events at event-granularity. Store all fields from event_metadata along with payment_event fields (payment_id, transaction_id, payment_mode, provider, amount, currency, payment_status). Allows multiple payments per transaction and multiple currencies without transformation in bronze.'},
+        {'target_schema': 'bronze', 'target_table': 'inventory_system_inventory_event_bronze', 'target_alias': 'isieb', 'mapping_details': "source_event_stream.event_metadata + source_event_stream.inventory_event WHERE event_metadata.event_type = 'inventory'", 'description': 'Raw inventory system inventory events at event-granularity. Store all fields from event_metadata along with inventory_event fields (inventory_event_id, product_id, store_id, warehouse_id, change_type, quantity_changed, current_stock). No reconciliation with sales/returns in bronze.'},
+        {'target_schema': 'bronze', 'target_table': 'sensor_footfall_event_bronze', 'target_alias': 'sfeb', 'mapping_details': "source_event_stream.event_metadata + source_event_stream.footfall_event WHERE event_metadata.event_type = 'footfall'", 'description': 'Raw sensor footfall events at event-granularity. Store all fields from event_metadata along with footfall_event fields (footfall_event_id, store_id, entry_count, exit_count, sensor_id). No aggregations or time-windowing in bronze.'}
     ],
     'columns': [
-        {
-            'source_column': "['str.transaction_id']",
-            'source_type': 'STRING',
-            'source_nullable': 'not_accepted',
-            'target_column': 'transaction_id',
-            'target_type': 'STRING',
-            'target_nullable': 'not_accepted',
-            'transformation': 'str.transaction_id = ob.transaction_id',
-            'target_table': 'str'
-        },
-        {
-            'source_column': "['str.store_id']",
-            'source_type': 'STRING',
-            'source_nullable': 'accepted',
-            'target_column': 'store_id',
-            'target_type': 'STRING',
-            'target_nullable': 'accepted',
-            'transformation': 'str.store_id = ob.store_id',
-            'target_table': 'str'
-        },
-        {
-            'source_column': "['str.product_id']",
-            'source_type': 'STRING',
-            'source_nullable': 'accepted',
-            'target_column': 'product_id',
-            'target_type': 'STRING',
-            'target_nullable': 'accepted',
-            'transformation': 'str.product_id = ob.product_id',
-            'target_table': 'str'
-        },
-        {
-            'source_column': "['str.quantity']",
-            'source_type': 'INT',
-            'source_nullable': 'accepted',
-            'target_column': 'quantity',
-            'target_type': 'INT',
-            'target_nullable': 'accepted',
-            'transformation': 'str.quantity = ob.quantity',
-            'target_table': 'str'
-        },
-        {
-            'source_column': "['str.sale_amount']",
-            'source_type': 'DECIMAL',
-            'source_nullable': 'accepted',
-            'target_column': 'sale_amount',
-            'target_type': 'DECIMAL',
-            'target_nullable': 'accepted',
-            'transformation': 'str.sale_amount = ob.sale_amount',
-            'target_table': 'str'
-        },
-        {
-            'source_column': "['str.transaction_time']",
-            'source_type': 'TIMESTAMP',
-            'source_nullable': 'accepted',
-            'target_column': 'transaction_time',
-            'target_type': 'TIMESTAMP',
-            'target_nullable': 'accepted',
-            'transformation': 'str.transaction_time = ob.transaction_time',
-            'target_table': 'str'
-        }
+        {'source_column': "['pseb.source_system']", 'source_type': 'STRING', 'source_nullable': 'NOT NULL', 'target_column': 'source_system', 'target_type': 'STRING', 'target_nullable': 'NOT NULL', 'transformation': 'pseb.source_system = pseb.source_system', 'target_table': 'pseb'}, 
+        {'source_column': "['pseb.ingestion_timestamp']", 'source_type': 'TIMESTAMP', 'source_nullable': 'NOT NULL', 'target_column': 'last_run_time', 'target_type': 'TIMESTAMP', 'target_nullable': 'NOT NULL', 'transformation': 'pseb.ingestion_timestamp = pseb.ingestion_timestamp', 'target_table': 'pseb'}
     ],
     'runtime_config': {
         'base_path': 's3://sdlc-agent-bucket/engineering-agent/src/',
@@ -90,44 +30,28 @@ metadata = {
     }
 }
 
+base_path = metadata['runtime_config']['base_path']
+target_path = metadata['runtime_config']['target_path']
 read_format = metadata['runtime_config']['read_format']
 write_format = metadata['runtime_config']['write_format']
 write_mode = metadata['runtime_config']['write_mode']
-base_path = metadata['runtime_config']['base_path']
-target_path = metadata['runtime_config']['target_path']
 
 for table in metadata['tables']:
+    source_table = table['mapping_details'].split('+')[0].split('.')[1].strip()
+    source_alias = table['target_alias']
     target_table = table['target_table']
-    target_alias = table['target_alias']
 
-    mapping_details = table['mapping_details'].split()
-    source_table = mapping_details[0]
-    source_alias = mapping_details[1]
-
-    reader = spark.read.format(read_format)
-    if read_format == 'csv':
-        reader = reader.option("header", "true").option("inferSchema", "true")
-
-    df = reader.load(base_path + source_table + "." + read_format)
+    df = spark.read.format(read_format).option("header", "true").option("inferSchema", "true").load(f"{base_path}{source_table}.{read_format}")
     df = df.alias(source_alias)
 
-    transformations = []
-    for col_meta in metadata['columns']:
-        if col_meta.get('target_table') == target_alias:
-            transformation = col_meta.get('transformation', '')
-            if '=' in transformation:
-                rhs = transformation.split('=', 1)[1].strip()
-            else:
-                rhs = transformation.strip()
-            target_column = col_meta['target_column']
-            transformations.append(f"{rhs} as {target_column}")
+    # Apply transformations
+    transformations = [
+        col['transformation'].split('= ')[1] + f" as {col['target_column']}"
+        for col in metadata['columns'] if col['target_table'] == source_alias
+    ]
 
     df = df.selectExpr(*transformations)
-
-    writer = df.write.mode(write_mode).format(write_format)
-    if write_format == 'csv':
-        writer = writer.option("header", "true")
-
-    writer.save(target_path + target_table + "." + write_format)
+    
+    df.write.mode(write_mode).format(write_format).option("header", "true").save(f"{target_path}{target_table}.{write_format}")
 
 job.commit()
