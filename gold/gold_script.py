@@ -1,103 +1,100 @@
 ```python
-from pyspark.sql import SparkSession
 from awsglue.context import GlueContext
-import sys
-from pyspark.sql.functions import row_number
-from pyspark.sql.window import Window
+from pyspark.context import SparkContext
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, expr
 
-# Initialize Spark Session and Glue Context
-spark = SparkSession.builder.appName("AWS Glue PySpark").getOrCreate()
-glueContext = GlueContext(spark.sparkContext)
-sparkContext = glueContext.spark_session
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
 
-# Paths
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-# Load data_pipeline_silver
-data_pipeline_silver_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/data_pipeline_silver.{FILE_FORMAT}/")
-data_pipeline_silver_df.createOrReplaceTempView("dps")
+# gold_data_pipeline
+data_pipelines_silver = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/data_pipelines_silver.csv/")
+data_pipelines_silver.createOrReplaceTempView("dps")
 
-# Process gold_data_pipeline
 gold_data_pipeline_df = spark.sql("""
-    SELECT DISTINCT
-        dps.pipeline_id,
-        dps.source_system,
-        dps.ingestion_method,
-        dps.sla_commitment,
-        dps.transformation_methods,
-        dps.last_run_time
+    SELECT 
+        dps.pipeline_id AS pipeline_id,
+        dps.source_name AS source_name,
+        dps.ingestion_timestamp AS ingestion_timestamp,
+        dps.processing_status AS processing_status
     FROM dps
 """)
-gold_data_pipeline_df.write.mode("overwrite").format(FILE_FORMAT).option("header", "true").save(f"{TARGET_PATH}/gold_data_pipeline.csv")
 
-# Load data_governance_policy_silver
-data_governance_policy_silver_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/data_governance_policy_silver.{FILE_FORMAT}/")
-data_governance_policy_silver_df.createOrReplaceTempView("dgps")
+gold_data_pipeline_df.write.format("csv").mode("overwrite").option("header", "true").save(f"{TARGET_PATH}/gold_data_pipeline.csv")
 
-# Process gold_data_governance
+# gold_data_governance
+governance_policies_silver = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/governance_policies_silver.csv/")
+governance_policies_silver.createOrReplaceTempView("gps")
+
 gold_data_governance_df = spark.sql("""
-    SELECT DISTINCT
-        dgps.governance_policy_id,
-        dgps.policy_name,
-        dgps.compliance_level,
-        dgps.validation_rules,
-        dgps.last_updated
-    FROM dgps
+    SELECT 
+        gps.policy_id AS policy_id,
+        gps.policy_name AS policy_name,
+        gps.compliance_status AS compliance_status
+    FROM gps
 """)
-gold_data_governance_df.write.mode("overwrite").format(FILE_FORMAT).option("header", "true").save(f"{TARGET_PATH}/gold_data_governance.csv")
 
-# Load data_validation_rule_silver
-data_validation_rule_silver_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/data_validation_rule_silver.{FILE_FORMAT}/")
-data_validation_rule_silver_df.createOrReplaceTempView("dvrs")
+gold_data_governance_df.write.format("csv").mode("overwrite").option("header", "true").save(f"{TARGET_PATH}/gold_data_governance.csv")
 
-# Process gold_data_validation
+# gold_sla_management
+sla_records_silver = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/sla_records_silver.csv/")
+sla_records_silver.createOrReplaceTempView("slas")
+
+gold_sla_management_df = spark.sql("""
+    SELECT 
+        slas.sla_id AS sla_id,
+        slas.data_availability AS data_availability,
+        slas.uptime_percentage AS uptime_percentage
+    FROM slas
+""")
+
+gold_sla_management_df.write.format("csv").mode("overwrite").option("header", "true").save(f"{TARGET_PATH}/gold_sla_management.csv")
+
+# gold_data_validation
+validation_rules_silver = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/validation_rules_silver.csv/")
+validation_rules_silver.createOrReplaceTempView("vrs")
+
 gold_data_validation_df = spark.sql("""
-    SELECT DISTINCT
-        dvrs.validation_id,
-        dvrs.field_name,
-        dvrs.validation_type,
-        dvrs.error_message,
-        dvrs.last_validated
-    FROM dvrs
+    SELECT 
+        vrs.rule_id AS rule_id,
+        vrs.validation_type AS validation_type,
+        vrs.status AS status,
+        vrs.last_validated AS last_validated
+    FROM vrs
 """)
-gold_data_validation_df.write.mode("overwrite").format(FILE_FORMAT).option("header", "true").save(f"{TARGET_PATH}/gold_data_validation.csv")
 
-# Load data_access_api_silver
-data_access_api_silver_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/data_access_api_silver.{FILE_FORMAT}/")
-data_access_api_silver_df.createOrReplaceTempView("daas")
+gold_data_validation_df.write.format("csv").mode("overwrite").option("header", "true").save(f"{TARGET_PATH}/gold_data_validation.csv")
 
-# Process gold_data_access
-gold_data_access_df = spark.sql("""
-    SELECT DISTINCT
-        daas.api_id,
-        daas.endpoint,
-        daas.access_level,
-        daas.response_time,
-        daas.last_accessed
-    FROM daas
-""")
-gold_data_access_df.write.mode("overwrite").format(FILE_FORMAT).option("header", "true").save(f"{TARGET_PATH}/gold_data_access.csv")
+# gold_metadata_catalog
+metadata_catalog_silver = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/metadata_catalog_silver.csv/")
+metadata_catalog_silver.createOrReplaceTempView("mcs")
 
-# Load metadata_catalog_silver
-metadata_catalog_silver_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/metadata_catalog_silver.{FILE_FORMAT}/")
-metadata_catalog_silver_df.createOrReplaceTempView("mcs")
-
-# Process gold_metadata_catalog
 gold_metadata_catalog_df = spark.sql("""
-    SELECT
-        mcs.dataset_id,
-        mcs.metadata,
-        mcs.lineage,
-        mcs.catalog_date,
-        mcs.associated_policies,
-        dgps.governance_policy_id
+    SELECT 
+        mcs.dataset_id AS dataset_id,
+        mcs.metadata_details AS metadata_details,
+        mcs.last_updated AS last_updated
     FROM mcs
-    LEFT JOIN dgps
-    ON mcs.associated_policies LIKE CONCAT('%', dgps.governance_policy_id, '%')
 """)
-gold_metadata_catalog_df.write.mode("overwrite").format(FILE_FORMAT).option("header", "true").save(f"{TARGET_PATH}/gold_metadata_catalog.csv")
-```
 
-This AWS Glue PySpark script reads source tables from S3, performs transformations using Spark SQL, and writes each target table to a single CSV file in the desired gold layer, following the given UDT configurations and transformation logic provided in your input.
+gold_metadata_catalog_df.write.format("csv").mode("overwrite").option("header", "true").save(f"{TARGET_PATH}/gold_metadata_catalog.csv")
+
+# gold_llm_enrichment
+enrichment_records_silver = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/enrichment_records_silver.csv/")
+enrichment_records_silver.createOrReplaceTempView("ers")
+
+gold_llm_enrichment_df = spark.sql("""
+    SELECT 
+        ers.dataset_id AS dataset_id,
+        ers.enrichment_details AS enrichment_details,
+        ers.value_added AS value_added
+    FROM ers
+""")
+
+gold_llm_enrichment_df.write.format("csv").mode("overwrite").option("header", "true").save(f"{TARGET_PATH}/gold_llm_enrichment.csv")
+```
