@@ -1,61 +1,103 @@
-import sys
-from awsglue.utils import getResolvedOptions
-from awsglue.context import GlueContext
-from awsglue.job import Job
-from pyspark.context import SparkContext
+```python
 from pyspark.sql import SparkSession
+from awsglue.context import GlueContext
+import sys
+from pyspark.sql.functions import row_number
+from pyspark.sql.window import Window
 
-args = getResolvedOptions(sys.argv, ["JOB_NAME"])
+# Initialize Spark Session and Glue Context
+spark = SparkSession.builder.appName("AWS Glue PySpark").getOrCreate()
+glueContext = GlueContext(spark.sparkContext)
+sparkContext = glueContext.spark_session
 
-sc = SparkContext()
-glueContext = GlueContext(sc)
-spark = glueContext.spark_session
-job = Job(glueContext)
-job.init(args["JOB_NAME"], args)
-
-SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver"
-TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold"
+# Paths
+SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
+TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-# =============================================================================
-# Target Table: gold.gold_customer_orders
-# Source: silver.customer_orders_silver (alias: cos)
-# =============================================================================
+# Load data_pipeline_silver
+data_pipeline_silver_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/data_pipeline_silver.{FILE_FORMAT}/")
+data_pipeline_silver_df.createOrReplaceTempView("dps")
 
-# 1) Read source table from S3
-customer_orders_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/customer_orders_silver.{FILE_FORMAT}/")
-)
+# Process gold_data_pipeline
+gold_data_pipeline_df = spark.sql("""
+    SELECT DISTINCT
+        dps.pipeline_id,
+        dps.source_system,
+        dps.ingestion_method,
+        dps.sla_commitment,
+        dps.transformation_methods,
+        dps.last_run_time
+    FROM dps
+""")
+gold_data_pipeline_df.write.mode("overwrite").format(FILE_FORMAT).option("header", "true").save(f"{TARGET_PATH}/gold_data_pipeline.csv")
 
-# 2) Create temp view
-customer_orders_silver_df.createOrReplaceTempView("customer_orders_silver")
+# Load data_governance_policy_silver
+data_governance_policy_silver_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/data_governance_policy_silver.{FILE_FORMAT}/")
+data_governance_policy_silver_df.createOrReplaceTempView("dgps")
 
-# 3) Transform using Spark SQL (apply exact mappings)
-gold_customer_orders_df = spark.sql(
-    """
+# Process gold_data_governance
+gold_data_governance_df = spark.sql("""
+    SELECT DISTINCT
+        dgps.governance_policy_id,
+        dgps.policy_name,
+        dgps.compliance_level,
+        dgps.validation_rules,
+        dgps.last_updated
+    FROM dgps
+""")
+gold_data_governance_df.write.mode("overwrite").format(FILE_FORMAT).option("header", "true").save(f"{TARGET_PATH}/gold_data_governance.csv")
+
+# Load data_validation_rule_silver
+data_validation_rule_silver_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/data_validation_rule_silver.{FILE_FORMAT}/")
+data_validation_rule_silver_df.createOrReplaceTempView("dvrs")
+
+# Process gold_data_validation
+gold_data_validation_df = spark.sql("""
+    SELECT DISTINCT
+        dvrs.validation_id,
+        dvrs.field_name,
+        dvrs.validation_type,
+        dvrs.error_message,
+        dvrs.last_validated
+    FROM dvrs
+""")
+gold_data_validation_df.write.mode("overwrite").format(FILE_FORMAT).option("header", "true").save(f"{TARGET_PATH}/gold_data_validation.csv")
+
+# Load data_access_api_silver
+data_access_api_silver_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/data_access_api_silver.{FILE_FORMAT}/")
+data_access_api_silver_df.createOrReplaceTempView("daas")
+
+# Process gold_data_access
+gold_data_access_df = spark.sql("""
+    SELECT DISTINCT
+        daas.api_id,
+        daas.endpoint,
+        daas.access_level,
+        daas.response_time,
+        daas.last_accessed
+    FROM daas
+""")
+gold_data_access_df.write.mode("overwrite").format(FILE_FORMAT).option("header", "true").save(f"{TARGET_PATH}/gold_data_access.csv")
+
+# Load metadata_catalog_silver
+metadata_catalog_silver_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/metadata_catalog_silver.{FILE_FORMAT}/")
+metadata_catalog_silver_df.createOrReplaceTempView("mcs")
+
+# Process gold_metadata_catalog
+gold_metadata_catalog_df = spark.sql("""
     SELECT
-        CAST(cos.order_id AS STRING)                       AS order_id,
-        DATE(cos.order_date)                               AS order_date,
-        CAST(cos.customer_id AS STRING)                    AS customer_id,
-        CAST(cos.order_status AS STRING)                   AS order_status,
-        CAST(cos.order_total_amount AS DECIMAL(38,10))     AS order_total_amount,
-        CAST(cos.currency_code AS STRING)                  AS currency_code,
-        CAST(cos.source_system AS STRING)                  AS source_system,
-        DATE(cos.ingestion_date)                           AS ingestion_date
-    FROM customer_orders_silver cos
-    """
-)
+        mcs.dataset_id,
+        mcs.metadata,
+        mcs.lineage,
+        mcs.catalog_date,
+        mcs.associated_policies,
+        dgps.governance_policy_id
+    FROM mcs
+    LEFT JOIN dgps
+    ON mcs.associated_policies LIKE CONCAT('%', dgps.governance_policy_id, '%')
+""")
+gold_metadata_catalog_df.write.mode("overwrite").format(FILE_FORMAT).option("header", "true").save(f"{TARGET_PATH}/gold_metadata_catalog.csv")
+```
 
-# 4) Write output as a SINGLE CSV file directly under TARGET_PATH
-(
-    gold_customer_orders_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_customer_orders.csv")
-)
-
-job.commit()
+This AWS Glue PySpark script reads source tables from S3, performs transformations using Spark SQL, and writes each target table to a single CSV file in the desired gold layer, following the given UDT configurations and transformation logic provided in your input.
