@@ -1,77 +1,144 @@
+```python
 import sys
-from awsglue.context import GlueContext
-from awsglue.job import Job
-from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.transforms import *
+from awsglue.utils import getResolvedOptions
 from pyspark.sql import SparkSession
+from pyspark.sql.functions import coalesce, greatest, expr, row_number
+from pyspark.sql.window import Window
 
-args = getResolvedOptions(sys.argv, ["JOB_NAME"])
-
-sc = SparkContext()
+# Initialize AWS Glue Spark Context
+sc = SparkContext.getOrCreate()
 glueContext = GlueContext(sc)
-spark: SparkSession = glueContext.spark_session
-job = Job(glueContext)
-job.init(args["JOB_NAME"], args)
+spark = glueContext.spark_session
 
+# Define source and target paths
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 FILE_FORMAT = "csv"
 
-# ------------------------------------------------------------------------------------
-# Source: bronze.order_bronze -> Target: silver.customer_orders_silver
-# ------------------------------------------------------------------------------------
-order_bronze_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/order_bronze.{FILE_FORMAT}/")
-)
-order_bronze_df.createOrReplaceTempView("order_bronze")
+# Define temp views for each input source table
+pos_sales_event_bronze = spark.read.load(f"{SOURCE_PATH}/pos_sales_event_bronze.{FILE_FORMAT}/")
+payment_gateway_payment_event_bronze = spark.read.load(f"{SOURCE_PATH}/payment_gateway_payment_event_bronze.{FILE_FORMAT}/")
+inventory_system_inventory_event_bronze = spark.read.load(f"{SOURCE_PATH}/inventory_system_inventory_event_bronze.{FILE_FORMAT}/")
+sensor_footfall_event_bronze = spark.read.load(f"{SOURCE_PATH}/sensor_footfall_event_bronze.{FILE_FORMAT}/")
 
-customer_orders_silver_df = spark.sql(
-    """
-    WITH base AS (
-        SELECT
-            CAST(ob.transaction_id AS STRING)                                        AS order_id,
-            CAST(ob.transaction_time AS DATE)                                        AS order_date,
-            CAST(ob.store_id AS STRING)                                              AS customer_id,
-            CAST('COMPLETED' AS STRING)                                              AS order_status,
-            CAST(
-                CASE
-                    WHEN ob.sale_amount IS NULL OR ob.sale_amount < 0 THEN 0
-                    ELSE ob.sale_amount
-                END AS DECIMAL(38, 10)
-            )                                                                        AS order_total_amount,
-            CAST('USD' AS STRING)                                                    AS currency_code,
-            CAST('sales_transactions_raw' AS STRING)                                 AS source_system,
-            CAST(CURRENT_DATE AS DATE)                                               AS ingestion_date,
-            ob.transaction_time                                                      AS _transaction_time,
-            ROW_NUMBER() OVER (
-                PARTITION BY ob.transaction_id
-                ORDER BY ob.transaction_time DESC
-            )                                                                        AS _rn
-        FROM order_bronze ob
-    )
-    SELECT
-        order_id,
-        order_date,
-        customer_id,
-        order_status,
-        order_total_amount,
-        currency_code,
-        source_system,
-        ingestion_date
-    FROM base
-    WHERE _rn = 1
-    """
-)
+# Create temp views for source tables
+pos_sales_event_bronze.createOrReplaceTempView("pseb")
+payment_gateway_payment_event_bronze.createOrReplaceTempView("pgpeb")
+inventory_system_inventory_event_bronze.createOrReplaceTempView("isieb")
+sensor_footfall_event_bronze.createOrReplaceTempView("sfeb")
 
-(
-    customer_orders_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/customer_orders_silver.csv")
-)
+# Transformation and loading for data_pipeline_silver
+data_pipeline_silver = spark.sql("""
+    SELECT 
+        COALESCE(pseb.source_system, pgpeb.source_system, isieb.source_system, sfeb.source_system) AS source_system,
+        GREATEST(pseb.ingestion_timestamp, pgpeb.ingestion_timestamp, isieb.ingestion_timestamp, sfeb.ingestion_timestamp) AS last_run_time
+    FROM pseb
+    UNION ALL
+    SELECT 
+        COALESCE(pseb.source_system, pgpeb.source_system, isieb.source_system, sfeb.source_system) AS source_system,
+        GREATEST(pseb.ingestion_timestamp, pgpeb.ingestion_timestamp, isieb.ingestion_timestamp, sfeb.ingestion_timestamp) AS last_run_time
+    FROM pgpeb
+    UNION ALL
+    SELECT 
+        COALESCE(pseb.source_system, pgpeb.source_system, isieb.source_system, sfeb.source_system) AS source_system,
+        GREATEST(pseb.ingestion_timestamp, pgpeb.ingestion_timestamp, isieb.ingestion_timestamp, sfeb.ingestion_timestamp) AS last_run_time
+    FROM isieb
+    UNION ALL
+    SELECT 
+        COALESCE(pseb.source_system, pgpeb.source_system, isieb.source_system, sfeb.source_system) AS source_system,
+        GREATEST(pseb.ingestion_timestamp, pgpeb.ingestion_timestamp, isieb.ingestion_timestamp, sfeb.ingestion_timestamp) AS last_run_time
+    FROM sfeb
+""")
 
-job.commit()
+# Deduplication using ROW_NUMBER
+window_spec = Window.partitionBy("source_system").orderBy(data_pipeline_silver.last_run_time.desc())
+data_pipeline_silver_deduped = data_pipeline_silver.withColumn("row_num", row_number().over(window_spec)).filter(expr("row_num = 1")).drop("row_num")
+
+# Save result to target path
+data_pipeline_silver_deduped.write.mode("overwrite").csv(f"{TARGET_PATH}/data_pipeline_silver.csv")
+
+# Process for data_governance_policy_silver
+data_governance_policy_silver = spark.sql("""
+    SELECT 
+        governance_policy_id, 
+        policy_name, 
+        compliance_level, 
+        validation_rules,
+        last_updated
+    FROM VALUES
+    (
+        ('POLICY_001', 'Privacy Policy', 'High', '{"rule": "data_encryption"}', '2023-10-01')
+    ) AS dgp (governance_policy_id, policy_name, compliance_level, validation_rules, last_updated)
+""")
+
+# Deduplication for data_governance_policy_silver
+window_spec_dgp = Window.partitionBy("governance_policy_id").orderBy(data_governance_policy_silver.last_updated.desc())
+data_governance_policy_silver_deduped = data_governance_policy_silver.withColumn("row_num", row_number().over(window_spec_dgp)).filter(expr("row_num = 1")).drop("row_num")
+
+# Save result to target path
+data_governance_policy_silver_deduped.write.mode("overwrite").csv(f"{TARGET_PATH}/data_governance_policy_silver.csv")
+
+# Process for data_validation_rule_silver
+data_validation_rule_silver = spark.sql("""
+    SELECT 
+        validation_id,
+        field_name,
+        validation_type,
+        error_message,
+        last_validated
+    FROM VALUES
+    (
+        ('VALID_001', 'email', 'format_check', 'Invalid email format', '2023-10-01')
+    ) AS dvr (validation_id, field_name, validation_type, error_message, last_validated)
+""")
+
+# Deduplication for data_validation_rule_silver
+window_spec_dvr = Window.partitionBy("validation_id").orderBy(data_validation_rule_silver.last_validated.desc())
+data_validation_rule_silver_deduped = data_validation_rule_silver.withColumn("row_num", row_number().over(window_spec_dvr)).filter(expr("row_num = 1")).drop("row_num")
+
+# Save result to target path
+data_validation_rule_silver_deduped.write.mode("overwrite").csv(f"{TARGET_PATH}/data_validation_rule_silver.csv")
+
+# Process for data_access_api_silver
+data_access_api_silver = spark.sql("""
+    SELECT 
+        api_id,
+        endpoint,
+        access_level,
+        response_time,
+        last_accessed
+    FROM VALUES
+    (
+        ('API_001', '/user/login', 'Public', 200, '2023-10-01')
+    ) AS daa (api_id, endpoint, access_level, response_time, last_accessed)
+""")
+
+# Deduplication for data_access_api_silver
+window_spec_daa = Window.partitionBy("api_id").orderBy(data_access_api_silver.last_accessed.desc())
+data_access_api_silver_deduped = data_access_api_silver.withColumn("row_num", row_number().over(window_spec_daa)).filter(expr("row_num = 1")).drop("row_num")
+
+# Save result to target path
+data_access_api_silver_deduped.write.mode("overwrite").csv(f"{TARGET_PATH}/data_access_api_silver.csv")
+
+# Process for metadata_catalog_silver
+metadata_catalog_silver = spark.sql("""
+    SELECT 
+        dataset_id, 
+        catalog_date, 
+        associated_policies
+    FROM VALUES
+    (
+        ('DS_001', '2023-10-01', '["POLICY_001", "POLICY_002"]')
+    ) AS mc (dataset_id, catalog_date, associated_policies)
+""")
+
+# Deduplication for metadata_catalog_silver
+window_spec_mc = Window.partitionBy("dataset_id").orderBy(metadata_catalog_silver.catalog_date.desc())
+metadata_catalog_silver_deduped = metadata_catalog_silver.withColumn("row_num", row_number().over(window_spec_mc)).filter(expr("row_num = 1")).drop("row_num")
+
+# Save result to target path
+metadata_catalog_silver_deduped.write.mode("overwrite").csv(f"{TARGET_PATH}/metadata_catalog_silver.csv")
+```
