@@ -1,87 +1,87 @@
 ```python
-from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 from awsglue.context import GlueContext
 from awsglue.job import Job
+from awsglue.utils import getResolvedOptions
+import sys
 
-sc = SparkContext()
-glueContext = GlueContext(sc)
-spark = glueContext.spark_session
+args = getResolvedOptions(sys.argv, ['JOB_NAME'])
+spark = SparkSession.builder \
+    .appName("AWS Glue Job") \
+    .getOrCreate()
+glueContext = GlueContext(spark)
 job = Job(glueContext)
+job.init(args['JOB_NAME'], args)
 
-# Read sales_transactions_silver
-sales_transactions_df = spark.read.format('csv').option('header', 'true').load(f"s3://sdlc-agent-bucket/engineering-agent/silver/sales_transactions_silver.csv/")
-sales_transactions_df.createOrReplaceTempView("st")
+# Read and process gold_sales_transactions
+sales_transactions_df = spark.read.format("csv").option("header", "true").load(f"s3://sdlc-agent-bucket/engineering-agent/silver/sales_transactions_silver.csv/")
+sales_transactions_df.createOrReplaceTempView("sts")
 
-# Read store_master_silver
-store_master_df = spark.read.format('csv').option('header', 'true').load(f"s3://sdlc-agent-bucket/engineering-agent/silver/store_master_silver.csv/")
-store_master_df.createOrReplaceTempView("sm")
-
-# Create gold_sales_performance
-gold_sales_performance_df = spark.sql("""
-    SELECT
-        st.sale_id,
-        st.product_id,
-        st.store_id,
-        st.transaction_date,
-        st.quantity_sold,
-        st.revenue,
-        sm.store_type,
-        sm.city
-    FROM
-        st
-    LEFT JOIN
-        sm
-    ON
-        st.store_id = sm.store_id
+gold_sales_transactions_df = spark.sql("""
+    SELECT 
+        sts.transaction_id AS transaction_id,
+        CAST(sts.sale_date AS DATE) AS sale_date,
+        sts.product_id AS product_id,
+        sts.store_id AS store_id,
+        CAST(sts.quantity_sold AS INT) AS quantity_sold,
+        CAST(sts.total_sales_amount AS DECIMAL(18,2)) AS total_sales_amount
+    FROM sts
 """)
-gold_sales_performance_df.coalesce(1).write.csv(f"s3://sdlc-agent-bucket/engineering-agent/gold/gold_sales_performance.csv", header=True)
 
-# Read product_master_silver
-product_master_df = spark.read.format('csv').option('header', 'true').load(f"s3://sdlc-agent-bucket/engineering-agent/silver/product_master_silver.csv/")
-product_master_df.createOrReplaceTempView("pm")
+gold_sales_transactions_df.repartition(1).write.mode('overwrite').csv("s3://sdlc-agent-bucket/engineering-agent/gold/gold_sales_transactions.csv", header=True)
 
-# Create gold_product_master
+# Read and process gold_product_master
+product_master_df = spark.read.format("csv").option("header", "true").load(f"s3://sdlc-agent-bucket/engineering-agent/silver/product_master_silver.csv/")
+product_master_df.createOrReplaceTempView("pms")
+
 gold_product_master_df = spark.sql("""
-    SELECT
-        pm.product_id,
-        pm.product_name,
-        pm.category,
-        COALESCE(pm.brand, '') AS brand
-    FROM
-        pm
+    SELECT 
+        pms.product_id AS product_id,
+        pms.product_name AS product_name,
+        pms.category AS category,
+        pms.brand AS brand
+    FROM (
+        SELECT *, ROW_NUMBER() OVER (PARTITION BY product_id ORDER BY product_id) as row_num
+        FROM pms
+    ) tmp
+    WHERE tmp.row_num = 1
 """)
-gold_product_master_df.coalesce(1).write.csv(f"s3://sdlc-agent-bucket/engineering-agent/gold/gold_product_master.csv", header=True)
 
-# Create gold_store_master
+gold_product_master_df.repartition(1).write.mode('overwrite').csv("s3://sdlc-agent-bucket/engineering-agent/gold/gold_product_master.csv", header=True)
+
+# Read and process gold_store_master
+store_master_df = spark.read.format("csv").option("header", "true").load(f"s3://sdlc-agent-bucket/engineering-agent/silver/store_master_silver.csv/")
+store_master_df.createOrReplaceTempView("sms")
+
 gold_store_master_df = spark.sql("""
-    SELECT
-        sm.store_id,
-        sm.store_name,
-        sm.store_type,
-        sm.city,
-        sm.region
-    FROM
-        sm
+    SELECT 
+        sms.store_id AS store_id,
+        sms.store_name AS store_name,
+        sms.location AS location
+    FROM (
+        SELECT *, ROW_NUMBER() OVER (PARTITION BY store_id ORDER BY store_id) as row_num
+        FROM sms
+    ) tmp
+    WHERE tmp.row_num = 1
 """)
-gold_store_master_df.coalesce(1).write.csv(f"s3://sdlc-agent-bucket/engineering-agent/gold/gold_store_master.csv", header=True)
 
-# Read sales_daily_aggregation_silver
-sales_daily_aggregation_df = spark.read.format('csv').option('header', 'true').load(f"s3://sdlc-agent-bucket/engineering-agent/silver/sales_daily_aggregation_silver.csv/")
-sales_daily_aggregation_df.createOrReplaceTempView("sda")
+gold_store_master_df.repartition(1).write.mode('overwrite').csv("s3://sdlc-agent-bucket/engineering-agent/gold/gold_store_master.csv", header=True)
 
-# Create gold_sales_summary
-gold_sales_summary_df = spark.sql("""
-    SELECT
-        sda.reporting_date,
-        sda.total_revenue,
-        sda.total_quantity_sold,
-        sda.revenue_by_city,
-        sda.revenue_by_store_type
-    FROM
-        sda
+# Read and process gold_aggregated_sales
+aggregated_sales_df = spark.read.format("csv").option("header", "true").load(f"s3://sdlc-agent-bucket/engineering-agent/silver/daily_store_product_sales_agg_silver.csv/")
+aggregated_sales_df.createOrReplaceTempView("dspsa")
+
+gold_aggregated_sales_df = spark.sql("""
+    SELECT 
+        CAST(dspsa.aggregation_date AS DATE) AS aggregation_date,
+        dspsa.store_id AS store_id,
+        dspsa.product_id AS product_id,
+        CAST(dspsa.total_quantity_sold AS INT) AS total_quantity_sold,
+        CAST(dspsa.total_sales_amount AS DECIMAL(18,2)) AS total_sales_amount
+    FROM dspsa
 """)
-gold_sales_summary_df.coalesce(1).write.csv(f"s3://sdlc-agent-bucket/engineering-agent/gold/gold_sales_summary.csv", header=True)
+
+gold_aggregated_sales_df.repartition(1).write.mode('overwrite').csv("s3://sdlc-agent-bucket/engineering-agent/gold/gold_aggregated_sales.csv", header=True)
 
 job.commit()
 ```
