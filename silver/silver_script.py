@@ -1,89 +1,73 @@
 ```python
+from pyspark.context import SparkContext
 from awsglue.context import GlueContext
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, row_number, when
-from pyspark.sql.window import Window
+from awsglue.dynamicframe import DynamicFrame
 
-# Initialize Glue Context and Spark Session
-glueContext = GlueContext(SparkSession.builder.getOrCreate())
+# Initialize contexts
+sc = SparkContext.getOrCreate()
+glueContext = GlueContext(sc)
 spark = glueContext.spark_session
 
-# Load data from S3 bucket
-pos_sales_event_bronze_df = spark.read.format("csv").option("header", "true").load(f"s3://sdlc-agent-bucket/engineering-agent/bronze/pos_sales_event_bronze.csv/")
+# Define paths
+SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
+TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
+FILE_FORMAT = "csv"
 
-# Create Temporary View
+# Load pos_sales_event_bronze data
+pos_sales_event_bronze_df = spark.read.option("header", "true") \
+    .csv(f"{SOURCE_PATH}/pos_sales_event_bronze.{FILE_FORMAT}/")
+
+# Create temp views
 pos_sales_event_bronze_df.createOrReplaceTempView("pseb")
 
-# Process sales_transactions_silver
-sales_transactions_df = spark.sql("""
+# Transform and write sales_transactions_silver
+sales_transactions_silver_df = spark.sql("""
     SELECT 
-        sts.transaction_id, 
-        sts.store_id, 
-        sts.product_id, 
-        CAST(sts.event_timestamp AS DATE) AS sale_date, 
-        sts.quantity AS quantity_sold, 
-        sts.total_amount AS revenue
-    FROM 
-    (
-        SELECT 
-            pseb.transaction_id, 
-            pseb.store_id, 
-            pseb.product_id,
-            pseb.event_timestamp, 
-            pseb.quantity, 
-            pseb.total_amount,
-            pseb.event_action,
-            ROW_NUMBER() OVER (PARTITION BY pseb.transaction_id, pseb.store_id, pseb.product_id ORDER BY pseb.ingestion_timestamp DESC) as rn
-        FROM 
-            pseb 
-        WHERE 
-            pseb.event_type = 'sales' AND 
-            pseb.is_deleted = false
-    ) as sts 
-    WHERE
-        sts.rn = 1
-    AND
-        (sts.event_action IN ('INSERT', 'UPDATE') OR (sts.event_action IN ('CANCEL', 'DELETE') AND sts.event_action IS NULL))
-""")
-sales_transactions_df.write.mode("overwrite").csv("s3://sdlc-agent-bucket/engineering-agent/silver/sales_transactions_silver.csv", header=True)
-
-# Process stores_silver
-stores_df = spark.sql("""
-    SELECT DISTINCT
+        pseb.transaction_id,
+        CAST(pseb.event_timestamp AS DATE) AS transaction_date,
         pseb.store_id,
-        NULL AS store_name,
-        NULL AS store_location
-    FROM 
-        pseb
-    WHERE 
-        pseb.event_type = 'sales' AND 
-        pseb.is_deleted = false
+        pseb.product_id,
+        pseb.quantity AS quantity_sold,
+        pseb.total_amount AS sales_amount
+    FROM (
+        SELECT *,
+            ROW_NUMBER() OVER (
+                PARTITION BY pseb.transaction_id, pseb.store_id, pseb.product_id, CAST(pseb.event_timestamp AS DATE)
+                ORDER BY pseb.event_timestamp DESC, pseb.ingestion_timestamp DESC
+            ) AS rn
+        FROM pseb
+        WHERE pseb.event_type = 'sales'
+          AND pseb.is_deleted = FALSE
+          AND pseb.event_action <> 'DELETE'
+    ) t
+    WHERE rn = 1
 """)
-stores_df.write.mode("overwrite").csv("s3://sdlc-agent-bucket/engineering-agent/silver/stores_silver.csv", header=True)
+sales_transactions_silver_df.write.csv(f"{TARGET_PATH}/sales_transactions_silver.csv", header=True, mode="overwrite")
 
-# Process products_silver
-products_df = spark.sql("""
+# Transform and write product_master_silver
+product_master_silver_df = spark.sql("""
     SELECT 
-        product_id,
-        FIRST(product_name, TRUE) AS product_name,
-        FIRST(category, TRUE) AS product_category
-    FROM 
-    (
-        SELECT 
-            pseb.product_id,
-            pseb.product_name,
-            pseb.category,
-            ROW_NUMBER() OVER (PARTITION BY pseb.product_id ORDER BY pseb.ingestion_timestamp DESC) as rn
-        FROM 
-            pseb
-        WHERE 
-            pseb.event_type = 'sales' AND 
-            pseb.is_deleted = false
-    ) as ps
-    WHERE ps.rn = 1
-    GROUP BY ps.product_id
+        pseb.product_id,
+        pseb.product_name,
+        pseb.category,
+        COALESCE(NULLIF(pseb.brand, ''), 'UNKNOWN') AS brand,
+        pseb.unit_price AS price
+    FROM (
+        SELECT *,
+            ROW_NUMBER() OVER (
+                PARTITION BY pseb.product_id
+                ORDER BY pseb.event_timestamp DESC, pseb.ingestion_timestamp DESC
+            ) AS rn
+        FROM pseb
+        WHERE pseb.event_type = 'sales'
+          AND pseb.is_deleted = FALSE
+          AND pseb.product_id IS NOT NULL
+          AND pseb.product_name IS NOT NULL
+          AND pseb.category IS NOT NULL
+          AND pseb.unit_price IS NOT NULL
+    ) t
+    WHERE rn = 1
 """)
-products_df.write.mode("overwrite").csv("s3://sdlc-agent-bucket/engineering-agent/silver/products_silver.csv", header=True)
-
-# TODO: Implement data quality logs handling
+product_master_silver_df.write.csv(f"{TARGET_PATH}/product_master_silver.csv", header=True, mode="overwrite")
 ```
