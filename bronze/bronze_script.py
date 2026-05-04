@@ -9,53 +9,57 @@ spark = glueContext.spark_session
 job = Job(glueContext)
 job.init("bronze_job", {})
 
-# Metadata
-runtime_config = {'base_path': 's3://sdlc-agent-bucket/engineering-agent/src/', 'target_path': 's3://sdlc-agent-bucket/engineering-agent/bronze/', 'read_format': 'csv', 'write_format': 'csv', 'write_mode': 'overwrite'}
-tables = [
-    {'target_schema': 'bronze', 'target_table': 'pos_sales_event_bronze', 'target_alias': 'pseb', 'mapping_details': "SOURCE: POS sales_event + event_metadata (event_type='sales') -> bronze.pos_sales_event_bronze"},
-    {'target_schema': 'bronze', 'target_table': 'payment_gateway_event_bronze', 'target_alias': 'pgeb', 'mapping_details': "SOURCE: PAYMENT_GATEWAY payment_event + event_metadata (event_type='payment') -> bronze.payment_gateway_event_bronze"}
-]
-columns = [
-    {'source_column': "['pseb.transaction_id']", 'transformation': 'pseb.transaction_id = pseb.transaction_id', 'target_table': 'pseb'},
-    {'source_column': "['pseb.event_timestamp']", 'transformation': 'CAST(pseb.event_timestamp AS DATE) = transaction_date', 'target_table': 'CAST(pseb'},
-    {'source_column': "['pseb.store_id']", 'transformation': 'pseb.store_id = pseb.store_id', 'target_table': 'pseb'},
-    {'source_column': "['pseb.product_id']", 'transformation': 'pseb.product_id = pseb.product_id', 'target_table': 'pseb'},
-    {'source_column': "['pseb.quantity']", 'transformation': 'pseb.quantity = quantity_sold', 'target_table': 'pseb'},
-    {'source_column': "['pseb.total_amount']", 'transformation': 'pseb.total_amount = sales_amount', 'target_table': 'pseb'},
-    {'source_column': "['pseb.product_name']", 'transformation': 'pseb.product_name = pseb.product_name', 'target_table': 'pseb'},
-    {'source_column': "['pseb.category']", 'transformation': 'pseb.category = pseb.category', 'target_table': 'pseb'},
-    {'source_column': "['pseb.unit_price']", 'transformation': 'pseb.unit_price = price', 'target_table': 'pseb'}
-]
+metadata = {
+    'tables': [
+        {'target_schema': 'bronze', 'target_table': 'sales_event_bronze', 'target_alias': 'seb', 'mapping_details': 'POS.sales_event se', 'description': 'Raw POS sales events mapped 1:1 from source sales_event payload. Includes transactional attributes such as transaction_id, order_id, store_id, terminal_id, cashier_id, product_id, product_name, category, sub_category, quantity, unit_price, discount, total_amount, payment_id, event_action.'},
+        {'target_schema': 'bronze', 'target_table': 'payment_event_bronze', 'target_alias': 'peb', 'mapping_details': 'PAYMENT_GATEWAY.payment_event pe', 'description': 'Raw payment gateway events mapped 1:1 from source payment_event payload. Includes payment_id, transaction_id, payment_mode, provider, amount, currency, payment_status.'},
+        {'target_schema': 'bronze', 'target_table': 'inventory_event_bronze', 'target_alias': 'ieb', 'mapping_details': 'INVENTORY_SYSTEM.inventory_event ie', 'description': 'Raw inventory system events mapped 1:1 from source inventory_event payload. Includes inventory_event_id, product_id, store_id, warehouse_id, change_type, quantity_changed, current_stock.'},
+        {'target_schema': 'bronze', 'target_table': 'footfall_event_bronze', 'target_alias': 'feb', 'mapping_details': 'SENSOR.footfall_event fe', 'description': 'Raw sensor footfall events mapped 1:1 from source footfall_event payload. Includes footfall_event_id, store_id, entry_count, exit_count, sensor_id.'},
+        {'target_schema': 'bronze', 'target_table': 'event_metadata_bronze', 'target_alias': 'emb', 'mapping_details': 'ALL_SOURCES.event_metadata em', 'description': 'Raw event envelope metadata mapped 1:1 from source event_metadata across all event types. Includes event_id, event_type, source_system, event_timestamp, ingestion_timestamp, batch_id, is_deleted.'}
+    ],
+    'columns': [
+        {'source_column': "['seb.transaction_id']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'transaction_id', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'seb.transaction_id = seb.transaction_id', 'target_table': 'seb'},
+        {'source_column': "['seb.store_id']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'store_id', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'seb.store_id = seb.store_id', 'target_table': 'seb'},
+        {'source_column': "['seb.product_id']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'product_id', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'seb.product_id = seb.product_id', 'target_table': 'seb'},
+        {'source_column': "['emb.event_timestamp']", 'source_type': 'TIMESTAMP', 'source_nullable': 'not_null', 'target_column': 'event_timestamp', 'target_type': 'TIMESTAMP', 'target_nullable': 'not_null', 'transformation': 'emb.event_timestamp = emb.event_timestamp', 'target_table': 'emb'},
+        {'source_column': "['seb.quantity']", 'source_type': 'INT', 'source_nullable': 'not_null', 'target_column': 'quantity', 'target_type': 'INT', 'target_nullable': 'not_null', 'transformation': 'seb.quantity = seb.quantity', 'target_table': 'seb'},
+        {'source_column': "['seb.total_amount']", 'source_type': 'DECIMAL(18,2)', 'source_nullable': 'not_null', 'target_column': 'total_amount', 'target_type': 'DECIMAL(18,2)', 'target_nullable': 'not_null', 'transformation': 'seb.total_amount = seb.total_amount', 'target_table': 'seb'},
+        {'source_column': "['seb.product_name']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'product_name', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'seb.product_name = seb.product_name', 'target_table': 'seb'},
+        {'source_column': "['seb.category']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'category', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'seb.category = seb.category', 'target_table': 'seb'}
+    ],
+    'runtime_config': {
+        'base_path': 's3://sdlc-agent-bucket/engineering-agent/src/',
+        'target_path': 's3://sdlc-agent-bucket/engineering-agent/bronze/',
+        'read_format': 'csv',
+        'write_format': 'csv',
+        'write_mode': 'overwrite'
+    }
+}
 
-for table in tables:
+base_path = metadata['runtime_config']['base_path']
+target_path = metadata['runtime_config']['target_path']
+read_format = metadata['runtime_config']['read_format']
+write_format = metadata['runtime_config']['write_format']
+write_mode = metadata['runtime_config']['write_mode']
+
+for table in metadata['tables']:
+    mapping_details = table['mapping_details'].split(' ')
+    source_table = mapping_details[0]
+    source_alias = mapping_details[1]
     target_table = table['target_table']
-    source_details = table['mapping_details'].split('SOURCE: ')[1].split(' ')[0]  # Extracting source table details
-    source_table, source_alias = source_details.split(' ')[0], source_details.split(' ')[2]
-    
-    # Read data
-    df = spark.read.format(runtime_config['read_format']) \
-        .option("header", "true") \
-        .option("inferSchema", "true") \
-        .load(runtime_config['base_path'] + f"{source_table}." + runtime_config['read_format'])
-    
-    # Apply alias
+    target_alias = table['target_alias']
+
+    df = spark.read.format(read_format).option("header", "true").option("inferSchema", "true").load(base_path + source_table + '.' + read_format)
     df = df.alias(source_alias)
-
-    # Filter and Apply transformations
+    
     transformations = []
-    for column in columns:
-        if column['target_table'] in target_table:
-            transformation = column['transformation'].split('=')[1].strip()
-            target_column = column['source_column'].strip("[]'")
-            transformations.append(f"{transformation} as {target_column}")
-
-    # Select
+    for column in metadata['columns']:
+        if column['target_table'] == target_alias:
+            rhs = column['transformation'].split('=')[1].strip()
+            target_column = column['target_column']
+            transformations.append(f"{rhs} as {target_column}")
+    
     df = df.selectExpr(*transformations)
-
-    # Write Data
-    df.write.mode(runtime_config['write_mode']) \
-        .format(runtime_config['write_format']) \
-        .option("header", "true") \
-        .save(runtime_config['target_path'] + f"{target_table}." + runtime_config['write_format'])
+    df.write.mode(write_mode).format(write_format).option("header", "true").save(target_path + target_table + '.' + write_format)
 
 job.commit()
