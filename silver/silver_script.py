@@ -1,154 +1,82 @@
 ```python
-from awsglue.context import GlueContext
+import sys
 from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.job import Job
+from awsglue.utils import getResolvedOptions
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, max, current_date, date_add
+from pyspark.sql.functions import col, concat_ws, upper, lower, lit, row_number
 from pyspark.sql.window import Window
 
+## Parameters
+args = getResolvedOptions(sys.argv, ['JOB_NAME'])
+SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
+TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
+FILE_FORMAT = "csv"
+
+## Initialize Glue Context
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args['JOB_NAME'], args)
 
-# Set paths
-SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze"
-TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver"
-FILE_FORMAT = "csv"
-
-# 1. sales_transactions_silver
+## Sales Silver Table
 # Read source tables
-sales_event_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/sales_event_bronze.csv/")
-event_metadata_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/event_metadata_bronze.csv/")
-payment_event_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/payment_event_bronze.csv/")
+sales_bronze_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/sales_bronze.{FILE_FORMAT}/")
+payment_bronze_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/payment_bronze.{FILE_FORMAT}/")
 
 # Create temp views
-sales_event_df.createOrReplaceTempView("seb")
-event_metadata_df.createOrReplaceTempView("emb")
-payment_event_df.createOrReplaceTempView("peb")
+sales_bronze_df.createOrReplaceTempView("sb")
+payment_bronze_df.createOrReplaceTempView("pb")
 
-# SQL query
-sales_transactions_query = """
-SELECT 
-    seb.transaction_id,
-    seb.store_id,
-    seb.product_id,
-    CAST(emb.event_timestamp AS DATE) AS transaction_date,
-    seb.quantity AS quantity_sold,
-    seb.total_amount AS sales_amount
-FROM 
-    seb
-INNER JOIN 
-    emb ON emb.event_id = seb.transaction_id AND emb.event_type = 'sales_event'
-LEFT JOIN 
-    peb ON peb.transaction_id = seb.transaction_id
-WHERE 
-    emb.is_deleted = false 
-    AND seb.event_action = 'sale'
-"""
-
-sales_transactions_silver_df = spark.sql(sales_transactions_query)
-
-# Write to target
-sales_transactions_silver_df.coalesce(1).write.mode("overwrite").csv(f"{TARGET_PATH}/sales_transactions_silver.csv")
-
-# 2. cleaned_sales_silver
-# Read source table
-sales_transactions_silver_df.createOrReplaceTempView("sts")
-
-# SQL query
-cleaned_sales_query = """
-SELECT 
-    transaction_id,
-    store_id,
-    product_id,
-    transaction_date,
-    quantity_sold,
-    sales_amount,
-    CURRENT_DATE AS data_cleaned_date
+# Write SQL query for transformation
+sales_silver_query = """
+SELECT
+  sb.transaction_id,
+  sb.store_id,
+  sb.product_id AS sku_id,
+  sb.quantity AS quantity_sold,
+  sb.transaction_date,
+  sb.unit_price AS price_per_unit,
+  sb.total_amount AS sales_revenue
 FROM (
-    SELECT *, 
-    ROW_NUMBER() OVER (PARTITION BY transaction_id, store_id, product_id, transaction_date ORDER BY event_timestamp DESC) as rn
-    FROM sts 
-) 
+  SELECT *, ROW_NUMBER() OVER (PARTITION BY sb.transaction_id, sb.store_id, sb.product_id ORDER BY sb.event_timestamp DESC) as rn
+  FROM sb
+  LEFT JOIN pb ON sb.payment_id = pb.payment_id AND sb.transaction_id = pb.transaction_id
+  WHERE (pb.payment_status = 'successful' OR pb.payment_status IS NULL)
+    AND (sb.event_action = 'completed')
+) as filtered_sales
 WHERE rn = 1
-AND transaction_id IS NOT NULL
-AND store_id IS NOT NULL
-AND product_id IS NOT NULL
-AND quantity_sold > 0
-AND sales_amount >= 0
 """
 
-cleaned_sales_silver_df = spark.sql(cleaned_sales_query)
+# Execute query and write to target path
+sales_silver_df = spark.sql(sales_silver_query)
+sales_silver_df.write.mode("overwrite").csv(f"{TARGET_PATH}/sales_silver.csv", header=True)
 
-# Write to target
-cleaned_sales_silver_df.coalesce(1).write.mode("overwrite").csv(f"{TARGET_PATH}/cleaned_sales_silver.csv")
-
-# 3. product_master_silver
-# SQL query
-product_master_query = """
-SELECT 
-    seb.product_id, 
-    seb.product_name, 
-    seb.category, 
-    seb.unit_price as price, 
-    NULL as supplier_id,
-    CASE WHEN MAX(emb.event_timestamp) >= date_add(current_date(), -90) THEN 'Y' ELSE 'N' END as active_status
-FROM 
-    seb
-INNER JOIN 
-    emb ON emb.event_id = seb.transaction_id AND emb.event_type = 'sales_event'
-GROUP BY 
-    seb.product_id, seb.product_name, seb.category, seb.unit_price
-"""
-
-product_master_silver_df = spark.sql(product_master_query)
-
-# Write to target
-product_master_silver_df.coalesce(1).write.mode("overwrite").csv(f"{TARGET_PATH}/product_master_silver.csv")
-
-# 4. store_master_silver
-# SQL query
-store_master_query = """
-SELECT 
-    seb.store_id,
-    NULL as store_name,
-    NULL as region,
-    NULL as store_type,
-    CASE WHEN MAX(emb.event_timestamp) >= date_add(current_date(), -30) THEN 'OPEN' ELSE 'UNKNOWN' END as operational_status
-FROM 
-    seb
-INNER JOIN 
-    emb ON emb.event_id = seb.transaction_id AND emb.event_type = 'sales_event'
-LEFT JOIN 
-    feb ON feb.store_id = seb.store_id
-GROUP BY 
-    seb.store_id
-"""
-
-store_master_silver_df = spark.sql(store_master_query)
-
-# Write to target
-store_master_silver_df.coalesce(1).write.mode("overwrite").csv(f"{TARGET_PATH}/store_master_silver.csv")
-
-# 5. sales_daily_aggregated_silver
+## Inventory Silver Table
 # Read source table
-cleaned_sales_silver_df.createOrReplaceTempView("css")
+inventory_bronze_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/inventory_bronze.{FILE_FORMAT}/")
 
-# SQL query
-sales_daily_aggregated_query = """
-SELECT 
-    store_id, 
-    product_id, 
-    transaction_date AS aggregation_date, 
-    SUM(sales_amount) AS total_sales_amount, 
-    SUM(quantity_sold) AS total_quantity_sold
-FROM 
-    css
-GROUP BY 
-    store_id, product_id, transaction_date
+# Create temp view
+inventory_bronze_df.createOrReplaceTempView("ib")
+
+# Write SQL query for transformation
+inventory_silver_query = """
+SELECT
+  ib.store_id,
+  ib.product_id AS sku_id,
+  GREATEST(ib.current_stock, 0) AS stock_on_hand
+FROM (
+  SELECT *, ROW_NUMBER() OVER (PARTITION BY ib.store_id, ib.product_id ORDER BY ib.event_timestamp DESC) as rn
+  FROM ib
+) as filtered_inventory
+WHERE rn = 1
 """
 
-sales_daily_aggregated_silver_df = spark.sql(sales_daily_aggregated_query)
+# Execute query and write to target path
+inventory_silver_df = spark.sql(inventory_silver_query)
+inventory_silver_df.write.mode("overwrite").csv(f"{TARGET_PATH}/inventory_silver.csv", header=True)
 
-# Write to target
-sales_daily_aggregated_silver_df.coalesce(1).write.mode("overwrite").csv(f"{TARGET_PATH}/sales_daily_aggregated_silver.csv")
+job.commit()
 ```
