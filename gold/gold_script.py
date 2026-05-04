@@ -1,104 +1,78 @@
 ```python
+import sys
 from awsglue.transforms import *
 from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 from awsglue.context import GlueContext
 from awsglue.job import Job
 from pyspark.sql import SparkSession
-from pyspark.sql import functions as F
-from pyspark.sql.window import Window
+from awsglue.dynamicframe import DynamicFrame
 
-# Initialize Glue context and Spark session
+# Initialize Spark and Glue context
 sc = SparkContext()
 glueContext = GlueContext(sc)
-spark = SparkSession.builder.config("spark.sql.sources.partitionOverwriteMode", "dynamic").getOrCreate()
+spark = SparkSession.builder.getOrCreate()
+job = Job(glueContext)
 
-# Define paths
+# Set paths
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-# Function to read data from S3
-def read_source_data(table_name):
-    return spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/{table_name}.{FILE_FORMAT}/")
+# Read and process for gold_sales
+sales_df = spark.read.format("csv").option("header", "true").load(f"{SOURCE_PATH}/sales_silver.csv/")
+sales_df.createOrReplaceTempView("ss")
 
-# gold_sales_transactions transformation
-cleaned_sales_df = read_source_data("cleaned_sales_silver")
-cleaned_sales_df.createOrReplaceTempView("css")
+gold_sales_sql = """
+SELECT
+    CAST(transaction_id AS STRING) AS transaction_id,
+    CAST(store_id AS STRING) AS store_id,
+    CAST(sku_id AS STRING) AS sku_id,
+    CAST(quantity_sold AS INTEGER) AS quantity_sold,
+    CAST(transaction_date AS STRING) AS transaction_date,
+    CAST(price_per_unit AS DECIMAL(18,2)) AS price_per_unit,
+    CAST(sales_revenue AS DECIMAL(18,2)) AS sales_revenue
+FROM ss
+"""
 
-gold_sales_transactions_df = spark.sql("""
-    SELECT 
-        css.transaction_id AS transaction_id,
-        css.store_id AS store_id,
-        css.product_id AS product_id,
-        CAST(css.transaction_date AS DATE) AS transaction_date,
-        css.quantity_sold AS quantity_sold,
-        css.sales_amount AS sales_amount
-    FROM css
-""")
+gold_sales_df = spark.sql(gold_sales_sql)
+gold_sales_df.coalesce(1).write.mode("overwrite").option("header", "true").csv(f"{TARGET_PATH}/gold_sales.csv")
 
-gold_sales_transactions_df.coalesce(1).write.mode("overwrite").csv(f"{TARGET_PATH}/gold_sales_transactions.csv", header=True)
+# Read and process for gold_inventory
+inventory_df = spark.read.format("csv").option("header", "true").load(f"{SOURCE_PATH}/inventory_silver.csv/")
+inventory_df.createOrReplaceTempView("is")
 
-# gold_product_master transformation
-product_master_df = read_source_data("product_master_silver")
-product_master_df.createOrReplaceTempView("pms")
+demand_forecast_df = spark.read.format("csv").option("header", "true").load(f"{TARGET_PATH}/gold_demand_forecast_metrics.csv/")
+demand_forecast_df.createOrReplaceTempView("gdfm")
 
-gold_product_master_df = spark.sql("""
-    SELECT 
-        pms.product_id AS product_id,
-        pms.product_name AS product_name,
-        pms.category AS category,
-        pms.price AS price,
-        COALESCE(pms.supplier_id, 'Unknown') AS supplier_id,
-        pms.active_status AS active_status
-    FROM pms
-""")
+gold_inventory_sql = """
+SELECT
+    is.store_id,
+    is.sku_id,
+    is.stock_on_hand,
+    COALESCE(gdfm.demand_forecast, 0) AS demand_forecast
+FROM is
+LEFT JOIN gdfm
+ON is.store_id = gdfm.store_id AND is.sku_id = gdfm.sku_id
+"""
 
-gold_product_master_df.coalesce(1).write.mode("overwrite").csv(f"{TARGET_PATH}/gold_product_master.csv", header=True)
+gold_inventory_df = spark.sql(gold_inventory_sql)
+gold_inventory_df.coalesce(1).write.mode("overwrite").option("header", "true").csv(f"{TARGET_PATH}/gold_inventory.csv")
 
-# gold_store_master transformation
-store_master_df = read_source_data("store_master_silver")
-store_master_df.createOrReplaceTempView("sms")
+# Read and process for gold_demand_forecast_metrics
+gold_demand_forecast_metrics_sql = """
+SELECT
+    ss.store_id,
+    ss.sku_id,
+    DATE(ss.transaction_date) AS forecast_date,
+    SUM(ss.quantity_sold) AS actual_quantity_sold
+FROM ss
+GROUP BY ss.store_id, ss.sku_id, DATE(ss.transaction_date)
+"""
 
-gold_store_master_df = spark.sql("""
-    SELECT 
-        sms.store_id AS store_id,
-        sms.store_name AS store_name,
-        sms.region AS region,
-        sms.store_type AS store_type,
-        sms.operational_status AS operational_status
-    FROM sms
-""")
+gold_demand_forecast_metrics_df = spark.sql(gold_demand_forecast_metrics_sql)
+gold_demand_forecast_metrics_df.coalesce(1).write.mode("overwrite").option("header", "true").csv(f"{TARGET_PATH}/gold_demand_forecast_metrics.csv")
 
-gold_store_master_df.coalesce(1).write.mode("overwrite").csv(f"{TARGET_PATH}/gold_store_master.csv", header=True)
-
-# gold_sales_aggregated transformation
-sales_daily_aggregated_df = read_source_data("sales_daily_aggregated_silver")
-sales_daily_aggregated_df.createOrReplaceTempView("sdas")
-
-gold_sales_aggregated_df = spark.sql("""
-    SELECT 
-        sdas.aggregation_date AS aggregation_date,
-        sdas.store_id AS store_id,
-        sdas.product_id AS product_id,
-        sdas.total_sales_amount AS total_sales_amount,
-        sdas.total_quantity_sold AS total_quantity_sold
-    FROM sdas
-""")
-
-gold_sales_aggregated_df.coalesce(1).write.mode("overwrite").csv(f"{TARGET_PATH}/gold_sales_aggregated.csv", header=True)
-
-# gold_cleaned_sales transformation
-gold_cleaned_sales_df = spark.sql("""
-    SELECT 
-        css.transaction_id AS transaction_id,
-        css.store_id AS store_id,
-        css.product_id AS product_id,
-        CAST(css.transaction_date AS DATE) AS transaction_date,
-        css.quantity_sold AS quantity_sold,
-        css.sales_amount AS sales_amount
-    FROM css
-""")
-
-gold_cleaned_sales_df.coalesce(1).write.mode("overwrite").csv(f"{TARGET_PATH}/gold_cleaned_sales.csv", header=True)
+# Finish job
+job.commit()
 ```
