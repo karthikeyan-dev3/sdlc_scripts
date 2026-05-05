@@ -1,68 +1,73 @@
 ```python
-from awsglue.context import GlueContext
 from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.dynamicframe import DynamicFrame
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, sum as _sum, to_date
+from pyspark.sql.functions import col
 
-sc = SparkContext()
+# Initialize Spark and Glue Contexts
+sc = SparkContext.getOrCreate()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
 
-# Read source tables from S3
+# Define paths
+SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
+TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
+FILE_FORMAT = "csv"
 
-# sales_transactions_silver
-sales_transactions_silver_df = (
-    spark.read.format("csv")
-    .option("header", "true")
-    .option("inferSchema", "true")
-    .load(f"s3://sdlc-agent-bucket/engineering-agent/silver/sales_transactions_silver.csv/")
-)
-sales_transactions_silver_df.createOrReplaceTempView("sts")
+# Read source tables
+sts = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/sales_transactions_silver.{FILE_FORMAT}/")
+pcs = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/product_catalog_silver.{FILE_FORMAT}/")
+sds = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/store_details_silver.{FILE_FORMAT}/")
 
-# product_master_silver
-product_master_silver_df = (
-    spark.read.format("csv")
-    .option("header", "true")
-    .option("inferSchema", "true")
-    .load(f"s3://sdlc-agent-bucket/engineering-agent/silver/product_master_silver.csv/")
-)
-product_master_silver_df.createOrReplaceTempView("pms")
+# Create temporary views
+sts.createOrReplaceTempView("sales_transactions_silver")
+pcs.createOrReplaceTempView("product_catalog_silver")
+sds.createOrReplaceTempView("store_details_silver")
 
-# Transform and Write gold_sales_transactions
-gold_sales_transactions_df = spark.sql("""
-    SELECT 
-        transaction_id,
-        transaction_date,
-        store_id,
-        product_id,
-        quantity_sold,
-        sales_amount
-    FROM sts
+# Transform and write the gold_sales table
+gold_sales_df = spark.sql("""
+SELECT
+    CAST(sts.transaction_id AS STRING) AS transaction_id,
+    CAST(sts.store_id AS STRING) AS store_id,
+    CAST(sts.product_id AS STRING) AS product_id,
+    CAST(sts.sale_date AS STRING) AS sale_date,
+    CAST(sts.quantity_sold AS INT) AS quantity_sold,
+    CAST(sts.revenue AS DECIMAL(18, 2)) AS revenue,
+    CAST(sds.city AS STRING) AS city,
+    CAST(sds.store_type AS STRING) AS store_type
+FROM
+    sales_transactions_silver sts
+LEFT JOIN
+    product_catalog_silver pcs ON sts.product_id = pcs.product_id
+LEFT JOIN
+    store_details_silver sds ON sts.store_id = sds.store_id
 """)
-gold_sales_transactions_df.coalesce(1).write.mode("overwrite").option("header", "true").csv("s3://sdlc-agent-bucket/engineering-agent/gold/gold_sales_transactions.csv")
+gold_sales_df.coalesce(1).write.csv(f"{TARGET_PATH}/gold_sales.csv", header=True, mode="overwrite")
 
-# Transform and Write gold_product_master
-gold_product_master_df = spark.sql("""
-    SELECT 
-        product_id,
-        product_name,
-        category,
-        brand,
-        price
-    FROM pms
+# Transform and write the gold_products table
+gold_products_df = spark.sql("""
+SELECT
+    CAST(pcs.product_id AS STRING) AS product_id,
+    CAST(pcs.product_name AS STRING) AS product_name,
+    CAST(pcs.category AS STRING) AS category,
+    CAST(pcs.subcategory AS STRING) AS subcategory,
+    CAST(pcs.price AS DECIMAL(18, 2)) AS price
+FROM
+    product_catalog_silver pcs
 """)
-gold_product_master_df.coalesce(1).write.mode("overwrite").option("header", "true").csv("s3://sdlc-agent-bucket/engineering-agent/gold/gold_product_master.csv")
+gold_products_df.coalesce(1).write.csv(f"{TARGET_PATH}/gold_products.csv", header=True, mode="overwrite")
 
-# Transform and Write gold_sales_aggregated
-gold_sales_aggregated_df = spark.sql("""
-    SELECT 
-        to_date(transaction_date) AS aggregation_date,
-        store_id,
-        product_id,
-        SUM(quantity_sold) AS total_quantity_sold,
-        SUM(sales_amount) AS total_sales_amount
-    FROM sts
-    GROUP BY to_date(transaction_date), store_id, product_id
+# Transform and write the gold_stores table
+gold_stores_df = spark.sql("""
+SELECT
+    CAST(sds.store_id AS STRING) AS store_id,
+    CAST(sds.store_name AS STRING) AS store_name,
+    CAST(sds.city AS STRING) AS city,
+    CAST(sds.store_type AS STRING) AS store_type,
+    CAST(sds.region AS STRING) AS region
+FROM
+    store_details_silver sds
 """)
-gold_sales_aggregated_df.coalesce(1).write.mode("overwrite").option("header", "true").csv("s3://sdlc-agent-bucket/engineering-agent/gold/gold_sales_aggregated.csv")
+gold_stores_df.coalesce(1).write.csv(f"{TARGET_PATH}/gold_stores.csv", header=True, mode="overwrite")
 ```
