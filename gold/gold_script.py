@@ -2,59 +2,67 @@
 from awsglue.context import GlueContext
 from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, sum as _sum, to_date
 
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
 
-# Read source table: iot_telemetry_data_silver
-iot_df = spark.read.format("csv").option("header", "true").load(f"s3://sdlc-agent-bucket/engineering-agent/silver/iot_telemetry_data_silver.csv/")
-iot_df.createOrReplaceTempView("iot_telemetry_data_silver")
+# Read source tables from S3
 
-# Transform and write target table: gold_telemetry_data
-gold_telemetry_data = spark.sql("""
-    SELECT
-        device_id,
-        timestamp,
-        temperature,
-        humidity,
-        battery_level
-    FROM iot_telemetry_data_silver
+# sales_transactions_silver
+sales_transactions_silver_df = (
+    spark.read.format("csv")
+    .option("header", "true")
+    .option("inferSchema", "true")
+    .load(f"s3://sdlc-agent-bucket/engineering-agent/silver/sales_transactions_silver.csv/")
+)
+sales_transactions_silver_df.createOrReplaceTempView("sts")
+
+# product_master_silver
+product_master_silver_df = (
+    spark.read.format("csv")
+    .option("header", "true")
+    .option("inferSchema", "true")
+    .load(f"s3://sdlc-agent-bucket/engineering-agent/silver/product_master_silver.csv/")
+)
+product_master_silver_df.createOrReplaceTempView("pms")
+
+# Transform and Write gold_sales_transactions
+gold_sales_transactions_df = spark.sql("""
+    SELECT 
+        transaction_id,
+        transaction_date,
+        store_id,
+        product_id,
+        quantity_sold,
+        sales_amount
+    FROM sts
 """)
-gold_telemetry_data.write.mode('overwrite').option("header", "true").csv("s3://sdlc-agent-bucket/engineering-agent/gold/gold_telemetry_data.csv")
+gold_sales_transactions_df.coalesce(1).write.mode("overwrite").option("header", "true").csv("s3://sdlc-agent-bucket/engineering-agent/gold/gold_sales_transactions.csv")
 
-# Read source table: drug_stability_thresholds_silver
-drug_stability_df = spark.read.format("csv").option("header", "true").load(f"s3://sdlc-agent-bucket/engineering-agent/silver/drug_stability_thresholds_silver.csv/")
-drug_stability_df.createOrReplaceTempView("drug_stability_thresholds_silver")
-
-# Transform and write target table: gold_drug_stability_thresholds
-gold_drug_stability_thresholds = spark.sql("""
-    SELECT
-        drug_id,
-        temperature_threshold,
-        humidity_threshold,
-        min_battery_level
-    FROM drug_stability_thresholds_silver
+# Transform and Write gold_product_master
+gold_product_master_df = spark.sql("""
+    SELECT 
+        product_id,
+        product_name,
+        category,
+        brand,
+        price
+    FROM pms
 """)
-gold_drug_stability_thresholds.write.mode('overwrite').option("header", "true").csv("s3://sdlc-agent-bucket/engineering-agent/gold/gold_drug_stability_thresholds.csv")
+gold_product_master_df.coalesce(1).write.mode("overwrite").option("header", "true").csv("s3://sdlc-agent-bucket/engineering-agent/gold/gold_product_master.csv")
 
-# Read source table: telemetry_compliance_insights_silver
-compliance_insights_df = spark.read.format("csv").option("header", "true").load(f"s3://sdlc-agent-bucket/engineering-agent/silver/telemetry_compliance_insights_silver.csv/")
-compliance_insights_df.createOrReplaceTempView("telemetry_compliance_insights_silver")
-
-# Transform and write target table: gold_insights
-gold_insights = spark.sql("""
-    SELECT
-        device_id,
-        timestamp,
-        temperature,
-        humidity,
-        battery_level,
-        temperature_threshold_violation,
-        humidity_threshold_violation,
-        battery_level_violation,
-        compliance_status
-    FROM telemetry_compliance_insights_silver
+# Transform and Write gold_sales_aggregated
+gold_sales_aggregated_df = spark.sql("""
+    SELECT 
+        to_date(transaction_date) AS aggregation_date,
+        store_id,
+        product_id,
+        SUM(quantity_sold) AS total_quantity_sold,
+        SUM(sales_amount) AS total_sales_amount
+    FROM sts
+    GROUP BY to_date(transaction_date), store_id, product_id
 """)
-gold_insights.write.mode('overwrite').option("header", "true").csv("s3://sdlc-agent-bucket/engineering-agent/gold/gold_insights.csv")
+gold_sales_aggregated_df.coalesce(1).write.mode("overwrite").option("header", "true").csv("s3://sdlc-agent-bucket/engineering-agent/gold/gold_sales_aggregated.csv")
 ```
