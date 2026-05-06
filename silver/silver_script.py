@@ -1,93 +1,164 @@
 ```python
-from awsglue.context import GlueContext
-from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, row_number, trim, upper, when, cast, current_date
+from awsglue.context import GlueContext
+from pyspark.sql.functions import col, row_number, coalesce
 from pyspark.sql.window import Window
 
-# Initialize Spark and Glue
-sc = SparkContext.getOrCreate()
-glueContext = GlueContext(sc)
-spark = glueContext.spark_session
+spark = SparkSession.builder.appName("ETL").getOrCreate()
+glueContext = GlueContext(spark.sparkContext)
 
-# Source and target paths
-SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
-TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
+# Read and transform department_dim_silver
+department_df = spark.read.format("csv").option("header", "true").load(f"s3://sdlc-agent-bucket/engineering-agent/bronze/department_curated_reference.csv/")
+department_df.createOrReplaceTempView("departments")
 
-# Products Bronze to Silver Transformation
-products_df = spark.read.format("csv").option("header", "true").load(f"{SOURCE_PATH}/products_bronze.csv/")
-products_df.createOrReplaceTempView("products_bronze")
-
-products_query = """
-SELECT product_id, product_name, category, brand, price
+department_dim_silver_sql = """
+SELECT 
+    department_id,
+    department_code,
+    department_name,
+    department_group,
+    is_active,
+    effective_start_time,
+    effective_end_time,
+    updated_at
 FROM (
-    SELECT
-        UPPER(TRIM(pb.product_id)) AS product_id,
-        TRIM(pb.product_name) AS product_name,
-        TRIM(pb.category) AS category,
-        TRIM(pb.brand) AS brand,
-        CASE WHEN CAST(pb.price AS DOUBLE) < 0 THEN NULL ELSE CAST(pb.price AS DOUBLE) END AS price,
-        ROW_NUMBER() OVER (PARTITION BY UPPER(TRIM(pb.product_id)) ORDER BY pb.ingest_timestamp DESC) AS row_num
-    FROM products_bronze pb
-    WHERE pb.is_active = 'true' AND pb.product_id IS NOT NULL
-) filtered
-WHERE row_num = 1
+    SELECT 
+        department_id,
+        department_code,
+        department_name,
+        department_group,
+        is_active,
+        effective_start_time,
+        effective_end_time,
+        updated_at,
+        ROW_NUMBER() OVER (PARTITION BY department_code ORDER BY effective_start_time DESC, updated_at DESC) rn
+    FROM departments
+) 
+WHERE rn = 1
 """
+department_dim_silver_df = spark.sql(department_dim_silver_sql)
+department_dim_silver_df.write.mode("overwrite").csv("s3://sdlc-agent-bucket/engineering-agent/silver/department_dim_silver.csv", header=True)
 
-products_transformed_df = spark.sql(products_query)
-products_transformed_df.drop("row_num").write.mode("overwrite").csv(f"{TARGET_PATH}/products_silver.csv", header=True)
+# Read and transform bed_dim_silver
+bed_df = spark.read.format("csv").option("header", "true").load(f"s3://sdlc-agent-bucket/engineering-agent/bronze/bed_curated_reference.csv/")
+bed_df.createOrReplaceTempView("beds")
 
-# Stores Bronze to Silver Transformation
-stores_df = spark.read.format("csv").option("header", "true").load(f"{SOURCE_PATH}/stores_bronze.csv/")
-stores_df.createOrReplaceTempView("stores_bronze")
-
-stores_query = """
-SELECT store_id, store_name, region, store_type, open_date
-FROM (
-    SELECT
-        UPPER(TRIM(sb.store_id)) AS store_id,
-        TRIM(sb.store_name) AS store_name,
-        CASE
-            WHEN TRIM(sb.state) IS NULL THEN NULL
-            WHEN UPPER(TRIM(sb.state)) IN ('CT', 'ME', 'MA', 'NH', 'RI', 'VT', 'NJ', 'NY', 'PA') THEN 'NORTHEAST'
-            WHEN UPPER(TRIM(sb.state)) IN ('IL', 'IN', 'MI', 'OH', 'WI', 'IA', 'KS', 'MN', 'MO', 'NE', 'ND', 'SD') THEN 'MIDWEST'
-            WHEN UPPER(TRIM(sb.state)) IN ('DE', 'FL', 'GA', 'MD', 'NC', 'SC', 'VA', 'DC', 'WV', 'AL', 'KY', 'MS', 'TN', 'AR', 'LA', 'OK', 'TX') THEN 'SOUTH'
-            WHEN UPPER(TRIM(sb.state)) IN ('AZ', 'CO', 'ID', 'MT', 'NV', 'NM', 'UT', 'WY', 'AK', 'CA', 'HI', 'OR', 'WA') THEN 'WEST'
-            ELSE 'UNKNOWN'
-        END AS region,
-        TRIM(sb.store_type) AS store_type,
-        CASE WHEN sb.open_date > CURRENT_DATE THEN NULL ELSE sb.open_date END AS open_date,
-        ROW_NUMBER() OVER (PARTITION BY UPPER(TRIM(sb.store_id)) ORDER BY sb.ingest_timestamp DESC) AS row_num
-    FROM stores_bronze sb
-    WHERE sb.store_id IS NOT NULL
-) filtered
-WHERE row_num = 1
+bed_dim_silver_sql = """
+SELECT 
+    b.bed_id,
+    dd.department_id,
+    dd.department_name AS department,
+    b.bed_type,
+    b.is_active,
+    b.effective_start_time,
+    b.effective_end_time,
+    b.updated_at
+FROM 
+    beds b
+INNER JOIN 
+    department_dim_silver dd
+ON 
+    b.department_code = dd.department_code
 """
+bed_dim_silver_df = spark.sql(bed_dim_silver_sql)
+bed_dim_silver_df.write.mode("overwrite").csv("s3://sdlc-agent-bucket/engineering-agent/silver/bed_dim_silver.csv", header=True)
 
-stores_transformed_df = spark.sql(stores_query)
-stores_transformed_df.drop("row_num").write.mode("overwrite").csv(f"{TARGET_PATH}/stores_silver.csv", header=True)
+# Read and transform resource_dim_silver
+resource_df = spark.read.format("csv").option("header", "true").load(f"s3://sdlc-agent-bucket/engineering-agent/bronze/resource_curated_reference.csv/")
+resource_df.createOrReplaceTempView("resources")
 
-# Sales Transactions Bronze to Silver Transformation
-sales_transactions_df = spark.read.format("csv").option("header", "true").load(f"{SOURCE_PATH}/sales_transactions_bronze.csv/")
-sales_transactions_df.createOrReplaceTempView("sales_transactions_bronze")
-
-sales_transactions_query = """
-SELECT transaction_id, transaction_date, product_id, store_id, quantity_sold, total_sales_amount
-FROM (
-    SELECT
-        stb.transaction_id,
-        CAST(stb.transaction_time AS DATE) AS transaction_date,
-        UPPER(TRIM(stb.product_id)) AS product_id,
-        UPPER(TRIM(stb.store_id)) AS store_id,
-        CASE WHEN CAST(stb.quantity AS INT) < 0 THEN NULL ELSE CAST(stb.quantity AS INT) END AS quantity_sold,
-        CASE WHEN CAST(stb.sale_amount AS DOUBLE) < 0 THEN NULL ELSE CAST(stb.sale_amount AS DOUBLE) END AS total_sales_amount,
-        ROW_NUMBER() OVER (PARTITION BY stb.transaction_id ORDER BY stb.transaction_time DESC) AS row_num
-    FROM sales_transactions_bronze stb
-    WHERE stb.transaction_id IS NOT NULL
-) filtered
-WHERE row_num = 1
+resource_dim_silver_sql = """
+SELECT 
+    r.resource_id,
+    r.resource_type,
+    coalesce(dd.department_id, bd.department_id) AS department_id,
+    coalesce(dd.department_name, bd.department) AS department,
+    r.is_active,
+    r.updated_at
+FROM 
+    resources r
+LEFT JOIN 
+    department_dim_silver dd
+ON 
+    r.department_code = dd.department_code
+LEFT JOIN 
+    bed_dim_silver bd
+ON 
+    r.resource_id = bd.bed_id
 """
+resource_dim_silver_df = spark.sql(resource_dim_silver_sql)
+resource_dim_silver_df.write.mode("overwrite").csv("s3://sdlc-agent-bucket/engineering-agent/silver/resource_dim_silver.csv", header=True)
 
-sales_transactions_transformed_df = spark.sql(sales_transactions_query)
-sales_transactions_transformed_df.drop("row_num").write.mode("overwrite").csv(f"{TARGET_PATH}/sales_transactions_silver.csv", header=True)
+# Read and transform patient_encounter_silver
+encounter_df = spark.read.format("csv").option("header", "true").load(f"s3://sdlc-agent-bucket/engineering-agent/bronze/patient_encounters.csv/")
+encounter_df.createOrReplaceTempView("encounters")
+
+patient_encounter_silver_sql = """
+SELECT 
+    e.patient_id,
+    e.admission_time,
+    CASE WHEN e.discharge_time >= e.admission_time THEN e.discharge_time ELSE NULL END AS discharge_time,
+    dd.department_id,
+    dd.department_name AS department,
+    e.bed_id,
+    CAST((UNIX_TIMESTAMP(e.discharge_time) - UNIX_TIMESTAMP(e.admission_time)) / 60 AS INT) AS time_in_department_minutes,
+    CASE WHEN e.discharge_time >= e.admission_time THEN 1 ELSE 0 END AS record_valid_flag,
+    e.updated_at
+FROM 
+    encounters e
+INNER JOIN 
+    department_dim_silver dd
+ON 
+    e.department_code = dd.department_code
+LEFT JOIN 
+    bed_dim_silver bd
+ON 
+    e.bed_id = bd.bed_id
+"""
+patient_encounter_silver_df = spark.sql(patient_encounter_silver_sql)
+patient_encounter_silver_df.write.mode("overwrite").csv("s3://sdlc-agent-bucket/engineering-agent/silver/patient_encounter_silver.csv", header=True)
+
+# Read and transform resource_allocation_silver
+allocation_df = spark.read.format("csv").option("header", "true").load(f"s3://sdlc-agent-bucket/engineering-agent/bronze/resource_allocations.csv/")
+allocation_df.createOrReplaceTempView("allocations")
+
+resource_allocation_silver_sql = """
+SELECT 
+    a.resource_id,
+    rd.department_id,
+    rd.department,
+    a.allocation_start_time,
+    CASE WHEN a.allocation_end_time >= a.allocation_start_time THEN a.allocation_end_time ELSE NULL END AS allocation_end_time,
+    CAST((UNIX_TIMESTAMP(a.allocation_end_time) - UNIX_TIMESTAMP(a.allocation_start_time)) / 60 AS INT) AS allocation_duration_minutes,
+    CASE WHEN a.allocation_end_time >= a.allocation_start_time THEN 1 ELSE 0 END AS record_valid_flag,
+    a.updated_at
+FROM 
+    allocations a
+INNER JOIN 
+    resource_dim_silver rd
+ON 
+    a.resource_id = rd.resource_id
+"""
+resource_allocation_silver_df = spark.sql(resource_allocation_silver_sql)
+resource_allocation_silver_df.write.mode("overwrite").csv("s3://sdlc-agent-bucket/engineering-agent/silver/resource_allocation_silver.csv", header=True)
+
+# Read and transform operational_daily_silver
+operational_daily_silver_sql = """
+SELECT 
+    CAST(pe.admission_time AS DATE) AS date,
+    AVG(NULLIF(pe.time_in_department_minutes, 0)) AS avg_wait_time_minutes,
+    SUM(pe.time_in_department_minutes) / (COUNT(DISTINCT pe.bed_id) * 24 * 60) AS bed_utilization_rate,
+    MAX(pe.updated_at) AS dashboard_update_time_seconds,
+    MAX(pe.updated_at) AS updated_at
+FROM 
+    patient_encounter_silver pe
+LEFT JOIN 
+    resource_allocation_silver ra 
+ON 
+    DATE(pe.admission_time) = DATE(ra.allocation_start_time)
+GROUP BY 
+    DATE(pe.admission_time)
+"""
+operational_daily_silver_df = spark.sql(operational_daily_silver_sql)
+operational_daily_silver_df.write.mode("overwrite").csv("s3://sdlc-agent-bucket/engineering-agent/silver/operational_daily_silver.csv", header=True)
 ```
