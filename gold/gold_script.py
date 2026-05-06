@@ -1,116 +1,68 @@
 ```python
-from awsglue.context import GlueContext
-from awsglue.utils import getResolvedOptions
-from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import sum, countDistinct, max
-from pyspark.sql.functions import row_number
-from pyspark.sql.window import Window
+from awsglue.context import GlueContext
 
-# Initialize GlueContext and SparkSession
-sc = SparkContext.getOrCreate()
-glueContext = GlueContext(sc)
-spark = glueContext.spark_session
+# Initialize Spark session and Glue context
+spark = SparkSession.builder.appName("AWS Glue Job").getOrCreate()
+glueContext = GlueContext(spark.sparkContext)
 
-# Define paths
-SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
-TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
-FILE_FORMAT = "csv"
-
-# Read source tables from S3
-sales_transactions_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/sales_transactions_silver.{FILE_FORMAT}/")
-product_master_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/product_master_silver.{FILE_FORMAT}/")
-store_master_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/store_master_silver.{FILE_FORMAT}/")
+# Read source data
+sales_transaction_silver = spark.read.format("csv").option("header", "true").load(f"s3://sdlc-agent-bucket/engineering-agent/silver/sales_transaction_silver.csv/")
+product_master_silver = spark.read.format("csv").option("header", "true").load(f"s3://sdlc-agent-bucket/engineering-agent/silver/product_master_silver.csv/")
+store_master_silver = spark.read.format("csv").option("header", "true").load(f"s3://sdlc-agent-bucket/engineering-agent/silver/store_master_silver.csv/")
+store_region_silver = spark.read.format("csv").option("header", "true").load(f"s3://sdlc-agent-bucket/engineering-agent/silver/store_region_silver.csv/")
 
 # Create temp views
-sales_transactions_df.createOrReplaceTempView("sales_transactions_silver")
-product_master_df.createOrReplaceTempView("product_master_silver")
-store_master_df.createOrReplaceTempView("store_master_silver")
+sales_transaction_silver.createOrReplaceTempView("sts")
+product_master_silver.createOrReplaceTempView("pms")
+store_master_silver.createOrReplaceTempView("sms")
+store_region_silver.createOrReplaceTempView("srs")
 
-# Gold Sales Transactions
-gold_sales_transactions_df = spark.sql("""
+# Transform and write gold_sales table
+gold_sales_df = spark.sql("""
     SELECT
-        transaction_id,
-        store_id,
-        product_id,
-        transaction_date,
-        quantity_sold,
-        revenue
+        sts.transaction_id,
+        sts.product_id,
+        sts.store_id,
+        sts.transaction_date,
+        sts.sales_amount,
+        sts.quantity_sold,
+        pms.product_name,
+        pms.product_category,
+        sms.store_name,
+        srs.region
     FROM
-        sales_transactions_silver
+        sts
+    LEFT JOIN
+        pms ON sts.product_id = pms.product_id
+    LEFT JOIN
+        sms ON sts.store_id = sms.store_id
+    LEFT JOIN
+        srs ON sts.store_id = srs.store_id
 """)
-gold_sales_transactions_df.write.csv(f"{TARGET_PATH}/gold_sales_transactions.csv", mode="overwrite", header=True)
+gold_sales_df.write.mode("overwrite").csv("s3://sdlc-agent-bucket/engineering-agent/gold/gold_sales.csv", header=True)
 
-# Gold Product Master
-gold_product_master_df = spark.sql("""
-    SELECT
-        product_id,
-        product_name,
-        category,
-        price
-    FROM
-        product_master_silver
-""")
-gold_product_master_df.write.csv(f"{TARGET_PATH}/gold_product_master.csv", mode="overwrite", header=True)
-
-# Gold Store Master
+# Transform and write gold_store_master table
 gold_store_master_df = spark.sql("""
     SELECT
-        store_id,
-        store_name,
-        region,
-        store_type
+        sms.store_id,
+        sms.store_name,
+        sms.store_location,
+        sms.store_manager
     FROM
-        store_master_silver
+        sms
 """)
-gold_store_master_df.write.csv(f"{TARGET_PATH}/gold_store_master.csv", mode="overwrite", header=True)
+gold_store_master_df.write.mode("overwrite").csv("s3://sdlc-agent-bucket/engineering-agent/gold/gold_store_master.csv", header=True)
 
-# Gold Store Performance
-gold_store_performance_df = spark.sql("""
+# Transform and write gold_product_master table
+gold_product_master_df = spark.sql("""
     SELECT
-        sts.store_id,
-        CAST(sts.transaction_date AS DATE) AS date,
-        SUM(sts.revenue) AS total_revenue,
-        COUNT(DISTINCT sts.transaction_id) AS transaction_count
+        pms.product_id,
+        pms.product_name,
+        pms.product_category,
+        pms.manufacturer
     FROM
-        sales_transactions_silver sts
-    LEFT JOIN
-        store_master_silver sms ON sts.store_id = sms.store_id
-    GROUP BY
-        sts.store_id, CAST(sts.transaction_date AS DATE)
+        pms
 """)
-gold_store_performance_df.write.csv(f"{TARGET_PATH}/gold_store_performance.csv", mode="overwrite", header=True)
-
-# Gold Product Performance
-gold_product_performance_df = spark.sql("""
-    SELECT
-        sts.product_id,
-        CAST(sts.transaction_date AS DATE) AS date,
-        SUM(sts.revenue) AS total_revenue,
-        SUM(sts.quantity_sold) AS units_sold
-    FROM
-        sales_transactions_silver sts
-    LEFT JOIN
-        product_master_silver pms ON sts.product_id = pms.product_id
-    GROUP BY
-        sts.product_id, CAST(sts.transaction_date AS DATE)
-""")
-gold_product_performance_df.write.csv(f"{TARGET_PATH}/gold_product_performance.csv", mode="overwrite", header=True)
-
-# Gold Aggregated Sales
-best_selling_product_window = Window.partitionBy("date").orderBy(sum("quantity_sold").desc(), sum("revenue").desc(), "product_id")
-gold_aggregated_sales_df = spark.sql("""
-    SELECT
-        CAST(sts.transaction_date AS DATE) AS date,
-        SUM(sts.revenue) AS total_revenue,
-        COUNT(DISTINCT sts.transaction_id) AS total_transactions,
-        FIRST_VALUE(sts.product_id) OVER best_selling_product_window AS best_selling_product
-    FROM
-        sales_transactions_silver sts
-    LEFT JOIN
-        product_master_silver pms ON sts.product_id = pms.product_id
-    GROUP BY
-        CAST(sts.transaction_date AS DATE)
-""")
-gold_aggregated_sales_df.write.csv(f"{TARGET_PATH}/gold_aggregated_sales.csv", mode="overwrite", header=True)
+gold_product_master_df.write.mode("overwrite").csv("s3://sdlc-agent-bucket/engineering-agent/gold/gold_product_master.csv", header=True)
 ```
