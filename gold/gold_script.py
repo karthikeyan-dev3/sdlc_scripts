@@ -1,95 +1,101 @@
-from pyspark.sql import SparkSession
+from pyspark.context import SparkContext
 from awsglue.context import GlueContext
-from awsglue.utils import getResolvedOptions
-import sys
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col
 
-# Create Spark and Glue contexts
-spark = SparkSession.builder \
-    .appName("Glue ETL for Gold Tables") \
-    .getOrCreate()
-glueContext = GlueContext(spark.sparkContext)
+# Initialize GlueContext and SparkSession
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
 
-# Define paths
-SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver"
-TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold"
+# Source and target paths
+SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
+TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-# Load source tables
-daily_store_metrics_df = spark.read.format("csv").option("header", "true").load(f"{SOURCE_PATH}/daily_store_metrics_silver.csv/")
-store_silver_df = spark.read.format("csv").option("header", "true").load(f"{SOURCE_PATH}/store_silver.csv/")
-product_sales_df = spark.read.format("csv").option("header", "true").load(f"{SOURCE_PATH}/product_sales_silver.csv/")
-product_silver_df = spark.read.format("csv").option("header", "true").load(f"{SOURCE_PATH}/product_silver.csv/")
+# Read source tables
+sales_transactions_silver = spark.read \
+    .format(FILE_FORMAT) \
+    .option("header", "true") \
+    .load(f"{SOURCE_PATH}/sales_transactions_silver.{FILE_FORMAT}/")
+
+store_information_silver = spark.read \
+    .format(FILE_FORMAT) \
+    .option("header", "true") \
+    .load(f"{SOURCE_PATH}/store_information_silver.{FILE_FORMAT}/")
+
+product_details_silver = spark.read \
+    .format(FILE_FORMAT) \
+    .option("header", "true") \
+    .load(f"{SOURCE_PATH}/product_details_silver.{FILE_FORMAT}/")
+
+store_sales_aggregation_silver = spark.read \
+    .format(FILE_FORMAT) \
+    .option("header", "true") \
+    .load(f"{SOURCE_PATH}/store_sales_aggregation_silver.{FILE_FORMAT}/")
+
+product_sales_aggregation_silver = spark.read \
+    .format(FILE_FORMAT) \
+    .option("header", "true") \
+    .load(f"{SOURCE_PATH}/product_sales_aggregation_silver.{FILE_FORMAT}/")
 
 # Create temp views
-daily_store_metrics_df.createOrReplaceTempView("daily_store_metrics_silver")
-store_silver_df.createOrReplaceTempView("store_silver")
-product_sales_df.createOrReplaceTempView("product_sales_silver")
-product_silver_df.createOrReplaceTempView("product_silver")
+sales_transactions_silver.createOrReplaceTempView("sales_transactions_silver")
+store_information_silver.createOrReplaceTempView("store_information_silver")
+product_details_silver.createOrReplaceTempView("product_details_silver")
+store_sales_aggregation_silver.createOrReplaceTempView("store_sales_aggregation_silver")
+product_sales_aggregation_silver.createOrReplaceTempView("product_sales_aggregation_silver")
 
-# Gold Sales Performance
-gold_sales_performance_query = """
-SELECT 
-    dsms.store_id,
-    ss.store_name,
-    ss.city,
-    ss.store_type,
-    dsms.transaction_date,
-    dsms.total_daily_revenue AS total_revenue,
-    dsms.total_daily_transactions AS total_transactions,
-    dsms.total_daily_quantity_sold AS total_quantity_sold
-FROM daily_store_metrics_silver dsms
-INNER JOIN store_silver ss ON dsms.store_id = ss.store_id
-"""
-gold_sales_performance_df = spark.sql(gold_sales_performance_query)
-gold_sales_performance_df.coalesce(1).write.csv(f"{TARGET_PATH}/gold_sales_performance.csv", header=True, mode="overwrite")
-
-# Gold Product Performance
-gold_product_performance_query = """
-WITH product_weekly_agg AS (
+# Transform and save gold_sales
+gold_sales_df = spark.sql("""
     SELECT 
-        pss.product_id,
-        ps.product_name,
-        ps.category,
-        weekofyear(pss.sale_date) AS week_number,
-        SUM(pss.revenue) AS weekly_revenue,
-        SUM(pss.quantity_sold) AS weekly_quantity_sold
-    FROM product_sales_silver pss
-    INNER JOIN product_silver ps ON pss.product_id = ps.product_id
-    GROUP BY pss.product_id, ps.product_name, ps.category, weekofyear(pss.sale_date)
-),
-category_agg AS (
-    SELECT 
-        category,
-        week_number,
-        SUM(weekly_revenue) AS total_category_weekly_revenue
-    FROM product_weekly_agg
-    GROUP BY category, week_number
-)
-SELECT 
-    pwa.product_id,
-    pwa.product_name,
-    pwa.category,
-    pwa.week_number,
-    pwa.weekly_revenue,
-    pwa.weekly_quantity_sold,
-    pwa.weekly_revenue / ca.total_category_weekly_revenue AS category_level_revenue_contrib
-FROM product_weekly_agg pwa
-INNER JOIN category_agg ca ON pwa.category = ca.category AND pwa.week_number = ca.week_number
-"""
-gold_product_performance_df = spark.sql(gold_product_performance_query)
-gold_product_performance_df.coalesce(1).write.csv(f"{TARGET_PATH}/gold_product_performance.csv", header=True, mode="overwrite")
+        sts.transaction_id, 
+        sts.store_id, 
+        sts.product_id, 
+        CAST(sts.transaction_date AS DATE) AS transaction_date, 
+        sts.quantity_sold, 
+        sts.revenue, 
+        sis.region, 
+        sis.store_name, 
+        pds.product_name, 
+        pds.product_category
+    FROM 
+        sales_transactions_silver sts
+    INNER JOIN 
+        store_information_silver sis ON sts.store_id = sis.store_id
+    INNER JOIN 
+        product_details_silver pds ON sts.product_id = pds.product_id
+""")
+gold_sales_df.coalesce(1).write.mode("overwrite").option("header", "true").csv(f"{TARGET_PATH}/gold_sales.csv")
 
-# Gold Aggregated Store Performance
-gold_aggregated_store_performance_query = """
-SELECT 
-    dsms.transaction_date AS date,
-    ss.city,
-    ss.store_type,
-    AVG(dsms.total_daily_revenue) AS average_daily_revenue,
-    AVG(dsms.total_daily_transactions) AS average_daily_transactions
-FROM daily_store_metrics_silver dsms
-INNER JOIN store_silver ss ON dsms.store_id = ss.store_id
-GROUP BY dsms.transaction_date, ss.city, ss.store_type
-"""
-gold_aggregated_store_performance_df = spark.sql(gold_aggregated_store_performance_query)
-gold_aggregated_store_performance_df.coalesce(1).write.csv(f"{TARGET_PATH}/gold_aggregated_store_performance.csv", header=True, mode="overwrite")
+# Transform and save gold_store_performance
+gold_store_performance_df = spark.sql("""
+    SELECT 
+        ssas.store_id, 
+        ssas.store_name, 
+        ssas.region, 
+        ssas.total_revenue, 
+        ssas.total_transactions, 
+        ssas.average_transaction_value, 
+        ssas.top_selling_product_id, 
+        ssas.top_selling_product_name
+    FROM 
+        store_sales_aggregation_silver ssas
+""")
+gold_store_performance_df.coalesce(1).write.mode("overwrite").option("header", "true").csv(f"{TARGET_PATH}/gold_store_performance.csv")
+
+# Transform and save gold_product_performance
+gold_product_performance_df = spark.sql("""
+    SELECT 
+        psas.product_id, 
+        psas.product_name, 
+        psas.product_category, 
+        psas.total_revenue, 
+        psas.total_units_sold, 
+        psas.average_price, 
+        psas.top_selling_store_id, 
+        psas.top_selling_store_name
+    FROM 
+        product_sales_aggregation_silver psas
+""")
+gold_product_performance_df.coalesce(1).write.mode("overwrite").option("header", "true").csv(f"{TARGET_PATH}/gold_product_performance.csv")
