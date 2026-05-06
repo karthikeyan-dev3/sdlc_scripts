@@ -1,97 +1,63 @@
 ```python
-from pyspark.sql import SparkSession
 from awsglue.context import GlueContext
-from awsglue.utils import getResolvedOptions
-import sys
+from pyspark.context import SparkContext
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col
 
-# Initialize SparkSession and GlueContext
-args = getResolvedOptions(sys.argv, [])
-spark = SparkSession.builder.appName("GoldTablesETL").getOrCreate()
-glueContext = GlueContext(spark)
+# Initialize GlueContext and SparkSession
+sc = SparkContext.getOrCreate()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
 
-# Define source and target paths
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-# Read and transform gold_sales_transactions
-sales_df = spark.read.format(FILE_FORMAT).option("header", "true").load(f"{SOURCE_PATH}/sales_transactions_silver.csv/")
-sales_df.createOrReplaceTempView("sales_transactions_silver")
+# Process gold_patient_flow
+pe_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/patient_encounter_silver.csv/")
+pe_df.createOrReplaceTempView("pe")
 
-gold_sales_transactions_df = spark.sql("""
-SELECT 
-    transaction_id,
-    CAST(transaction_date AS DATE) AS transaction_date,
-    product_id,
-    store_id,
-    quantity_sold,
-    total_sales_amount
-FROM sales_transactions_silver
-""")
-
-gold_sales_transactions_df.write.mode("overwrite").csv(f"{TARGET_PATH}/gold_sales_transactions.csv", header=True)
-
-# Read and transform gold_product_master
-products_df = spark.read.format(FILE_FORMAT).option("header", "true").load(f"{SOURCE_PATH}/products_silver.csv/")
-products_df.createOrReplaceTempView("products_silver")
-
-gold_product_master_df = spark.sql("""
-SELECT 
-    product_id,
-    TRIM(product_name) AS product_name,
-    category,
-    brand,
-    CAST(price AS DOUBLE) AS price
-FROM products_silver
-""")
-
-gold_product_master_df.write.mode("overwrite").csv(f"{TARGET_PATH}/gold_product_master.csv", header=True)
-
-# Read and transform gold_store_master
-stores_df = spark.read.format(FILE_FORMAT).option("header", "true").load(f"{SOURCE_PATH}/stores_silver.csv/")
-stores_df.createOrReplaceTempView("stores_silver")
-
-gold_store_master_df = spark.sql("""
+gold_patient_flow_df = spark.sql("""
 SELECT
-    store_id,
-    TRIM(store_name) AS store_name,
-    region,
-    store_type
-FROM stores_silver
+    pe.patient_id AS patient_id,
+    pe.admission_time AS admission_time,
+    pe.discharge_time AS discharge_time,
+    pe.department AS department,
+    pe.bed_id AS bed_id,
+    pe.time_in_department_minutes AS time_in_department
+FROM pe
 """)
 
-gold_store_master_df.write.mode("overwrite").csv(f"{TARGET_PATH}/gold_store_master.csv", header=True)
+gold_patient_flow_df.write.mode("overwrite").option("header", "true").csv(f"{TARGET_PATH}/gold_patient_flow.csv")
 
-# Read, join and transform gold_sales_aggregated
-gold_sales_aggregated_df = spark.sql("""
-SELECT 
-    s.store_id,
-    p.category,
-    SUM(s.total_sales_amount) AS total_sales_amount,
-    SUM(s.quantity_sold) AS total_quantity_sold,
-    SUM(s.total_sales_amount) / COUNT(DISTINCT s.transaction_id) AS average_sales_per_transaction
-FROM sales_transactions_silver s
-LEFT JOIN stores_silver st ON s.store_id = st.store_id
-LEFT JOIN products_silver p ON s.product_id = p.product_id
-GROUP BY s.store_id, p.category
+# Process gold_resource_allocation
+ra_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/resource_allocation_silver.csv/")
+ra_df.createOrReplaceTempView("ra")
+
+gold_resource_allocation_df = spark.sql("""
+SELECT
+    ra.resource_id AS resource_id,
+    ra.department AS department,
+    ra.allocation_start_time AS allocation_start_time,
+    ra.allocation_end_time AS allocation_end_time,
+    ra.allocation_duration_minutes AS resource_utilization_rate
+FROM ra
 """)
 
-gold_sales_aggregated_df.write.mode("overwrite").csv(f"{TARGET_PATH}/gold_sales_aggregated.csv", header=True)
+gold_resource_allocation_df.write.mode("overwrite").option("header", "true").csv(f"{TARGET_PATH}/gold_resource_allocation.csv")
 
-# Read, join and transform gold_sales_standardized
-gold_sales_standardized_df = spark.sql("""
-SELECT 
-    s.transaction_id,
-    COALESCE(p.product_id, s.product_id) AS standardized_product_id,
-    COALESCE(st.store_id, s.store_id) AS standardized_store_id,
-    CAST(s.transaction_date AS DATE) AS standardized_date
-FROM sales_transactions_silver s
-LEFT JOIN products_silver p ON s.product_id = p.product_id
-LEFT JOIN stores_silver st ON s.store_id = st.store_id
+# Process gold_operational_summary
+ops_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/operational_daily_silver.csv/")
+ops_df.createOrReplaceTempView("ops")
+
+gold_operational_summary_df = spark.sql("""
+SELECT
+    ops.date AS date,
+    ops.avg_wait_time_minutes AS avg_wait_time,
+    ops.bed_utilization_rate AS bed_utilization_rate,
+    ops.dashboard_update_time_seconds AS dashboard_update_time
+FROM ops
 """)
 
-gold_sales_standardized_df.write.mode("overwrite").csv(f"{TARGET_PATH}/gold_sales_standardized.csv", header=True)
-
-# Stop the Spark session
-spark.stop()
+gold_operational_summary_df.write.mode("overwrite").option("header", "true").csv(f"{TARGET_PATH}/gold_operational_summary.csv")
 ```
