@@ -9,24 +9,59 @@ spark = glueContext.spark_session
 job = Job(glueContext)
 job.init("bronze_job", {})
 
-metadata = {'tables': [{'target_schema': 'bronze', 'target_table': 'products_bronze', 'target_alias': 'pb', 'mapping_details': 'products_raw pr', 'description': 'Bronze raw ingestion of product master data. Maps 1:1 from products_raw (product_id, product_name, category, brand, price, is_active) with no joins or aggregations.'}, {'target_schema': 'bronze', 'target_table': 'stores_bronze', 'target_alias': 'sb', 'mapping_details': 'stores_raw sr', 'description': 'Bronze raw ingestion of store master data. Maps 1:1 from stores_raw (store_id, store_name, city, state, store_type, open_date) with no joins or aggregations.'}, {'target_schema': 'bronze', 'target_table': 'sales_transactions_bronze', 'target_alias': 'stb', 'mapping_details': 'sales_transactions_raw str', 'description': 'Bronze raw ingestion of sales transaction data. Maps 1:1 from sales_transactions_raw (transaction_id, store_id, product_id, quantity, sale_amount, transaction_time) with no joins or aggregations.'}], 'columns': [{'source_column': "['pr.product_id']", 'source_type': 'varchar(10)', 'source_nullable': 'unknown', 'target_column': 'product_id', 'target_type': 'varchar(10)', 'target_nullable': 'unknown', 'transformation': 'pb.product_id = pr.product_id', 'target_table': 'pb'}, {'source_column': "['pr.product_name']", 'source_type': 'varchar(255)', 'source_nullable': 'unknown', 'target_column': 'product_name', 'target_type': 'varchar(255)', 'target_nullable': 'unknown', 'transformation': 'pb.product_name = pr.product_name', 'target_table': 'pb'}, {'source_column': "['pr.category']", 'source_type': 'varchar(100)', 'source_nullable': 'unknown', 'target_column': 'category', 'target_type': 'varchar(100)', 'target_nullable': 'unknown', 'transformation': 'pb.category = pr.category', 'target_table': 'pb'}, {'source_column': "['pr.brand']", 'source_type': 'varchar(100)', 'source_nullable': 'unknown', 'target_column': 'brand', 'target_type': 'varchar(100)', 'target_nullable': 'unknown', 'transformation': 'pb.brand = pr.brand', 'target_table': 'pb'}, {'source_column': "['pr.price']", 'source_type': 'float', 'source_nullable': 'unknown', 'target_column': 'price', 'target_type': 'float', 'target_nullable': 'unknown', 'transformation': 'pb.price = pr.price', 'target_table': 'pb'}, {'source_column': "['pr.is_active']", 'source_type': 'boolean', 'source_nullable': 'unknown', 'target_column': 'is_active', 'target_type': 'boolean', 'target_nullable': 'unknown', 'transformation': 'pb.is_active = pr.is_active', 'target_table': 'pb'}, {'source_column': "['sr.store_id']", 'source_type': 'varchar(10)', 'source_nullable': 'unknown', 'target_column': 'store_id', 'target_type': 'varchar(10)', 'target_nullable': 'unknown', 'transformation': 'sb.store_id = sr.store_id', 'target_table': 'sb'}, {'source_column': "['sr.store_name']", 'source_type': 'varchar(255)', 'source_nullable': 'unknown', 'target_column': 'store_name', 'target_type': 'varchar(255)', 'target_nullable': 'unknown', 'transformation': 'sb.store_name = sr.store_name', 'target_table': 'sb'}, {'source_column': "['sr.city']", 'source_type': 'varchar(100)', 'source_nullable': 'unknown', 'target_column': 'city', 'target_type': 'varchar(100)', 'target_nullable': 'unknown', 'transformation': 'sb.city = sr.city', 'target_table': 'sb'}, {'source_column': "['sr.state']", 'source_type': 'varchar(100)', 'source_nullable': 'unknown', 'target_column': 'state', 'target_type': 'varchar(100)', 'target_nullable': 'unknown', 'transformation': 'sb.state = sr.state', 'target_table': 'sb'}, {'source_column': "['sr.store_type']", 'source_type': 'varchar(50)', 'source_nullable': 'unknown', 'target_column': 'store_type', 'target_type': 'varchar(50)', 'target_nullable': 'unknown', 'transformation': 'sb.store_type = sr.store_type', 'target_table': 'sb'}, {'source_column': "['sr.open_date']", 'source_type': 'date', 'source_nullable': 'unknown', 'target_column': 'open_date', 'target_type': 'date', 'target_nullable': 'unknown', 'transformation': 'sb.open_date = sr.open_date', 'target_table': 'sb'}, {'source_column': "['str.transaction_id']", 'source_type': 'varchar(10)', 'source_nullable': 'unknown', 'target_column': 'transaction_id', 'target_type': 'varchar(10)', 'target_nullable': 'unknown', 'transformation': 'stb.transaction_id = str.transaction_id', 'target_table': 'stb'}, {'source_column': "['str.store_id']", 'source_type': 'varchar(10)', 'source_nullable': 'unknown', 'target_column': 'store_id', 'target_type': 'varchar(10)', 'target_nullable': 'unknown', 'transformation': 'stb.store_id = str.store_id', 'target_table': 'stb'}, {'source_column': "['str.product_id']", 'source_type': 'varchar(10)', 'source_nullable': 'unknown', 'target_column': 'product_id', 'target_type': 'varchar(10)', 'target_nullable': 'unknown', 'transformation': 'stb.product_id = str.product_id', 'target_table': 'stb'}, {'source_column': "['str.quantity']", 'source_type': 'int', 'source_nullable': 'unknown', 'target_column': 'quantity', 'target_type': 'int', 'target_nullable': 'unknown', 'transformation': 'stb.quantity = str.quantity', 'target_table': 'stb'}, {'source_column': "['str.sale_amount']", 'source_type': 'double', 'source_nullable': 'unknown', 'target_column': 'sale_amount', 'target_type': 'double', 'target_nullable': 'unknown', 'transformation': 'stb.sale_amount = str.sale_amount', 'target_table': 'stb'}, {'source_column': "['str.transaction_time']", 'source_type': 'timestamp', 'source_nullable': 'unknown', 'target_column': 'transaction_time', 'target_type': 'timestamp', 'target_nullable': 'unknown', 'transformation': 'stb.transaction_time = str.transaction_time', 'target_table': 'stb'}], 'runtime_config': {'base_path': 's3://sdlc-agent-bucket/engineering-agent/src/', 'target_path': 's3://sdlc-agent-bucket/engineering-agent/bronze/', 'read_format': 'csv', 'write_format': 'csv', 'write_mode': 'overwrite'}}
+metadata = {
+    'tables': [
+        {'target_schema': 'bronze', 'target_table': 'products_bronze', 'target_alias': 'pb', 'mapping_details': 'products_raw pr'},
+        {'target_schema': 'bronze', 'target_table': 'stores_bronze', 'target_alias': 'sb', 'mapping_details': 'stores_raw sr'},
+        {'target_schema': 'bronze', 'target_table': 'sales_transactions_bronze', 'target_alias': 'stb', 'mapping_details': 'sales_transactions_raw str'}
+    ],
+    'columns': [
+        {'transformation': 'pb.product_id = pr.product_id', 'target_table': 'pb'},
+        {'transformation': 'pb.product_name = pr.product_name', 'target_table': 'pb'},
+        {'transformation': 'pb.category = pr.category', 'target_table': 'pb'},
+        {'transformation': 'pb.brand = pr.brand', 'target_table': 'pb'},
+        {'transformation': 'pb.price = pr.price', 'target_table': 'pb'},
+        {'transformation': 'pb.is_active = pr.is_active', 'target_table': 'pb'},
+        {'transformation': 'sb.store_id = sr.store_id', 'target_table': 'sb'},
+        {'transformation': 'sb.store_name = sr.store_name', 'target_table': 'sb'},
+        {'transformation': 'sb.city = sr.city', 'target_table': 'sb'},
+        {'transformation': 'sb.state = sr.state', 'target_table': 'sb'},
+        {'transformation': 'sb.store_type = sr.store_type', 'target_table': 'sb'},
+        {'transformation': 'sb.open_date = sr.open_date', 'target_table': 'sb'},
+        {'transformation': 'stb.transaction_id = str.transaction_id', 'target_table': 'stb'},
+        {'transformation': 'stb.store_id = str.store_id', 'target_table': 'stb'},
+        {'transformation': 'stb.product_id = str.product_id', 'target_table': 'stb'},
+        {'transformation': 'stb.quantity = str.quantity', 'target_table': 'stb'},
+        {'transformation': 'stb.sale_amount = str.sale_amount', 'target_table': 'stb'},
+        {'transformation': 'stb.transaction_time = str.transaction_time', 'target_table': 'stb'},
+    ],
+    'runtime_config': {
+        'base_path': 's3://sdlc-agent-bucket/engineering-agent/src/',
+        'target_path': 's3://sdlc-agent-bucket/engineering-agent/bronze/',
+        'read_format': 'csv',
+        'write_format': 'csv',
+        'write_mode': 'overwrite'
+    }
+}
 
 for table in metadata['tables']:
     source_table, source_alias = table['mapping_details'].split()
     target_table = table['target_table']
-
+    
     df = spark.read.format(metadata['runtime_config']['read_format']) \
         .option("header", "true") \
         .option("inferSchema", "true") \
         .load(metadata['runtime_config']['base_path'] + source_table + '.' + metadata['runtime_config']['read_format'])
-
+        
     df = df.alias(source_alias)
-
-    transformations = [col['transformation'].split('= ')[1] + f' as {col["target_column"]}' for col in metadata['columns'] if col['target_table'] == table['target_alias']]
-
+    
+    transformations = [col['transformation'].split('=')[1].strip() + ' as ' + col['transformation'].split('.')[1].split('=')[0].strip() 
+                       for col in metadata['columns'] if col['target_table'] == table['target_alias']]
+    
     df = df.selectExpr(*transformations)
-
-    df.write.mode(metadata['runtime_config']['write_mode']).format(metadata['runtime_config']['write_format']) \
+    
+    df.write.mode(metadata['runtime_config']['write_mode']) \
+        .format(metadata['runtime_config']['write_format']) \
         .option("header", "true") \
         .save(metadata['runtime_config']['target_path'] + target_table + '.' + metadata['runtime_config']['write_format'])
 
