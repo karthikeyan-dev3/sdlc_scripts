@@ -9,49 +9,259 @@ spark = glueContext.spark_session
 job = Job(glueContext)
 job.init("bronze_job", {})
 
-# Metadata
-metadata = {'tables': [{'target_schema': 'bronze', 'target_table': 'pos_sales_event_bronze', 'target_alias': 'pseb', 'mapping_details': 'source_payload.event_metadata em, source_payload.sales_event se', 'description': 'Bronze raw capture of POS sales events at line/transaction level. Columns mapped 1:1 from event_metadata (event_id, event_type, source_system, event_timestamp, ingestion_timestamp, batch_id, is_deleted) and sales_event (transaction_id, order_id, store_id, terminal_id, cashier_id, product_id, product_name, category, sub_category, quantity, unit_price, discount, total_amount, payment_id, event_action). No deduplication or standardization applied.'}, {'target_schema': 'bronze', 'target_table': 'payment_gateway_event_bronze', 'target_alias': 'pgeb', 'mapping_details': 'source_payload.event_metadata em, source_payload.payment_event pe', 'description': 'Bronze raw capture of PAYMENT_GATEWAY payment events. Columns mapped 1:1 from event_metadata (event_id, event_type, source_system, event_timestamp, ingestion_timestamp, batch_id, is_deleted) and payment_event (payment_id, transaction_id, payment_mode, provider, amount, currency, payment_status). No currency normalization or reconciliation performed.'}, {'target_schema': 'bronze', 'target_table': 'inventory_event_bronze', 'target_alias': 'ieb', 'mapping_details': 'source_payload.event_metadata em, source_payload.inventory_event ie', 'description': 'Bronze raw capture of INVENTORY_SYSTEM inventory events. Columns mapped 1:1 from event_metadata (event_id, event_type, source_system, event_timestamp, ingestion_timestamp, batch_id, is_deleted) and inventory_event (inventory_event_id, product_id, store_id, warehouse_id, change_type, quantity_changed, current_stock). No stock validation or corrections applied.'}, {'target_schema': 'bronze', 'target_table': 'footfall_event_bronze', 'target_alias': 'feb', 'mapping_details': 'source_payload.event_metadata em, source_payload.footfall_event fe', 'description': 'Bronze raw capture of SENSOR footfall events. Columns mapped 1:1 from event_metadata (event_id, event_type, source_system, event_timestamp, ingestion_timestamp, batch_id, is_deleted) and footfall_event (footfall_event_id, store_id, entry_count, exit_count, sensor_id). No anomaly handling applied.'}], 'columns': [{'source_column': "['em.event_id']", 'source_type': 'UUID', 'source_nullable': 'not_null', 'target_column': 'event_id', 'target_type': 'UUID', 'target_nullable': 'not_null', 'transformation': 'pseb.event_id = em.event_id', 'target_table': 'pseb'}, {'source_column': "['em.event_type']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'event_type', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'pseb.event_type = em.event_type', 'target_table': 'pseb'}, {'source_column': "['em.source_system']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'source_system', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'pseb.source_system = em.source_system', 'target_table': 'pseb'}, {'source_column': "['em.event_timestamp']", 'source_type': 'TIMESTAMP', 'source_nullable': 'not_null', 'target_column': 'event_timestamp', 'target_type': 'TIMESTAMP', 'target_nullable': 'not_null', 'transformation': 'pseb.event_timestamp = em.event_timestamp', 'target_table': 'pseb'}, {'source_column': "['em.ingestion_timestamp']", 'source_type': 'TIMESTAMP', 'source_nullable': 'not_null', 'target_column': 'ingestion_timestamp', 'target_type': 'TIMESTAMP', 'target_nullable': 'not_null', 'transformation': 'pseb.ingestion_timestamp = em.ingestion_timestamp', 'target_table': 'pseb'}, {'source_column': "['em.batch_id']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'batch_id', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'pseb.batch_id = em.batch_id', 'target_table': 'pseb'}, {'source_column': "['em.is_deleted']", 'source_type': 'BOOLEAN', 'source_nullable': 'not_null', 'target_column': 'is_deleted', 'target_type': 'BOOLEAN', 'target_nullable': 'not_null', 'transformation': 'pseb.is_deleted = em.is_deleted', 'target_table': 'pseb'}, {'source_column': "['se.transaction_id']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'transaction_id', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'pseb.transaction_id = se.transaction_id', 'target_table': 'pseb'}, {'source_column': "['se.order_id']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'order_id', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'pseb.order_id = se.order_id', 'target_table': 'pseb'}, {'source_column': "['se.store_id']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'store_id', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'pseb.store_id = se.store_id', 'target_table': 'pseb'}, {'source_column': "['se.terminal_id']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'terminal_id', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'pseb.terminal_id = se.terminal_id', 'target_table': 'pseb'}, {'source_column': "['se.cashier_id']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'cashier_id', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'pseb.cashier_id = se.cashier_id', 'target_table': 'pseb'}, {'source_column': "['se.product_id']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'product_id', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'pseb.product_id = se.product_id', 'target_table': 'pseb'}, {'source_column': "['se.product_name']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'product_name', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'pseb.product_name = se.product_name', 'target_table': 'pseb'}, {'source_column': "['se.category']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'category', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'pseb.category = se.category', 'target_table': 'pseb'}, {'source_column': "['se.sub_category']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'sub_category', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'pseb.sub_category = se.sub_category', 'target_table': 'pseb'}, {'source_column': "['se.quantity']", 'source_type': 'INTEGER', 'source_nullable': 'not_null', 'target_column': 'quantity', 'target_type': 'INTEGER', 'target_nullable': 'not_null', 'transformation': 'pseb.quantity = se.quantity', 'target_table': 'pseb'}, {'source_column': "['se.unit_price']", 'source_type': 'DECIMAL', 'source_nullable': 'not_null', 'target_column': 'unit_price', 'target_type': 'DECIMAL', 'target_nullable': 'not_null', 'transformation': 'pseb.unit_price = se.unit_price', 'target_table': 'pseb'}, {'source_column': "['se.discount']", 'source_type': 'DECIMAL', 'source_nullable': 'nan', 'target_column': 'discount', 'target_type': 'DECIMAL', 'target_nullable': 'nan', 'transformation': 'pseb.discount = se.discount', 'target_table': 'pseb'}, {'source_column': "['se.total_amount']", 'source_type': 'DECIMAL', 'source_nullable': 'not_null', 'target_column': 'total_amount', 'target_type': 'DECIMAL', 'target_nullable': 'not_null', 'transformation': 'pseb.total_amount = se.total_amount', 'target_table': 'pseb'}, {'source_column': "['se.payment_id']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'payment_id', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'pseb.payment_id = se.payment_id', 'target_table': 'pseb'}, {'source_column': "['se.event_action']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'event_action', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'pseb.event_action = se.event_action', 'target_table': 'pseb'}, {'source_column': "['em.event_id']", 'source_type': 'UUID', 'source_nullable': 'not_null', 'target_column': 'event_id', 'target_type': 'UUID', 'target_nullable': 'not_null', 'transformation': 'pgeb.event_id = em.event_id', 'target_table': 'pgeb'}, {'source_column': "['em.event_type']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'event_type', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'pgeb.event_type = em.event_type', 'target_table': 'pgeb'}, {'source_column': "['em.source_system']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'source_system', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'pgeb.source_system = em.source_system', 'target_table': 'pgeb'}, {'source_column': "['em.event_timestamp']", 'source_type': 'TIMESTAMP', 'source_nullable': 'not_null', 'target_column': 'event_timestamp', 'target_type': 'TIMESTAMP', 'target_nullable': 'not_null', 'transformation': 'pgeb.event_timestamp = em.event_timestamp', 'target_table': 'pgeb'}, {'source_column': "['em.ingestion_timestamp']", 'source_type': 'TIMESTAMP', 'source_nullable': 'not_null', 'target_column': 'ingestion_timestamp', 'target_type': 'TIMESTAMP', 'target_nullable': 'not_null', 'transformation': 'pgeb.ingestion_timestamp = em.ingestion_timestamp', 'target_table': 'pgeb'}, {'source_column': "['em.batch_id']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'batch_id', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'pgeb.batch_id = em.batch_id', 'target_table': 'pgeb'}, {'source_column': "['em.is_deleted']", 'source_type': 'BOOLEAN', 'source_nullable': 'not_null', 'target_column': 'is_deleted', 'target_type': 'BOOLEAN', 'target_nullable': 'not_null', 'transformation': 'pgeb.is_deleted = em.is_deleted', 'target_table': 'pgeb'}, {'source_column': "['pe.payment_id']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'payment_id', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'pgeb.payment_id = pe.payment_id', 'target_table': 'pgeb'}, {'source_column': "['pe.transaction_id']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'transaction_id', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'pgeb.transaction_id = pe.transaction_id', 'target_table': 'pgeb'}, {'source_column': "['pe.payment_mode']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'payment_mode', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'pgeb.payment_mode = pe.payment_mode', 'target_table': 'pgeb'}, {'source_column': "['pe.provider']", 'source_type': 'STRING', 'source_nullable': 'nan', 'target_column': 'provider', 'target_type': 'STRING', 'target_nullable': 'nan', 'transformation': 'pgeb.provider = pe.provider', 'target_table': 'pgeb'}, {'source_column': "['pe.amount']", 'source_type': 'DECIMAL', 'source_nullable': 'not_null', 'target_column': 'amount', 'target_type': 'DECIMAL', 'target_nullable': 'not_null', 'transformation': 'pgeb.amount = pe.amount', 'target_table': 'pgeb'}, {'source_column': "['pe.currency']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'currency', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'pgeb.currency = pe.currency', 'target_table': 'pgeb'}, {'source_column': "['pe.payment_status']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'payment_status', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'pgeb.payment_status = pe.payment_status', 'target_table': 'pgeb'}, {'source_column': "['em.event_id']", 'source_type': 'UUID', 'source_nullable': 'not_null', 'target_column': 'event_id', 'target_type': 'UUID', 'target_nullable': 'not_null', 'transformation': 'ieb.event_id = em.event_id', 'target_table': 'ieb'}, {'source_column': "['em.event_type']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'event_type', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'ieb.event_type = em.event_type', 'target_table': 'ieb'}, {'source_column': "['em.source_system']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'source_system', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'ieb.source_system = em.source_system', 'target_table': 'ieb'}, {'source_column': "['em.event_timestamp']", 'source_type': 'TIMESTAMP', 'source_nullable': 'not_null', 'target_column': 'event_timestamp', 'target_type': 'TIMESTAMP', 'target_nullable': 'not_null', 'transformation': 'ieb.event_timestamp = em.event_timestamp', 'target_table': 'ieb'}, {'source_column': "['em.ingestion_timestamp']", 'source_type': 'TIMESTAMP', 'source_nullable': 'not_null', 'target_column': 'ingestion_timestamp', 'target_type': 'TIMESTAMP', 'target_nullable': 'not_null', 'transformation': 'ieb.ingestion_timestamp = em.ingestion_timestamp', 'target_table': 'ieb'}, {'source_column': "['em.batch_id']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'batch_id', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'ieb.batch_id = em.batch_id', 'target_table': 'ieb'}, {'source_column': "['em.is_deleted']", 'source_type': 'BOOLEAN', 'source_nullable': 'not_null', 'target_column': 'is_deleted', 'target_type': 'BOOLEAN', 'target_nullable': 'not_null', 'transformation': 'ieb.is_deleted = em.is_deleted', 'target_table': 'ieb'}, {'source_column': "['ie.inventory_event_id']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'inventory_event_id', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'ieb.inventory_event_id = ie.inventory_event_id', 'target_table': 'ieb'}, {'source_column': "['ie.product_id']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'product_id', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'ieb.product_id = ie.product_id', 'target_table': 'ieb'}, {'source_column': "['ie.store_id']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'store_id', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'ieb.store_id = ie.store_id', 'target_table': 'ieb'}, {'source_column': "['ie.warehouse_id']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'warehouse_id', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'ieb.warehouse_id = ie.warehouse_id', 'target_table': 'ieb'}, {'source_column': "['ie.change_type']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'change_type', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'ieb.change_type = ie.change_type', 'target_table': 'ieb'}, {'source_column': "['ie.quantity_changed']", 'source_type': 'INTEGER', 'source_nullable': 'not_null', 'target_column': 'quantity_changed', 'target_type': 'INTEGER', 'target_nullable': 'not_null', 'transformation': 'ieb.quantity_changed = ie.quantity_changed', 'target_table': 'ieb'}, {'source_column': "['ie.current_stock']", 'source_type': 'INTEGER', 'source_nullable': 'not_null', 'target_column': 'current_stock', 'target_type': 'INTEGER', 'target_nullable': 'not_null', 'transformation': 'ieb.current_stock = ie.current_stock', 'target_table': 'ieb'}, {'source_column': "['em.event_id']", 'source_type': 'UUID', 'source_nullable': 'not_null', 'target_column': 'event_id', 'target_type': 'UUID', 'target_nullable': 'not_null', 'transformation': 'feb.event_id = em.event_id', 'target_table': 'feb'}, {'source_column': "['em.event_type']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'event_type', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'feb.event_type = em.event_type', 'target_table': 'feb'}, {'source_column': "['em.source_system']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'source_system', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'feb.source_system = em.source_system', 'target_table': 'feb'}, {'source_column': "['em.event_timestamp']", 'source_type': 'TIMESTAMP', 'source_nullable': 'not_null', 'target_column': 'event_timestamp', 'target_type': 'TIMESTAMP', 'target_nullable': 'not_null', 'transformation': 'feb.event_timestamp = em.event_timestamp', 'target_table': 'feb'}, {'source_column': "['em.ingestion_timestamp']", 'source_type': 'TIMESTAMP', 'source_nullable': 'not_null', 'target_column': 'ingestion_timestamp', 'target_type': 'TIMESTAMP', 'target_nullable': 'not_null', 'transformation': 'feb.ingestion_timestamp = em.ingestion_timestamp', 'target_table': 'feb'}, {'source_column': "['em.batch_id']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'batch_id', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'feb.batch_id = em.batch_id', 'target_table': 'feb'}, {'source_column': "['em.is_deleted']", 'source_type': 'BOOLEAN', 'source_nullable': 'not_null', 'target_column': 'is_deleted', 'target_type': 'BOOLEAN', 'target_nullable': 'not_null', 'transformation': 'feb.is_deleted = em.is_deleted', 'target_table': 'feb'}, {'source_column': "['fe.footfall_event_id']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'footfall_event_id', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'feb.footfall_event_id = fe.footfall_event_id', 'target_table': 'feb'}, {'source_column': "['fe.store_id']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'store_id', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'feb.store_id = fe.store_id', 'target_table': 'feb'}, {'source_column': "['fe.entry_count']", 'source_type': 'INTEGER', 'source_nullable': 'not_null', 'target_column': 'entry_count', 'target_type': 'INTEGER', 'target_nullable': 'not_null', 'transformation': 'feb.entry_count = fe.entry_count', 'target_table': 'feb'}, {'source_column': "['fe.exit_count']", 'source_type': 'INTEGER', 'source_nullable': 'not_null', 'target_column': 'exit_count', 'target_type': 'INTEGER', 'target_nullable': 'not_null', 'transformation': 'feb.exit_count = fe.exit_count', 'target_table': 'feb'}, {'source_column': "['fe.sensor_id']", 'source_type': 'STRING', 'source_nullable': 'not_null', 'target_column': 'sensor_id', 'target_type': 'STRING', 'target_nullable': 'not_null', 'transformation': 'feb.sensor_id = fe.sensor_id', 'target_table': 'feb'}], 'runtime_config': {'base_path': 's3://sdlc-agent-bucket/engineering-agent/src/', 'target_path': 's3://sdlc-agent-bucket/engineering-agent/bronze/', 'read_format': 'csv', 'write_format': 'csv', 'write_mode': 'overwrite'}}
+metadata = {
+    'tables': [
+        {
+            'target_schema': 'bronze',
+            'target_table': 'bronze_products_raw',
+            'target_alias': 'bpr',
+            'mapping_details': 'products_raw pr',
+            'description': 'Raw ingestion of Product Master data exactly as received from source products_raw (product_id, product_name, category, brand, price, is_active) with no transformations, joins, or aggregations.'
+        },
+        {
+            'target_schema': 'bronze',
+            'target_table': 'bronze_stores_raw',
+            'target_alias': 'bsr',
+            'mapping_details': 'stores_raw sr',
+            'description': 'Raw ingestion of Store Master data exactly as received from source stores_raw (store_id, store_name, city, state, store_type, open_date) with no transformations, joins, or aggregations.'
+        },
+        {
+            'target_schema': 'bronze',
+            'target_table': 'bronze_sales_transactions_raw',
+            'target_alias': 'bstr',
+            'mapping_details': 'sales_transactions_raw str',
+            'description': 'Raw incremental ingestion of Sales Transactions data exactly as received from source sales_transactions_raw (transaction_id, store_id, product_id, quantity, sale_amount, transaction_time) with no transformations, joins, or aggregations; preserves immutable history.'
+        }
+    ],
+    'columns': [
+        {
+            'source_column': "['pr.product_id']",
+            'source_type': 'STRING',
+            'source_nullable': 'not_accepted',
+            'target_column': 'product_id',
+            'target_type': 'STRING',
+            'target_nullable': 'not_accepted',
+            'transformation': 'bpr.product_id = pr.product_id',
+            'target_table': 'bpr'
+        },
+        {
+            'source_column': "['pr.product_name']",
+            'source_type': 'STRING',
+            'source_nullable': 'accepted',
+            'target_column': 'product_name',
+            'target_type': 'STRING',
+            'target_nullable': 'accepted',
+            'transformation': 'bpr.product_name = pr.product_name',
+            'target_table': 'bpr'
+        },
+        {
+            'source_column': "['pr.category']",
+            'source_type': 'STRING',
+            'source_nullable': 'accepted',
+            'target_column': 'category',
+            'target_type': 'STRING',
+            'target_nullable': 'accepted',
+            'transformation': 'bpr.category = pr.category',
+            'target_table': 'bpr'
+        },
+        {
+            'source_column': "['pr.brand']",
+            'source_type': 'STRING',
+            'source_nullable': 'accepted',
+            'target_column': 'brand',
+            'target_type': 'STRING',
+            'target_nullable': 'accepted',
+            'transformation': 'bpr.brand = pr.brand',
+            'target_table': 'bpr'
+        },
+        {
+            'source_column': "['pr.price']",
+            'source_type': 'DECIMAL',
+            'source_nullable': 'accepted',
+            'target_column': 'price',
+            'target_type': 'DECIMAL',
+            'target_nullable': 'accepted',
+            'transformation': 'bpr.price = pr.price',
+            'target_table': 'bpr'
+        },
+        {
+            'source_column': "['pr.is_active']",
+            'source_type': 'BOOLEAN',
+            'source_nullable': 'accepted',
+            'target_column': 'is_active',
+            'target_type': 'BOOLEAN',
+            'target_nullable': 'accepted',
+            'transformation': 'bpr.is_active = pr.is_active',
+            'target_table': 'bpr'
+        },
+        {
+            'source_column': "['sr.store_id']",
+            'source_type': 'STRING',
+            'source_nullable': 'not_accepted',
+            'target_column': 'store_id',
+            'target_type': 'STRING',
+            'target_nullable': 'not_accepted',
+            'transformation': 'bsr.store_id = sr.store_id',
+            'target_table': 'bsr'
+        },
+        {
+            'source_column': "['sr.store_name']",
+            'source_type': 'STRING',
+            'source_nullable': 'accepted',
+            'target_column': 'store_name',
+            'target_type': 'STRING',
+            'target_nullable': 'accepted',
+            'transformation': 'bsr.store_name = sr.store_name',
+            'target_table': 'bsr'
+        },
+        {
+            'source_column': "['sr.city']",
+            'source_type': 'STRING',
+            'source_nullable': 'accepted',
+            'target_column': 'city',
+            'target_type': 'STRING',
+            'target_nullable': 'accepted',
+            'transformation': 'bsr.city = sr.city',
+            'target_table': 'bsr'
+        },
+        {
+            'source_column': "['sr.state']",
+            'source_type': 'STRING',
+            'source_nullable': 'accepted',
+            'target_column': 'state',
+            'target_type': 'STRING',
+            'target_nullable': 'accepted',
+            'transformation': 'bsr.state = sr.state',
+            'target_table': 'bsr'
+        },
+        {
+            'source_column': "['sr.store_type']",
+            'source_type': 'STRING',
+            'source_nullable': 'accepted',
+            'target_column': 'store_type',
+            'target_type': 'STRING',
+            'target_nullable': 'accepted',
+            'transformation': 'bsr.store_type = sr.store_type',
+            'target_table': 'bsr'
+        },
+        {
+            'source_column': "['sr.open_date']",
+            'source_type': 'DATE',
+            'source_nullable': 'accepted',
+            'target_column': 'open_date',
+            'target_type': 'DATE',
+            'target_nullable': 'accepted',
+            'transformation': 'bsr.open_date = sr.open_date',
+            'target_table': 'bsr'
+        },
+        {
+            'source_column': "['str.transaction_id']",
+            'source_type': 'STRING',
+            'source_nullable': 'not_accepted',
+            'target_column': 'transaction_id',
+            'target_type': 'STRING',
+            'target_nullable': 'not_accepted',
+            'transformation': 'bstr.transaction_id = str.transaction_id',
+            'target_table': 'bstr'
+        },
+        {
+            'source_column': "['str.store_id']",
+            'source_type': 'STRING',
+            'source_nullable': 'not_accepted',
+            'target_column': 'store_id',
+            'target_type': 'STRING',
+            'target_nullable': 'not_accepted',
+            'transformation': 'bstr.store_id = str.store_id',
+            'target_table': 'bstr'
+        },
+        {
+            'source_column': "['str.product_id']",
+            'source_type': 'STRING',
+            'source_nullable': 'not_accepted',
+            'target_column': 'product_id',
+            'target_type': 'STRING',
+            'target_nullable': 'not_accepted',
+            'transformation': 'bstr.product_id = str.product_id',
+            'target_table': 'bstr'
+        },
+        {
+            'source_column': "['str.quantity']",
+            'source_type': 'INT',
+            'source_nullable': 'accepted',
+            'target_column': 'quantity',
+            'target_type': 'INT',
+            'target_nullable': 'accepted',
+            'transformation': 'bstr.quantity = str.quantity',
+            'target_table': 'bstr'
+        },
+        {
+            'source_column': "['str.sale_amount']",
+            'source_type': 'DECIMAL',
+            'source_nullable': 'accepted',
+            'target_column': 'sale_amount',
+            'target_type': 'DECIMAL',
+            'target_nullable': 'accepted',
+            'transformation': 'bstr.sale_amount = str.sale_amount',
+            'target_table': 'bstr'
+        },
+        {
+            'source_column': "['str.transaction_time']",
+            'source_type': 'TIMESTAMP',
+            'source_nullable': 'accepted',
+            'target_column': 'transaction_time',
+            'target_type': 'TIMESTAMP',
+            'target_nullable': 'accepted',
+            'transformation': 'bstr.transaction_time = str.transaction_time',
+            'target_table': 'bstr'
+        }
+    ],
+    'runtime_config': {
+        'base_path': 's3://sdlc-agent-bucket/engineering-agent/src/',
+        'target_path': 's3://sdlc-agent-bucket/engineering-agent/bronze/',
+        'read_format': 'csv',
+        'write_format': 'csv',
+        'write_mode': 'overwrite'
+    }
+}
 
-# Retrieve runtime configuration
 base_path = metadata['runtime_config']['base_path']
 target_path = metadata['runtime_config']['target_path']
 read_format = metadata['runtime_config']['read_format']
 write_format = metadata['runtime_config']['write_format']
 write_mode = metadata['runtime_config']['write_mode']
 
-# Process each table
-tables = metadata['tables']
-columns = metadata['columns']
-
-for table in tables:
-    # Extract table-specific details
+for table in metadata['tables']:
     target_table = table['target_table']
     target_alias = table['target_alias']
-    mapping_details = table['mapping_details']
 
-    # Extract source table and alias
-    source_table, source_alias = mapping_details.split(', ')
+    mapping_details = table['mapping_details'].split()
+    source_table = mapping_details[0]
+    source_alias = mapping_details[1]
 
-    # Read data
-    df = spark.read.format(read_format)
+    reader = spark.read.format(read_format)
     if read_format == 'csv':
-        df = df.option("header", "true").option("inferSchema", "true")
-    df = df.load(base_path + source_table + '.' + read_format)
+        reader = reader.option('header', 'true').option('inferSchema', 'true')
 
-    # Apply alias
-    df = df.alias(source_alias.split()[1])
+    df = reader.load(base_path + f"{source_table}.{read_format}")
+    df = df.alias(source_alias)
 
-    # Filter and extract transformations for the current target table
-    transformations = [column['transformation'].split(' = ')[1] + ' as ' + column['target_column']
-                       for column in columns if column['target_table'] == target_alias]
+    transformations = []
+    for col_meta in metadata['columns']:
+        if col_meta.get('target_table') == target_alias:
+            transformation = col_meta.get('transformation', '')
+            if '=' in transformation:
+                rhs = transformation.split('=', 1)[1].strip()
+            else:
+                rhs = transformation.strip()
+            target_col = col_meta.get('target_column')
+            transformations.append(f"{rhs} as {target_col}")
 
-    # Select with transformations
     df = df.selectExpr(*transformations)
 
-    # Write data
-    write_df = df.write.mode(write_mode).format(write_format)
+    writer = df.write.mode(write_mode).format(write_format)
     if write_format == 'csv':
-        write_df = write_df.option("header", "true")
-    write_df.save(target_path + target_table + '.' + write_format)
+        writer = writer.option('header', 'true')
+
+    writer.save(target_path + f"{target_table}.{write_format}")
 
 job.commit()
