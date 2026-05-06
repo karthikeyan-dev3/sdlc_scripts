@@ -1,100 +1,153 @@
 ```python
+import sys
+from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
+from awsglue.job import Job
 from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, expr
 
-sc = SparkContext()
+# ------------------------------------------------------------------------------------
+# Glue Job Init
+# ------------------------------------------------------------------------------------
+args = getResolvedOptions(sys.argv, ["JOB_NAME"])
+sc = SparkContext.getOrCreate()
 glueContext = GlueContext(sc)
-spark = glueContext.spark_session
+spark: SparkSession = glueContext.spark_session
+job = Job(glueContext)
+job.init(args["JOB_NAME"], args)
 
+# ------------------------------------------------------------------------------------
+# Parameters (as provided)
+# ------------------------------------------------------------------------------------
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-# gold_data_pipeline
-data_pipelines_silver = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/data_pipelines_silver.csv/")
-data_pipelines_silver.createOrReplaceTempView("dps")
+# Recommended options for CSV I/O (adjust if your headers/delimiters differ)
+CSV_READ_OPTIONS = {
+    "header": "true",
+    "inferSchema": "true",
+    "mode": "PERMISSIVE",
+}
+CSV_WRITE_OPTIONS = {
+    "header": "true",
+}
 
-gold_data_pipeline_df = spark.sql("""
-    SELECT 
-        dps.pipeline_id AS pipeline_id,
-        dps.source_name AS source_name,
-        dps.ingestion_timestamp AS ingestion_timestamp,
-        dps.processing_status AS processing_status
-    FROM dps
-""")
+# ====================================================================================
+# TABLE: gold.gold_dim_product
+# ====================================================================================
 
-gold_data_pipeline_df.write.format("csv").mode("overwrite").option("header", "true").save(f"{TARGET_PATH}/gold_data_pipeline.csv")
+# 1) Read source tables from S3
+df_sdp = (
+    spark.read.format(FILE_FORMAT)
+    .options(**CSV_READ_OPTIONS)
+    .load(f"{SOURCE_PATH}/silver_dim_product.{FILE_FORMAT}/")
+)
 
-# gold_data_governance
-governance_policies_silver = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/governance_policies_silver.csv/")
-governance_policies_silver.createOrReplaceTempView("gps")
+# 2) Create temp views
+df_sdp.createOrReplaceTempView("silver_dim_product")
 
-gold_data_governance_df = spark.sql("""
-    SELECT 
-        gps.policy_id AS policy_id,
-        gps.policy_name AS policy_name,
-        gps.compliance_status AS compliance_status
-    FROM gps
-""")
+# 3) SQL transformation (EXACT mapping: direct select)
+df_gold_dim_product = spark.sql(
+    """
+    SELECT
+        CAST(sdp.product_id   AS STRING)  AS product_id,
+        CAST(sdp.product_name AS STRING)  AS product_name,
+        CAST(sdp.category     AS STRING)  AS category,
+        CAST(sdp.brand        AS STRING)  AS brand,
+        CAST(sdp.price        AS DECIMAL(38,10)) AS price,
+        CAST(sdp.is_active    AS BOOLEAN) AS is_active
+    FROM silver_dim_product sdp
+    """
+)
 
-gold_data_governance_df.write.format("csv").mode("overwrite").option("header", "true").save(f"{TARGET_PATH}/gold_data_governance.csv")
+# 4) Save output as a SINGLE CSV file directly under TARGET_PATH
+(
+    df_gold_dim_product.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .options(**CSV_WRITE_OPTIONS)
+    .save(f"{TARGET_PATH}/gold_dim_product.csv")
+)
 
-# gold_sla_management
-sla_records_silver = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/sla_records_silver.csv/")
-sla_records_silver.createOrReplaceTempView("slas")
+# ====================================================================================
+# TABLE: gold.gold_dim_store
+# ====================================================================================
 
-gold_sla_management_df = spark.sql("""
-    SELECT 
-        slas.sla_id AS sla_id,
-        slas.data_availability AS data_availability,
-        slas.uptime_percentage AS uptime_percentage
-    FROM slas
-""")
+# 1) Read source tables from S3
+df_sds = (
+    spark.read.format(FILE_FORMAT)
+    .options(**CSV_READ_OPTIONS)
+    .load(f"{SOURCE_PATH}/silver_dim_store.{FILE_FORMAT}/")
+)
 
-gold_sla_management_df.write.format("csv").mode("overwrite").option("header", "true").save(f"{TARGET_PATH}/gold_sla_management.csv")
+# 2) Create temp views
+df_sds.createOrReplaceTempView("silver_dim_store")
 
-# gold_data_validation
-validation_rules_silver = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/validation_rules_silver.csv/")
-validation_rules_silver.createOrReplaceTempView("vrs")
+# 3) SQL transformation (EXACT mapping: direct select)
+df_gold_dim_store = spark.sql(
+    """
+    SELECT
+        CAST(sds.store_id    AS STRING) AS store_id,
+        CAST(sds.store_name  AS STRING) AS store_name,
+        CAST(sds.city        AS STRING) AS city,
+        CAST(sds.state       AS STRING) AS state,
+        CAST(sds.store_type  AS STRING) AS store_type,
+        CAST(sds.open_date   AS DATE)   AS open_date
+    FROM silver_dim_store sds
+    """
+)
 
-gold_data_validation_df = spark.sql("""
-    SELECT 
-        vrs.rule_id AS rule_id,
-        vrs.validation_type AS validation_type,
-        vrs.status AS status,
-        vrs.last_validated AS last_validated
-    FROM vrs
-""")
+# 4) Save output as a SINGLE CSV file directly under TARGET_PATH
+(
+    df_gold_dim_store.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .options(**CSV_WRITE_OPTIONS)
+    .save(f"{TARGET_PATH}/gold_dim_store.csv")
+)
 
-gold_data_validation_df.write.format("csv").mode("overwrite").option("header", "true").save(f"{TARGET_PATH}/gold_data_validation.csv")
+# ====================================================================================
+# TABLE: gold.gold_fact_sales_transaction
+# ====================================================================================
 
-# gold_metadata_catalog
-metadata_catalog_silver = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/metadata_catalog_silver.csv/")
-metadata_catalog_silver.createOrReplaceTempView("mcs")
+# 1) Read source tables from S3
+df_sfst = (
+    spark.read.format(FILE_FORMAT)
+    .options(**CSV_READ_OPTIONS)
+    .load(f"{SOURCE_PATH}/silver_fact_sales_transaction.{FILE_FORMAT}/")
+)
 
-gold_metadata_catalog_df = spark.sql("""
-    SELECT 
-        mcs.dataset_id AS dataset_id,
-        mcs.metadata_details AS metadata_details,
-        mcs.last_updated AS last_updated
-    FROM mcs
-""")
+# 2) Create temp views
+df_sfst.createOrReplaceTempView("silver_fact_sales_transaction")
+df_gold_dim_store.createOrReplaceTempView("gold_dim_store")
+df_gold_dim_product.createOrReplaceTempView("gold_dim_product")
 
-gold_metadata_catalog_df.write.format("csv").mode("overwrite").option("header", "true").save(f"{TARGET_PATH}/gold_metadata_catalog.csv")
+# 3) SQL transformation (EXACT mapping: join to conformed dimensions)
+df_gold_fact_sales_transaction = spark.sql(
+    """
+    SELECT
+        CAST(sfst.transaction_id   AS STRING)     AS transaction_id,
+        CAST(sfst.transaction_time AS TIMESTAMP)  AS transaction_time,
+        CAST(sfst.transaction_date AS DATE)       AS transaction_date,
+        CAST(gds.store_id          AS STRING)     AS store_id,
+        CAST(gdp.product_id        AS STRING)     AS product_id,
+        CAST(sfst.quantity         AS INT)        AS quantity,
+        CAST(sfst.sale_amount      AS DECIMAL(38,10)) AS sale_amount
+    FROM silver_fact_sales_transaction sfst
+    INNER JOIN gold_dim_store   gds ON sfst.store_id   = gds.store_id
+    INNER JOIN gold_dim_product gdp ON sfst.product_id = gdp.product_id
+    """
+)
 
-# gold_llm_enrichment
-enrichment_records_silver = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/enrichment_records_silver.csv/")
-enrichment_records_silver.createOrReplaceTempView("ers")
+# 4) Save output as a SINGLE CSV file directly under TARGET_PATH
+(
+    df_gold_fact_sales_transaction.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .options(**CSV_WRITE_OPTIONS)
+    .save(f"{TARGET_PATH}/gold_fact_sales_transaction.csv")
+)
 
-gold_llm_enrichment_df = spark.sql("""
-    SELECT 
-        ers.dataset_id AS dataset_id,
-        ers.enrichment_details AS enrichment_details,
-        ers.value_added AS value_added
-    FROM ers
-""")
-
-gold_llm_enrichment_df.write.format("csv").mode("overwrite").option("header", "true").save(f"{TARGET_PATH}/gold_llm_enrichment.csv")
+job.commit()
 ```
