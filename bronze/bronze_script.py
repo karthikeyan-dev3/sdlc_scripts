@@ -9,110 +9,53 @@ spark = glueContext.spark_session
 job = Job(glueContext)
 job.init("bronze_job", {})
 
-base_path = "s3://sdlc-agent-bucket/engineering-agent/src/"
-target_path = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
-read_format = "csv"
-write_format = "csv"
-write_mode = "overwrite"
-
-metadata_tables = [
-    {"source_table": "POS_sales_events", "source_alias": "seb", "target_table": "sales_event_bronze"},
-    {"source_table": "PAYMENT_GATEWAY", "source_alias": "peb", "target_table": "payment_event_bronze"},
-    {"source_table": "INVENTORY_SYSTEM", "source_alias": "ieb", "target_table": "inventory_event_bronze"},
-    {"source_table": "SENSOR", "source_alias": "feb", "target_table": "footfall_event_bronze"}
+# Metadata
+runtime_config = {'base_path': 's3://sdlc-agent-bucket/engineering-agent/src/', 'target_path': 's3://sdlc-agent-bucket/engineering-agent/bronze/', 'read_format': 'csv', 'write_format': 'csv', 'write_mode': 'overwrite'}
+tables = [
+    {'target_schema': 'bronze', 'target_table': 'pos_sales_event_bronze', 'target_alias': 'pseb', 'mapping_details': "SOURCE: POS sales_event + event_metadata (event_type='sales') -> bronze.pos_sales_event_bronze"},
+    {'target_schema': 'bronze', 'target_table': 'payment_gateway_event_bronze', 'target_alias': 'pgeb', 'mapping_details': "SOURCE: PAYMENT_GATEWAY payment_event + event_metadata (event_type='payment') -> bronze.payment_gateway_event_bronze"}
+]
+columns = [
+    {'source_column': "['pseb.transaction_id']", 'transformation': 'pseb.transaction_id = pseb.transaction_id', 'target_table': 'pseb'},
+    {'source_column': "['pseb.event_timestamp']", 'transformation': 'CAST(pseb.event_timestamp AS DATE) = transaction_date', 'target_table': 'CAST(pseb'},
+    {'source_column': "['pseb.store_id']", 'transformation': 'pseb.store_id = pseb.store_id', 'target_table': 'pseb'},
+    {'source_column': "['pseb.product_id']", 'transformation': 'pseb.product_id = pseb.product_id', 'target_table': 'pseb'},
+    {'source_column': "['pseb.quantity']", 'transformation': 'pseb.quantity = quantity_sold', 'target_table': 'pseb'},
+    {'source_column': "['pseb.total_amount']", 'transformation': 'pseb.total_amount = sales_amount', 'target_table': 'pseb'},
+    {'source_column': "['pseb.product_name']", 'transformation': 'pseb.product_name = pseb.product_name', 'target_table': 'pseb'},
+    {'source_column': "['pseb.category']", 'transformation': 'pseb.category = pseb.category', 'target_table': 'pseb'},
+    {'source_column': "['pseb.unit_price']", 'transformation': 'pseb.unit_price = price', 'target_table': 'pseb'}
 ]
 
-columns_metadata = {
-    "seb": [
-        "seb.event_id as event_id",
-        "seb.event_type as event_type",
-        "seb.source_system as source_system",
-        "seb.event_timestamp as event_timestamp",
-        "seb.ingestion_timestamp as ingestion_timestamp",
-        "seb.batch_id as batch_id",
-        "seb.is_deleted as is_deleted",
-        "seb.transaction_id as transaction_id",
-        "seb.order_id as order_id",
-        "seb.store_id as store_id",
-        "seb.terminal_id as terminal_id",
-        "seb.cashier_id as cashier_id",
-        "seb.product_id as product_id",
-        "seb.product_name as product_name",
-        "seb.category as category",
-        "seb.sub_category as sub_category",
-        "seb.quantity as quantity",
-        "seb.unit_price as unit_price",
-        "seb.discount as discount",
-        "seb.total_amount as total_amount",
-        "seb.payment_id as payment_id",
-        "seb.event_action as event_action"
-    ],
-    "peb": [
-        "peb.event_id as event_id",
-        "peb.event_type as event_type",
-        "peb.source_system as source_system",
-        "peb.event_timestamp as event_timestamp",
-        "peb.ingestion_timestamp as ingestion_timestamp",
-        "peb.batch_id as batch_id",
-        "peb.is_deleted as is_deleted",
-        "peb.payment_id as payment_id",
-        "peb.transaction_id as transaction_id",
-        "peb.payment_mode as payment_mode",
-        "peb.provider as provider",
-        "peb.amount as amount",
-        "peb.currency as currency",
-        "peb.payment_status as payment_status"
-    ],
-    "ieb": [
-        "ieb.event_id as event_id",
-        "ieb.event_type as event_type",
-        "ieb.source_system as source_system",
-        "ieb.event_timestamp as event_timestamp",
-        "ieb.ingestion_timestamp as ingestion_timestamp",
-        "ieb.batch_id as batch_id",
-        "ieb.is_deleted as is_deleted",
-        "ieb.inventory_event_id as inventory_event_id",
-        "ieb.product_id as product_id",
-        "ieb.store_id as store_id",
-        "ieb.warehouse_id as warehouse_id",
-        "ieb.change_type as change_type",
-        "ieb.quantity_changed as quantity_changed",
-        "ieb.current_stock as current_stock"
-    ],
-    "feb": [
-        "feb.event_id as event_id",
-        "feb.event_type as event_type",
-        "feb.source_system as source_system",
-        "feb.event_timestamp as event_timestamp",
-        "feb.ingestion_timestamp as ingestion_timestamp",
-        "feb.batch_id as batch_id",
-        "feb.is_deleted as is_deleted",
-        "feb.footfall_event_id as footfall_event_id",
-        "feb.store_id as store_id",
-        "feb.entry_count as entry_count",
-        "feb.exit_count as exit_count",
-        "feb.sensor_id as sensor_id"
-    ]
-}
-
-for table in metadata_tables:
-    source_table = table["source_table"]
-    source_alias = table["source_alias"]
-    target_table = table["target_table"]
-
-    df = spark.read.format(read_format) \
-                .option("header", "true") \
-                .option("inferSchema", "true") \
-                .load(base_path + source_table + "." + read_format)
+for table in tables:
+    target_table = table['target_table']
+    source_details = table['mapping_details'].split('SOURCE: ')[1].split(' ')[0]  # Extracting source table details
+    source_table, source_alias = source_details.split(' ')[0], source_details.split(' ')[2]
     
+    # Read data
+    df = spark.read.format(runtime_config['read_format']) \
+        .option("header", "true") \
+        .option("inferSchema", "true") \
+        .load(runtime_config['base_path'] + f"{source_table}." + runtime_config['read_format'])
+    
+    # Apply alias
     df = df.alias(source_alias)
 
-    transformations = columns_metadata[source_alias]
+    # Filter and Apply transformations
+    transformations = []
+    for column in columns:
+        if column['target_table'] in target_table:
+            transformation = column['transformation'].split('=')[1].strip()
+            target_column = column['source_column'].strip("[]'")
+            transformations.append(f"{transformation} as {target_column}")
+
+    # Select
     df = df.selectExpr(*transformations)
-    
-    df.write.mode(write_mode) \
-           .format(write_format) \
-           .option("header", "true") \
-           .save(target_path + target_table + "." + write_format)
+
+    # Write Data
+    df.write.mode(runtime_config['write_mode']) \
+        .format(runtime_config['write_format']) \
+        .option("header", "true") \
+        .save(runtime_config['target_path'] + f"{target_table}." + runtime_config['write_format'])
 
 job.commit()
