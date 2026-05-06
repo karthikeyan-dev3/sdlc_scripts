@@ -9,60 +9,67 @@ spark = glueContext.spark_session
 job = Job(glueContext)
 job.init("bronze_job", {})
 
-metadata = {
-    'tables': [
-        {'target_schema': 'bronze', 'target_table': 'products_bronze', 'target_alias': 'pb', 'mapping_details': 'products_raw pr'},
-        {'target_schema': 'bronze', 'target_table': 'stores_bronze', 'target_alias': 'sb', 'mapping_details': 'stores_raw sr'},
-        {'target_schema': 'bronze', 'target_table': 'sales_transactions_bronze', 'target_alias': 'stb', 'mapping_details': 'sales_transactions_raw str'}
+# Runtime configuration
+base_path = 's3://sdlc-agent-bucket/engineering-agent/src/'
+target_path = 's3://sdlc-agent-bucket/engineering-agent/bronze/'
+read_format = 'csv'
+write_format = 'csv'
+write_mode = 'overwrite'
+
+# Table metadata
+tables = [
+    {'target_table': 'sales_transactions_bronze', 'source_table': 'sales_transactions_raw', 'source_alias': 'str', 'target_alias': 'stb'},
+    {'target_table': 'stores_bronze', 'source_table': 'stores_raw', 'source_alias': 'sr', 'target_alias': 'sb'},
+    {'target_table': 'products_bronze', 'source_table': 'products_raw', 'source_alias': 'pr', 'target_alias': 'pb'},
+]
+
+# Column transformations per table
+column_transformations = {
+    'stb': [
+        'str.transaction_id as transaction_id',
+        'str.store_id as store_id',
+        'str.product_id as product_id',
+        'str.quantity as quantity',
+        'str.sale_amount as sale_amount',
+        'str.transaction_time as transaction_time'
     ],
-    'columns': [
-        {'transformation': 'pb.product_id = pr.product_id', 'target_table': 'pb'},
-        {'transformation': 'pb.product_name = pr.product_name', 'target_table': 'pb'},
-        {'transformation': 'pb.category = pr.category', 'target_table': 'pb'},
-        {'transformation': 'pb.brand = pr.brand', 'target_table': 'pb'},
-        {'transformation': 'pb.price = pr.price', 'target_table': 'pb'},
-        {'transformation': 'pb.is_active = pr.is_active', 'target_table': 'pb'},
-        {'transformation': 'sb.store_id = sr.store_id', 'target_table': 'sb'},
-        {'transformation': 'sb.store_name = sr.store_name', 'target_table': 'sb'},
-        {'transformation': 'sb.city = sr.city', 'target_table': 'sb'},
-        {'transformation': 'sb.state = sr.state', 'target_table': 'sb'},
-        {'transformation': 'sb.store_type = sr.store_type', 'target_table': 'sb'},
-        {'transformation': 'sb.open_date = sr.open_date', 'target_table': 'sb'},
-        {'transformation': 'stb.transaction_id = str.transaction_id', 'target_table': 'stb'},
-        {'transformation': 'stb.store_id = str.store_id', 'target_table': 'stb'},
-        {'transformation': 'stb.product_id = str.product_id', 'target_table': 'stb'},
-        {'transformation': 'stb.quantity = str.quantity', 'target_table': 'stb'},
-        {'transformation': 'stb.sale_amount = str.sale_amount', 'target_table': 'stb'},
-        {'transformation': 'stb.transaction_time = str.transaction_time', 'target_table': 'stb'},
+    'sb': [
+        'sr.store_id as store_id',
+        'sr.store_name as store_name',
+        'sr.city as city',
+        'sr.state as state',
+        'sr.store_type as store_type',
+        'sr.open_date as open_date'
     ],
-    'runtime_config': {
-        'base_path': 's3://sdlc-agent-bucket/engineering-agent/src/',
-        'target_path': 's3://sdlc-agent-bucket/engineering-agent/bronze/',
-        'read_format': 'csv',
-        'write_format': 'csv',
-        'write_mode': 'overwrite'
-    }
+    'pb': [
+        'pr.product_id as product_id',
+        'pr.product_name as product_name',
+        'pr.category as category',
+        'pr.brand as brand',
+        'pr.price as price',
+        'pr.is_active as is_active'
+    ]
 }
 
-for table in metadata['tables']:
-    source_table, source_alias = table['mapping_details'].split()
-    target_table = table['target_table']
-    
-    df = spark.read.format(metadata['runtime_config']['read_format']) \
-        .option("header", "true") \
-        .option("inferSchema", "true") \
-        .load(metadata['runtime_config']['base_path'] + source_table + '.' + metadata['runtime_config']['read_format'])
-        
-    df = df.alias(source_alias)
-    
-    transformations = [col['transformation'].split('=')[1].strip() + ' as ' + col['transformation'].split('.')[1].split('=')[0].strip() 
-                       for col in metadata['columns'] if col['target_table'] == table['target_alias']]
-    
+for table in tables:
+    # Read the data
+    source_table = table['source_table']
+    df = spark.read.format(read_format)\
+        .option("header", "true")\
+        .option("inferSchema", "true")\
+        .load(base_path + source_table + '.' + read_format)
+
+    # Apply alias
+    df = df.alias(table['source_alias'])
+
+    # Apply column transformations
+    transformations = column_transformations[table['target_alias']]
     df = df.selectExpr(*transformations)
-    
-    df.write.mode(metadata['runtime_config']['write_mode']) \
-        .format(metadata['runtime_config']['write_format']) \
-        .option("header", "true") \
-        .save(metadata['runtime_config']['target_path'] + target_table + '.' + metadata['runtime_config']['write_format'])
+
+    # Write the data
+    target_table = table['target_table']
+    df.write.mode(write_mode).format(write_format)\
+        .option("header", "true")\
+        .save(target_path + target_table + '.' + write_format)
 
 job.commit()
