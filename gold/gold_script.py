@@ -49,7 +49,6 @@ GROUP BY
   sts.product_id,
   sts.store_id
 """
-
 sales_daily_product_store_gold_df = spark.sql(sales_daily_product_store_gold_sql)
 
 (
@@ -77,7 +76,6 @@ FROM sales_transactions_silver sts
 GROUP BY
   sts.product_id
 """
-
 sales_product_gold_df = spark.sql(sales_product_gold_sql)
 
 (
@@ -105,7 +103,6 @@ FROM sales_transactions_silver sts
 GROUP BY
   sts.store_id
 """
-
 sales_store_gold_df = spark.sql(sales_store_gold_sql)
 
 (
