@@ -1,71 +1,71 @@
-from pyspark.context import SparkContext
 from awsglue.context import GlueContext
+from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 from awsglue.dynamicframe import DynamicFrame
+import pyspark.sql.functions as F
 
+# Initialize GlueContext and SparkSession
 sc = SparkContext.getOrCreate()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
 
-# Define paths
+# Define source and target paths
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-# Function to load data from S3 into a DataFrame
-def load_table(table_name):
-    return spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}{table_name}.{FILE_FORMAT}/")
-
-# Load source tables
-product_silver_df = load_table("product_silver")
-sales_inventory_daily_silver_df = load_table("sales_inventory_daily_silver")
-kpi_daily_product_silver_df = load_table("kpi_daily_product_silver")
-
-# Create temporary views
-product_silver_df.createOrReplaceTempView("ps")
-sales_inventory_daily_silver_df.createOrReplaceTempView("sids")
-kpi_daily_product_silver_df.createOrReplaceTempView("kdps")
-
-# Transformations for gold_dim_product
-gold_dim_product_df = spark.sql("""
-    SELECT 
-        ps.product_id AS product_id,
-        ps.product_name AS product_name,
-        ps.sku AS sku
-    FROM 
-        ps
+# SALES_TRANSACTIONS_GOLD processing
+sales_transactions_silver_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/sales_transactions_silver.{FILE_FORMAT}/")
+sales_transactions_silver_df.createOrReplaceTempView("sts")
+sales_transactions_gold_df = spark.sql("""
+    SELECT
+        transaction_id,
+        sales_date,
+        product_id,
+        store_id,
+        quantity_sold,
+        total_sales_amount
+    FROM sts
 """)
+sales_transactions_gold_df.write.mode("overwrite").csv(TARGET_PATH + "/sales_transactions_gold.csv", header=True)
 
-# Write gold_dim_product to S3
-gold_dim_product_df.coalesce(1).write.csv(f"{TARGET_PATH}gold_dim_product.csv", header=True, mode="overwrite")
-
-# Transformations for gold_fact_sales_inventory
-gold_fact_sales_inventory_df = spark.sql("""
-    SELECT 
-        sids.store_id AS store_id,
-        sids.product_id AS product_id,
-        sids.date AS date,
-        sids.sales_qty AS sales_qty,
-        sids.inventory_qty AS inventory_qty,
-        sids.stockout_flag AS stockout_flag
-    FROM 
-        sids
+# PRODUCT_MASTER_GOLD processing
+product_master_silver_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/product_master_silver.{FILE_FORMAT}/")
+product_master_silver_df.createOrReplaceTempView("pms")
+product_master_gold_df = spark.sql("""
+    SELECT
+        product_id,
+        product_name,
+        category,
+        price
+    FROM pms
 """)
+product_master_gold_df.write.mode("overwrite").csv(TARGET_PATH + "/product_master_gold.csv", header=True)
 
-# Write gold_fact_sales_inventory to S3
-gold_fact_sales_inventory_df.coalesce(1).write.csv(f"{TARGET_PATH}gold_fact_sales_inventory.csv", header=True, mode="overwrite")
-
-# Transformations for gold_kpis
-gold_kpis_df = spark.sql("""
-    SELECT 
-        kdps.date AS date,
-        kdps.product_id AS product_id,
-        kdps.stockout_rate AS stockout_rate,
-        kdps.sales_velocity AS sales_velocity,
-        kdps.revenue_leakage_index AS revenue_leakage_index
-    FROM 
-        kdps
+# STORE_MASTER_GOLD processing
+store_master_silver_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/store_master_silver.{FILE_FORMAT}/")
+store_master_silver_df.createOrReplaceTempView("sms")
+store_master_gold_df = spark.sql("""
+    SELECT
+        store_id,
+        store_name,
+        store_location,
+        region
+    FROM sms
 """)
+store_master_gold_df.write.mode("overwrite").csv(TARGET_PATH + "/store_master_gold.csv", header=True)
 
-# Write gold_kpis to S3
-gold_kpis_df.coalesce(1).write.csv(f"{TARGET_PATH}gold_kpis.csv", header=True, mode="overwrite")
+# SALES_AGGREGATE_GOLD processing
+sales_aggregate_silver_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/sales_aggregate_silver.{FILE_FORMAT}/")
+sales_aggregate_silver_df.createOrReplaceTempView("sas")
+sales_aggregate_gold_df = spark.sql("""
+    SELECT
+        date,
+        store_id,
+        category,
+        total_sales_amount,
+        total_transactions,
+        aggregated_level
+    FROM sas
+""")
+sales_aggregate_gold_df.write.mode("overwrite").csv(TARGET_PATH + "/sales_aggregate_gold.csv", header=True)
