@@ -1,55 +1,163 @@
+import sys
+import uuid
+import boto3
 from awsglue.context import GlueContext
-from pyspark.context import SparkContext
 from awsglue.job import Job
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
 
-sc = SparkContext()
+
+def parse_s3_uri(uri):
+    clean_uri = uri.replace("s3://", "", 1)
+    bucket, _, key = clean_uri.partition("/")
+    return bucket, key.rstrip("/") + "/"
+
+
+def delete_s3_prefix(s3_client, s3_uri):
+    bucket, prefix = parse_s3_uri(s3_uri)
+    paginator = s3_client.get_paginator("list_objects_v2")
+
+    delete_batch = []
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            delete_batch.append({"Key": obj["Key"]})
+
+            if len(delete_batch) == 1000:
+                s3_client.delete_objects(Bucket=bucket, Delete={"Objects": delete_batch})
+                delete_batch = []
+
+    if delete_batch:
+        s3_client.delete_objects(Bucket=bucket, Delete={"Objects": delete_batch})
+
+
+def copy_s3_prefix(s3_client, source_uri, target_uri):
+    source_bucket, source_prefix = parse_s3_uri(source_uri)
+    target_bucket, target_prefix = parse_s3_uri(target_uri)
+
+    paginator = s3_client.get_paginator("list_objects_v2")
+    copied = 0
+
+    for page in paginator.paginate(Bucket=source_bucket, Prefix=source_prefix):
+        for obj in page.get("Contents", []):
+            source_key = obj["Key"]
+            relative_key = source_key[len(source_prefix):]
+
+            if not relative_key:
+                continue
+
+            target_key = target_prefix + relative_key
+            s3_client.copy_object(
+                Bucket=target_bucket,
+                Key=target_key,
+                CopySource={"Bucket": source_bucket, "Key": source_key},
+            )
+            copied += 1
+
+    if copied == 0:
+        raise RuntimeError(f"No files were written to temporary S3 path: {source_uri}")
+
+
+def safe_overwrite_csv(df, target_uri, run_id, s3_client):
+    """
+    Writes to an isolated temp prefix first, then replaces the target prefix.
+    This avoids Spark/S3 overwrite commit failures in the final create/swap phase.
+    """
+    target_uri = target_uri.rstrip("/") + "/"
+    temp_uri = target_uri.rstrip("/") + f"__tmp_{run_id}/"
+
+    (
+        df.coalesce(1)
+        .write
+        .mode("overwrite")
+        .option("header", "true")
+        .csv(temp_uri)
+    )
+
+    delete_s3_prefix(s3_client, target_uri)
+    copy_s3_prefix(s3_client, temp_uri, target_uri)
+    delete_s3_prefix(s3_client, temp_uri)
+
+
+def read_csv(spark, path):
+    return (
+        spark.read
+        .format("csv")
+        .option("header", "true")
+        .option("inferSchema", "true")
+        .load(path.rstrip("/") + "/")
+    )
+
+args = getResolvedOptions(sys.argv, ["JOB_NAME"])
+
+sc = SparkContext.getOrCreate()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
 
 job = Job(glueContext)
-job.init("bronze_job", {})
+job.init(args["JOB_NAME"], args)
 
-metadata = {'tables': [{'target_schema': 'bronze', 'target_table': 'sales_transactions_bronze', 'target_alias': 'stb', 'mapping_details': 'sales_transactions_raw str', 'description': 'Bronze ingestion of raw sales transactions at transaction grain. Direct 1:1 mapping from sales_transactions_raw (transaction_id, store_id, product_id, quantity, sale_amount, transaction_time) with no joins or aggregations.'}, {'target_schema': 'bronze', 'target_table': 'stores_bronze', 'target_alias': 'sb', 'mapping_details': 'stores_raw sr', 'description': 'Bronze ingestion of raw store master data. Direct 1:1 mapping from stores_raw (store_id, store_name, city, state, store_type, open_date) with no joins or aggregations.'}, {'target_schema': 'bronze', 'target_table': 'products_bronze', 'target_alias': 'pb', 'mapping_details': 'products_raw pr', 'description': 'Bronze ingestion of raw product master data. Direct 1:1 mapping from products_raw (product_id, product_name, category, brand, price, is_active) with no joins or aggregations.'}], 'columns': [{'source_column': "['str.transaction_id']", 'source_type': 'varchar(255)', 'source_nullable': 'not_accepted', 'target_column': 'transaction_id', 'target_type': 'varchar(255)', 'target_nullable': 'not_accepted', 'transformation': 'stb.transaction_id = str.transaction_id', 'target_table': 'stb'}, {'source_column': "['str.store_id']", 'source_type': 'varchar(255)', 'source_nullable': 'accepted', 'target_column': 'store_id', 'target_type': 'varchar(255)', 'target_nullable': 'accepted', 'transformation': 'stb.store_id = str.store_id', 'target_table': 'stb'}, {'source_column': "['str.product_id']", 'source_type': 'varchar(255)', 'source_nullable': 'accepted', 'target_column': 'product_id', 'target_type': 'varchar(255)', 'target_nullable': 'accepted', 'transformation': 'stb.product_id = str.product_id', 'target_table': 'stb'}, {'source_column': "['str.quantity']", 'source_type': 'int', 'source_nullable': 'accepted', 'target_column': 'quantity', 'target_type': 'int', 'target_nullable': 'accepted', 'transformation': 'stb.quantity = str.quantity', 'target_table': 'stb'}, {'source_column': "['str.sale_amount']", 'source_type': 'double', 'source_nullable': 'accepted', 'target_column': 'sale_amount', 'target_type': 'double', 'target_nullable': 'accepted', 'transformation': 'stb.sale_amount = str.sale_amount', 'target_table': 'stb'}, {'source_column': "['str.transaction_time']", 'source_type': 'timestamp', 'source_nullable': 'accepted', 'target_column': 'transaction_time', 'target_type': 'timestamp', 'target_nullable': 'accepted', 'transformation': 'stb.transaction_time = str.transaction_time', 'target_table': 'stb'}, {'source_column': "['sr.store_id']", 'source_type': 'varchar(10)', 'source_nullable': 'not_accepted', 'target_column': 'store_id', 'target_type': 'varchar(10)', 'target_nullable': 'not_accepted', 'transformation': 'sb.store_id = sr.store_id', 'target_table': 'sb'}, {'source_column': "['sr.store_name']", 'source_type': 'varchar(255)', 'source_nullable': 'accepted', 'target_column': 'store_name', 'target_type': 'varchar(255)', 'target_nullable': 'accepted', 'transformation': 'sb.store_name = sr.store_name', 'target_table': 'sb'}, {'source_column': "['sr.city']", 'source_type': 'varchar(100)', 'source_nullable': 'accepted', 'target_column': 'city', 'target_type': 'varchar(100)', 'target_nullable': 'accepted', 'transformation': 'sb.city = sr.city', 'target_table': 'sb'}, {'source_column': "['sr.state']", 'source_type': 'varchar(100)', 'source_nullable': 'accepted', 'target_column': 'state', 'target_type': 'varchar(100)', 'target_nullable': 'accepted', 'transformation': 'sb.state = sr.state', 'target_table': 'sb'}, {'source_column': "['sr.store_type']", 'source_type': 'varchar(50)', 'source_nullable': 'accepted', 'target_column': 'store_type', 'target_type': 'varchar(50)', 'target_nullable': 'accepted', 'transformation': 'sb.store_type = sr.store_type', 'target_table': 'sb'}, {'source_column': "['sr.open_date']", 'source_type': 'date', 'source_nullable': 'accepted', 'target_column': 'open_date', 'target_type': 'date', 'target_nullable': 'accepted', 'transformation': 'sb.open_date = sr.open_date', 'target_table': 'sb'}, {'source_column': "['pr.product_id']", 'source_type': 'varchar(10)', 'source_nullable': 'not_accepted', 'target_column': 'product_id', 'target_type': 'varchar(10)', 'target_nullable': 'not_accepted', 'transformation': 'pb.product_id = pr.product_id', 'target_table': 'pb'}, {'source_column': "['pr.product_name']", 'source_type': 'varchar(255)', 'source_nullable': 'accepted', 'target_column': 'product_name', 'target_type': 'varchar(255)', 'target_nullable': 'accepted', 'transformation': 'pb.product_name = pr.product_name', 'target_table': 'pb'}, {'source_column': "['pr.category']", 'source_type': 'varchar(100)', 'source_nullable': 'accepted', 'target_column': 'category', 'target_type': 'varchar(100)', 'target_nullable': 'accepted', 'transformation': 'pb.category = pr.category', 'target_table': 'pb'}, {'source_column': "['pr.brand']", 'source_type': 'varchar(100)', 'source_nullable': 'accepted', 'target_column': 'brand', 'target_type': 'varchar(100)', 'target_nullable': 'accepted', 'transformation': 'pb.brand = pr.brand', 'target_table': 'pb'}, {'source_column': "['pr.price']", 'source_type': 'float', 'source_nullable': 'accepted', 'target_column': 'price', 'target_type': 'float', 'target_nullable': 'accepted', 'transformation': 'pb.price = pr.price', 'target_table': 'pb'}, {'source_column': "['pr.is_active']", 'source_type': 'boolean', 'source_nullable': 'accepted', 'target_column': 'is_active', 'target_type': 'boolean', 'target_nullable': 'accepted', 'transformation': 'pb.is_active = pr.is_active', 'target_table': 'pb'}], 'runtime_config': {'base_path': 's3://sdlc-agent-bucket/engineering-agent/src/', 'target_path': 's3://sdlc-agent-bucket/engineering-agent/bronze/', 'read_format': 'csv', 'write_format': 'csv', 'write_mode': 'overwrite'}}
+s3_client = boto3.client("s3")
+run_id = str(uuid.uuid4()).replace("-", "")
 
-runtime_config = metadata.get('runtime_config', {})
-base_path = runtime_config.get('base_path', '')
-target_path = runtime_config.get('target_path', '')
-read_format = runtime_config.get('read_format', '')
-write_format = runtime_config.get('write_format', '')
-write_mode = runtime_config.get('write_mode', '')
+SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/src/"
+TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
 
-for table in metadata.get('tables', []):
-    mapping_details = table.get('mapping_details', '')
-    parts = mapping_details.split()
-    source_table = parts[0] if len(parts) > 0 else ''
-    source_alias = parts[1] if len(parts) > 1 else ''
-    target_table = table.get('target_table', '')
-    target_alias = table.get('target_alias', '')
+metadata = {
+    "tables": [
+        {
+            "source_table": "products_raw",
+            "target_table": "products_bronze",
+            "columns": [
+                "product_id",
+                "product_name",
+                "category",
+                "brand",
+                "price",
+                "is_active",
+            ],
+        },
+        {
+            "source_table": "stores_raw",
+            "target_table": "stores_bronze",
+            "columns": [
+                "store_id",
+                "store_name",
+                "city",
+                "state",
+                "store_type",
+                "open_date",
+            ],
+        },
+        {
+            "source_table": "sales_transactions_raw",
+            "target_table": "sales_transactions_bronze",
+            "columns": [
+                "transaction_id",
+                "store_id",
+                "product_id",
+                "quantity",
+                "sale_amount",
+                "transaction_time",
+            ],
+        },
+    ]
+}
 
-    reader = spark.read.format(read_format)
-    if read_format == 'csv':
-        reader = reader.option("header", "true").option("inferSchema", "true")
+for table in metadata["tables"]:
+    source_uri = f"{SOURCE_PATH.rstrip('/')}/{table['source_table']}.csv/"
+    target_uri = f"{TARGET_PATH.rstrip('/')}/{table['target_table']}.csv/"
 
-    df = reader.load(base_path + f"{source_table}.{read_format}")
-    df = df.alias(source_alias)
+    source_df = read_csv(spark, source_uri)
 
-    transformations = []
-    for col in metadata.get('columns', []):
-        if col.get('target_table') == target_alias:
-            transformation = col.get('transformation', '')
-            if '=' in transformation:
-                rhs = transformation.split('=', 1)[1].strip()
-            else:
-                rhs = transformation.strip()
-            target_column = col.get('target_column', '')
-            transformations.append(f"{rhs} as {target_column}")
+    missing_columns = [column for column in table["columns"] if column not in source_df.columns]
+    if missing_columns:
+        raise RuntimeError(
+            f"Missing required columns in {table['source_table']}: {missing_columns}. "
+            f"Available columns: {source_df.columns}"
+        )
 
-    df = df.selectExpr(*transformations)
+    target_df = source_df.select(*table["columns"])
 
-    writer = df.write.mode(write_mode).format(write_format)
-    if write_format == 'csv':
-        writer = writer.option("header", "true")
-
-    writer.save(target_path + f"{target_table}.{write_format}")
+    safe_overwrite_csv(target_df, target_uri, run_id, s3_client)
 
 job.commit()
