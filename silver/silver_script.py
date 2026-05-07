@@ -1,97 +1,103 @@
+```python
+from awsglue.context import GlueContext
 from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
-from awsglue.context import GlueContext
-from awsglue.dynamicframe import DynamicFrame
-from pyspark.sql.functions import col, trim, upper, coalesce, sum as spark_sum, avg, row_number
+from pyspark.sql.functions import col, upper, trim, concat_ws, coalesce, row_number, sum as _sum, countDistinct
 from pyspark.sql.window import Window
-from pyspark.sql.types import IntegerType, DateType, DoubleType
 
+# Initialize Glue context and Spark session
 sc = SparkContext.getOrCreate()
 glueContext = GlueContext(sc)
-spark = glueContext.spark_session
+spark = SparkSession.builder.config("spark.sql.sources.partitionOverwriteMode", "dynamic").getOrCreate()
 
+# Constants
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 FILE_FORMAT = "csv"
 
-# Process product_silver table
-products_df = spark.read.format(FILE_FORMAT).option("header", "true").load(f"{SOURCE_PATH}/products_bronze.csv/")
-products_df.createOrReplaceTempView("products_bronze")
+# Reading the source tables
 
-product_silver_df = spark.sql("""
+# Sales Transactions Bronze
+sales_transactions_bronze_df = spark.read.format(FILE_FORMAT).option("header", "true") \
+    .load(f"{SOURCE_PATH}/sales_transactions_bronze.{FILE_FORMAT}/")
+
+# Product Master Bronze
+product_master_bronze_df = spark.read.format(FILE_FORMAT).option("header", "true") \
+    .load(f"{SOURCE_PATH}/product_master_bronze.{FILE_FORMAT}/")
+
+# Store Master Bronze
+store_master_bronze_df = spark.read.format(FILE_FORMAT).option("header", "true") \
+    .load(f"{SOURCE_PATH}/store_master_bronze.{FILE_FORMAT}/")
+
+# Temp Views
+sales_transactions_bronze_df.createOrReplaceTempView("stb")
+product_master_bronze_df.createOrReplaceTempView("pmb")
+store_master_bronze_df.createOrReplaceTempView("smb")
+
+# Sales Transactions Silver
+sales_transactions_silver_df = spark.sql("""
     SELECT 
-        TRIM(pb.product_id) AS product_id,
-        TRIM(pb.product_name) AS product_name,
-        UPPER(TRIM(pb.product_id)) AS sku
-    FROM products_bronze pb
-    WHERE pb.product_name IS NOT NULL
-    DISTRIBUTE BY product_id
+        stb.transaction_id,
+        DATE(stb.transaction_time) as sales_date,
+        stb.product_id,
+        stb.store_id,
+        stb.quantity as quantity_sold,
+        stb.sale_amount as total_sales_amount
+    FROM stb
+    LEFT JOIN pmb ON stb.product_id = pmb.product_id
+    LEFT JOIN smb ON stb.store_id = smb.store_id
+    WHERE stb.transaction_id IS NOT NULL 
+      AND stb.product_id IS NOT NULL 
+      AND stb.store_id IS NOT NULL
+      AND stb.quantity > 0 
+      AND stb.sale_amount > 0
 """)
-product_silver_df.write.csv(f"{TARGET_PATH}/product_silver.csv", header=True, mode="overwrite")
+sales_transactions_silver_df.write.mode("overwrite").csv(f"{TARGET_PATH}/sales_transactions_silver.csv", header=True)
 
-# Process sales_daily_silver table
-sales_transactions_df = spark.read.format(FILE_FORMAT).option("header", "true").load(f"{SOURCE_PATH}/sales_transactions_bronze.csv/")
-stores_df = spark.read.format(FILE_FORMAT).option("header", "true").load(f"{SOURCE_PATH}/stores_bronze.csv/")
-sales_transactions_df.createOrReplaceTempView("sales_transactions_bronze")
-stores_df.createOrReplaceTempView("stores_bronze")
-product_silver_df.createOrReplaceTempView("product_silver")
-
-sales_daily_silver_df = spark.sql("""
+# Product Master Silver
+product_master_silver_df = spark.sql("""
     SELECT 
-        TRIM(stb.store_id) AS store_id,
-        TRIM(stb.product_id) AS product_id,
-        CAST(stb.transaction_time AS DATE) AS date,
-        SUM(COALESCE(stb.quantity, 0)) AS sales_qty
-    FROM sales_transactions_bronze stb
-    JOIN stores_bronze sb ON TRIM(stb.store_id) = TRIM(sb.store_id)
-    JOIN product_silver ps ON TRIM(stb.product_id) = ps.product_id
-    WHERE stb.store_id IS NOT NULL AND stb.product_id IS NOT NULL AND COALESCE(stb.quantity, 0) >= 0
-    GROUP BY TRIM(stb.store_id), TRIM(stb.product_id), CAST(stb.transaction_time AS DATE)
+        TRIM(pmb.product_id) as product_id,
+        UPPER(TRIM(pmb.product_name)) as product_name,
+        UPPER(TRIM(pmb.category)) as category,
+        pmb.price
+    FROM pmb
+    WHERE pmb.is_active = 'true'
 """)
-sales_daily_silver_df.write.csv(f"{TARGET_PATH}/sales_daily_silver.csv", header=True, mode="overwrite")
+product_master_silver_df.write.mode("overwrite").csv(f"{TARGET_PATH}/product_master_silver.csv", header=True)
 
-# Process store_product_day_spine_silver table
-sales_daily_silver_df.createOrReplaceTempView("sales_daily_silver")
-
-store_product_day_spine_silver_df = spark.sql("""
-    SELECT DISTINCT
-        sds.store_id,
-        sds.product_id,
-        sds.date
-    FROM sales_daily_silver sds
-""")
-store_product_day_spine_silver_df.write.csv(f"{TARGET_PATH}/store_product_day_spine_silver.csv", header=True, mode="overwrite")
-
-# Process sales_inventory_daily_silver table
-store_product_day_spine_silver_df.createOrReplaceTempView("store_product_day_spine_silver")
-
-sales_inventory_daily_silver_df = spark.sql("""
+# Store Master Silver
+store_master_silver_df = spark.sql("""
     SELECT 
-        spds.store_id,
-        spds.product_id,
-        spds.date,
-        COALESCE(sds.sales_qty, 0) AS sales_qty,
-        CAST(NULL AS INT) AS inventory_qty,
-        CASE WHEN COALESCE(sds.sales_qty, 0) = 0 THEN 1 ELSE 0 END AS stockout_flag
-    FROM store_product_day_spine_silver spds
-    LEFT JOIN sales_daily_silver sds ON spds.store_id = sds.store_id AND spds.product_id = sds.product_id AND spds.date = sds.date
+        TRIM(smb.store_id) as store_id,
+        UPPER(TRIM(smb.store_name)) as store_name,
+        CONCAT_WS(', ', COALESCE(smb.city, ''), COALESCE(smb.state, '')) as store_location,
+        smb.open_date
+    FROM smb
 """)
-sales_inventory_daily_silver_df.write.csv(f"{TARGET_PATH}/sales_inventory_daily_silver.csv", header=True, mode="overwrite")
+store_master_silver_df.write.mode("overwrite").csv(f"{TARGET_PATH}/store_master_silver.csv", header=True)
 
-# Process kpi_daily_product_silver table
-sales_inventory_daily_silver_df.createOrReplaceTempView("sales_inventory_daily_silver")
+# Using dummy region mapping as region cannot be hardcoded without specific logic
+# Assuming some logic such as `CASE smb.state ... END AS region`
 
-kpi_daily_product_silver_df = spark.sql("""
+# Sales Transactions Silver for Aggregation
+sales_transactions_silver_df.createOrReplaceTempView("sts")
+
+# Product Master Silver for Aggregation
+product_master_silver_df.createOrReplaceTempView("pms")
+
+# Sales Aggregate Silver
+sales_aggregate_silver_df = spark.sql("""
     SELECT 
-        sids.date,
-        sids.product_id,
-        CAST(NULL AS DOUBLE) AS stockout_rate,
-        AVG(COALESCE(sids.sales_qty, 0)) OVER (
-            PARTITION BY sids.product_id 
-            ORDER BY sids.date 
-            ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
-        ) AS sales_velocity,
-        CAST(NULL AS DOUBLE) AS revenue_leakage_index
-    FROM sales_inventory_daily_silver sids
+        sts.sales_date as date,
+        sts.store_id,
+        pms.category,
+        SUM(sts.total_sales_amount) as total_sales_amount,
+        COUNT(DISTINCT sts.transaction_id) as total_transactions,
+        'daily_store_category' as aggregated_level
+    FROM sts
+    INNER JOIN pms ON sts.product_id = pms.product_id
+    GROUP BY sts.sales_date, sts.store_id, pms.category
 """)
-kpi_daily_product_silver_df.write.csv(f"{TARGET_PATH}/kpi_daily_product_silver.csv", header=True, mode="overwrite")
+sales_aggregate_silver_df.write.mode("overwrite").csv(f"{TARGET_PATH}/sales_aggregate_silver.csv", header=True)
+```
