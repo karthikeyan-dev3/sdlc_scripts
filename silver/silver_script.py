@@ -1,155 +1,110 @@
-import sys
-from awsglue.utils import getResolvedOptions
+```python
 from awsglue.context import GlueContext
-from awsglue.job import Job
 from pyspark.context import SparkContext
+from awsglue.dynamicframe import DynamicFrame
 from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, row_number, upper, trim, coalesce, sum as sql_sum
+from pyspark.sql.window import Window
 
-args = getResolvedOptions(sys.argv, ["JOB_NAME"])
-sc = SparkContext()
+# Initialize Spark and Glue Contexts
+sc = SparkContext.getOrCreate()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
-job = Job(glueContext)
-job.init(args["JOB_NAME"], args)
 
+# Define paths
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 FILE_FORMAT = "csv"
 
-# -----------------------------
-# READ SOURCE TABLES (S3)
-# -----------------------------
-sales_transactions_bronze_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/sales_transactions_bronze.{FILE_FORMAT}/")
-)
+# Load and transform products_bronze
+products_src_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/products_bronze.{FILE_FORMAT}/")
+products_src_df.createOrReplaceTempView("products_bronze")
 
-products_bronze_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/products_bronze.{FILE_FORMAT}/")
-)
-
-stores_bronze_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/stores_bronze.{FILE_FORMAT}/")
-)
-
-# -----------------------------
-# CREATE TEMP VIEWS
-# -----------------------------
-sales_transactions_bronze_df.createOrReplaceTempView("sales_transactions_bronze")
-products_bronze_df.createOrReplaceTempView("products_bronze")
-stores_bronze_df.createOrReplaceTempView("stores_bronze")
-
-# ============================================================
-# TABLE: transactions_silver
-# ============================================================
-transactions_silver_sql = """
-WITH base AS (
+products_silver_df = spark.sql("""
     SELECT
-        stb.transaction_id AS transaction_id,
-        stb.store_id AS store_id,
-        pb.product_id AS product_id,
-        DATE(stb.transaction_time) AS transaction_date,
-        COALESCE(stb.quantity, 0) AS quantity_sold,
-        COALESCE(stb.sale_amount, 0) AS total_revenue,
-        CASE
-            WHEN COALESCE(stb.quantity, 0) > 0 THEN COALESCE(stb.sale_amount, 0) / stb.quantity
-            ELSE NULL
-        END AS price_per_unit,
-        stb.transaction_time AS transaction_time,
-        ROW_NUMBER() OVER (
-            PARTITION BY stb.transaction_id, stb.store_id, pb.product_id, stb.transaction_time
-            ORDER BY stb.transaction_time DESC
-        ) AS rn
+        product_id,
+        TRIM(UPPER(product_name)) AS product_name,
+        TRIM(UPPER(category)) AS category,
+        ROW_NUMBER() OVER (PARTITION BY product_id ORDER BY last_updated DESC) AS rn
+    FROM products_bronze
+    WHERE product_id IS NOT NULL
+""").filter("rn = 1").drop("rn")
+
+products_silver_df.write.mode('overwrite').csv(f"{TARGET_PATH}/products_silver.csv", header=True)
+
+# Load and transform stores_bronze
+stores_src_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/stores_bronze.{FILE_FORMAT}/")
+stores_src_df.createOrReplaceTempView("stores_bronze")
+
+stores_silver_df = spark.sql("""
+    SELECT
+        store_id,
+        TRIM(UPPER(location)) AS location,
+        ROW_NUMBER() OVER (PARTITION BY store_id ORDER BY last_updated DESC) AS rn
+    FROM stores_bronze
+    WHERE store_id IS NOT NULL
+    """).filter("rn = 1").drop("rn")
+
+stores_silver_df.write.mode('overwrite').csv(f"{TARGET_PATH}/stores_silver.csv", header=True)
+
+# Load and transform sales_transactions_bronze
+sales_transactions_src_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/sales_transactions_bronze.{FILE_FORMAT}/")
+sales_transactions_src_df.createOrReplaceTempView("sales_transactions_bronze")
+
+sales_transactions_silver_df = spark.sql("""
+    SELECT
+        stb.transaction_id,
+        stb.store_id,
+        stb.product_id,
+        COALESCE(stb.quantity, 0) AS quantity,
+        COALESCE(stb.sale_amount, 0) AS sale_amount,
+        stb.transaction_time,
+        CAST(stb.transaction_time AS date) AS sales_date,
+        ROW_NUMBER() OVER (PARTITION BY stb.transaction_id ORDER BY stb.transaction_time DESC) AS rn
     FROM sales_transactions_bronze stb
-    LEFT JOIN products_bronze pb
-        ON stb.product_id = pb.product_id
+    INNER JOIN stores_silver ss ON stb.store_id = ss.store_id
+    INNER JOIN products_silver ps ON stb.product_id = ps.product_id
     WHERE stb.transaction_id IS NOT NULL
-)
-SELECT
-    transaction_id,
-    store_id,
-    product_id,
-    transaction_date,
-    quantity_sold,
-    total_revenue,
-    price_per_unit
-FROM base
-WHERE rn = 1
-"""
+""").filter("rn = 1").drop("rn")
 
-transactions_silver_df = spark.sql(transactions_silver_sql)
+sales_transactions_silver_df.write.mode('overwrite').csv(f"{TARGET_PATH}/sales_transactions_silver.csv", header=True)
 
-(
-    transactions_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .option("header", "true")
-    .csv(f"{TARGET_PATH}/transactions_silver.csv")
-)
-
-# ============================================================
-# TABLE: stores_silver
-# ============================================================
-stores_silver_sql = """
-WITH base AS (
+# Aggregate daily sales
+daily_sales_silver_df = spark.sql("""
     SELECT
-        sb.store_id AS store_id,
-        ROW_NUMBER() OVER (
-            PARTITION BY sb.store_id
-            ORDER BY sb.store_id DESC
-        ) AS rn
-    FROM stores_bronze sb
-    WHERE sb.store_id IS NOT NULL
-)
-SELECT
-    store_id
-FROM base
-WHERE rn = 1
-"""
+        sts.store_id,
+        sts.product_id,
+        sts.sales_date AS date,
+        SUM(sts.quantity) AS sales_quantity,
+        SUM(sts.sale_amount) AS sales_revenue
+    FROM sales_transactions_silver sts
+    GROUP BY sts.store_id, sts.product_id, sts.sales_date
+""")
 
-stores_silver_df = spark.sql(stores_silver_sql)
+daily_sales_silver_df.write.mode('overwrite').csv(f"{TARGET_PATH}/daily_sales_silver.csv", header=True)
 
-(
-    stores_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .option("header", "true")
-    .csv(f"{TARGET_PATH}/stores_silver.csv")
-)
-
-# ============================================================
-# TABLE: products_silver
-# ============================================================
-products_silver_sql = """
-WITH base AS (
+# Transform inventory levels
+inventory_levels_silver_df = spark.sql("""
     SELECT
-        pb.product_id AS product_id,
-        ROW_NUMBER() OVER (
-            PARTITION BY pb.product_id
-            ORDER BY pb.product_id DESC
-        ) AS rn
-    FROM products_bronze pb
-    WHERE pb.product_id IS NOT NULL
-)
-SELECT
-    product_id
-FROM base
-WHERE rn = 1
-"""
+        dss.store_id,
+        dss.product_id,
+        dss.date,
+        COALESCE(dss.sales_quantity, 0) AS inventory_quantity
+    FROM daily_sales_silver dss
+""")
 
-products_silver_df = spark.sql(products_silver_sql)
+inventory_levels_silver_df.write.mode('overwrite').csv(f"{TARGET_PATH}/inventory_levels_silver.csv", header=True)
 
-(
-    products_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .option("header", "true")
-    .csv(f"{TARGET_PATH}/products_silver.csv")
-)
+# Compute stockout status
+stockout_status_silver_df = spark.sql("""
+    SELECT
+        ils.store_id,
+        ils.product_id,
+        ils.date,
+        CASE WHEN ils.inventory_quantity <= 0 THEN 1 ELSE 0 END AS stockout_flag,
+        CASE WHEN ils.inventory_quantity <= 0 THEN 'NEEDS_REPLENISHMENT' ELSE 'OK' END AS replenishment_status
+    FROM inventory_levels_silver ils
+""")
 
-job.commit()
+stockout_status_silver_df.write.mode('overwrite').csv(f"{TARGET_PATH}/stockout_status_silver.csv", header=True)
+```
