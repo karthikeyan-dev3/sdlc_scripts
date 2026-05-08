@@ -1,103 +1,124 @@
-import sys
-from awsglue.context import GlueContext
-from awsglue.transforms import *
-from awsglue.utils import getResolvedOptions
-from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, row_number, monotonically_increasing_id
-from pyspark.sql.window import Window
+from awsglue.context import GlueContext
+from pyspark.sql.functions import col, sum as _sum, concat, trim, when, count, coalesce
 
-args = getResolvedOptions(sys.argv, [])
+# Initialize Spark session and Glue context
+spark = SparkSession.builder.getOrCreate()
+glueContext = GlueContext(spark)
 
-sc = SparkContext()
-glueContext = GlueContext(sc)
-spark = glueContext.spark_session
-
-SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze"
-TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver"
+# Paths
+SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
+TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 FILE_FORMAT = "csv"
 
-# Store Master Silver
-store_df = spark.read.format(FILE_FORMAT).option("header", "true").load(f"{SOURCE_PATH}/stores_bronze.{FILE_FORMAT}/")
-store_df.createOrReplaceTempView("stores_bronze")
+# Read and process transactions_bronze
+transactions_df = spark.read \
+    .format(FILE_FORMAT) \
+    .option("header", "true") \
+    .load(f"{SOURCE_PATH}/transactions_bronze.{FILE_FORMAT}/")
 
-store_master_silver = spark.sql("""
-SELECT 
-    sb.store_id,
-    TRIM(UPPER(sb.store_name)) AS store_name,
-    TRIM(UPPER(sb.state)) AS store_region,
-    TRIM(UPPER(sb.city)) || ', ' || TRIM(UPPER(sb.state)) AS store_location
-FROM 
-    (SELECT *, row_number() OVER (PARTITION BY store_id ORDER BY store_id) as rn FROM stores_bronze) sb
-WHERE 
-    sb.rn = 1
-""")
-store_master_silver.write.mode("overwrite").option("header", "true").csv(f"{TARGET_PATH}/store_master_silver.csv")
-
-# Product Master Silver
-product_df = spark.read.format(FILE_FORMAT).option("header", "true").load(f"{SOURCE_PATH}/products_bronze.{FILE_FORMAT}/")
-product_df.createOrReplaceTempView("products_bronze")
-
-product_master_silver = spark.sql("""
-SELECT 
-    pb.product_id,
-    TRIM(UPPER(pb.product_name)) AS product_name,
-    COALESCE(TRIM(UPPER(pb.category)), 'UNKNOWN') AS product_category
-FROM 
-    (SELECT *, row_number() OVER (PARTITION BY product_id ORDER BY product_id) as rn FROM products_bronze) pb
-WHERE 
-    pb.rn = 1
-""")
-product_master_silver.write.mode("overwrite").option("header", "true").csv(f"{TARGET_PATH}/product_master_silver.csv")
-
-# Sales Transactions Silver
-sales_transactions_df = spark.read.format(FILE_FORMAT).option("header", "true").load(f"{SOURCE_PATH}/sales_transactions_bronze.{FILE_FORMAT}/")
-sales_transactions_df.createOrReplaceTempView("sales_transactions_bronze")
+transactions_df.createOrReplaceTempView("transactions_bronze")
 
 sales_transactions_silver = spark.sql("""
-SELECT 
-    stb.transaction_id,
-    stb.store_id,
-    stb.product_id,
-    CAST(stb.transaction_time AS DATE) AS transaction_date,
-    stb.quantity AS quantity_sold,
-    stb.sale_amount AS total_revenue
-FROM 
-    (SELECT *, row_number() OVER (PARTITION BY transaction_id ORDER BY transaction_id) as rn FROM sales_transactions_bronze) stb
-WHERE 
-    stb.rn = 1
-    AND stb.quantity >= 0
-    AND stb.sale_amount >= 0
+    SELECT sts.transaction_id,
+           CAST(sts.transaction_time AS DATE) AS transaction_date,
+           sts.store_id,
+           sts.product_id,
+           sts.quantity AS quantity_sold,
+           sts.sale_amount AS total_sales_amount
+    FROM (
+        SELECT *,
+               ROW_NUMBER() OVER (PARTITION BY transaction_id ORDER BY transaction_time DESC) AS rn
+        FROM transactions_bronze
+        WHERE transaction_id IS NOT NULL AND quantity >= 0 AND sale_amount >= 0 AND transaction_time IS NOT NULL
+    ) sts
+    WHERE rn = 1
 """)
-sales_transactions_silver.write.mode("overwrite").option("header", "true").csv(f"{TARGET_PATH}/sales_transactions_silver.csv")
 
-# Silver Sales Summary
-store_master_silver.createOrReplaceTempView("store_master_silver")
-product_master_silver.createOrReplaceTempView("product_master_silver")
+sales_transactions_silver.write.mode("overwrite").csv(f"{TARGET_PATH}/sales_transactions_silver.csv")
+
+# Read and process products_bronze
+products_df = spark.read \
+    .format(FILE_FORMAT) \
+    .option("header", "true") \
+    .load(f"{SOURCE_PATH}/products_bronze.{FILE_FORMAT}/")
+
+products_df.createOrReplaceTempView("products_bronze")
+
+product_master_silver = spark.sql("""
+    SELECT pms.product_id,
+           TRIM(pms.product_name) AS product_name,
+           TRIM(pms.category) AS category,
+           TRIM(pms.brand) AS brand
+    FROM (
+        SELECT *,
+               ROW_NUMBER() OVER (PARTITION BY product_id ORDER BY is_active DESC, ingestion_time DESC) AS rn
+        FROM products_bronze
+        WHERE is_active = 'true'
+    ) pms
+    WHERE rn = 1
+""")
+
+product_master_silver.write.mode("overwrite").csv(f"{TARGET_PATH}/product_master_silver.csv")
+
+# Read and process stores_bronze
+stores_df = spark.read \
+    .format(FILE_FORMAT) \
+    .option("header", "true") \
+    .load(f"{SOURCE_PATH}/stores_bronze.{FILE_FORMAT}/")
+
+stores_df.createOrReplaceTempView("stores_bronze")
+
+store_master_silver = spark.sql("""
+    SELECT sms.store_id,
+           TRIM(sms.store_name) AS store_name,
+           CONCAT(TRIM(sms.city), ', ', TRIM(sms.state)) AS location,
+           TRIM(sms.store_type) AS store_type
+    FROM (
+        SELECT *,
+               ROW_NUMBER() OVER (PARTITION BY store_id ORDER BY open_date DESC, ingestion_time DESC) AS rn
+        FROM stores_bronze
+    ) sms
+    WHERE rn = 1
+""")
+
+store_master_silver.write.mode("overwrite").csv(f"{TARGET_PATH}/store_master_silver.csv")
+
+# Read sales_transactions_silver for aggregations
+sales_transactions_agg_df = spark.read \
+    .format(FILE_FORMAT) \
+    .option("header", "true") \
+    .load(f"{TARGET_PATH}/sales_transactions_silver.csv")
+
+sales_transactions_agg_df.createOrReplaceTempView("sales_transactions_silver")
+
+sales_aggregated_silver = spark.sql("""
+    SELECT sts.transaction_date AS date,
+           sts.store_id,
+           sts.product_id,
+           SUM(sts.quantity_sold) AS total_quantity_sold,
+           SUM(sts.total_sales_amount) AS total_revenue
+    FROM sales_transactions_silver sts
+    GROUP BY sts.transaction_date, sts.store_id, sts.product_id
+""")
+
+sales_aggregated_silver.write.mode("overwrite").csv(f"{TARGET_PATH}/sales_aggregated_silver.csv")
+
+# Create report metadata
 sales_transactions_silver.createOrReplaceTempView("sales_transactions_silver")
+product_master_silver.createOrReplaceTempView("product_master_silver")
+store_master_silver.createOrReplaceTempView("store_master_silver")
 
-silver_sales_summary = spark.sql("""
-SELECT 
-    sts.transaction_id, 
-    sts.store_id, 
-    sts.product_id, 
-    sts.transaction_date, 
-    sts.total_revenue, 
-    sts.quantity_sold,
-    sms.store_location,
-    sms.store_name, 
-    sms.store_region,
-    pms.product_name,
-    pms.product_category
-FROM 
-    sales_transactions_silver sts
-JOIN 
-    store_master_silver sms 
-ON 
-    sts.store_id = sms.store_id
-JOIN 
-    product_master_silver pms 
-ON 
-    sts.product_id = pms.product_id
+report_metadata_silver = spark.sql("""
+    SELECT sts.transaction_date AS report_date,
+           CASE WHEN COUNT(sts.transaction_id) > 0 THEN 'SUCCESS' ELSE 'FAILED' END AS data_refresh_status,
+           100.0 * SUM(CASE WHEN sts.store_id IS NOT NULL AND sts.product_id IS NOT NULL AND
+                            sms.store_id IS NOT NULL AND pms.product_id IS NOT NULL THEN 1 ELSE 0 END) / 
+           COUNT(sts.transaction_id) AS accuracy_percentage
+    FROM sales_transactions_silver sts
+    LEFT JOIN product_master_silver pms ON sts.product_id = pms.product_id
+    LEFT JOIN store_master_silver sms ON sts.store_id = sms.store_id
+    GROUP BY sts.transaction_date
 """)
-silver_sales_summary.write.mode("overwrite").option("header", "true").csv(f"{TARGET_PATH}/silver_sales_summary.csv")
+
+report_metadata_silver.write.mode("overwrite").csv(f"{TARGET_PATH}/report_metadata_silver.csv")
