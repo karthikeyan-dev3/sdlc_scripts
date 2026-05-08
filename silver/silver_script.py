@@ -1,102 +1,113 @@
-import sys
-from awsglue.utils import getResolvedOptions
-from awsglue.context import GlueContext
-from awsglue.job import Job
-from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
+from awsglue.context import GlueContext
+from pyspark.sql.functions import col, trim, upper, row_number, coalesce
+from pyspark.sql.window import Window
 
-args = getResolvedOptions(sys.argv, ["JOB_NAME"])
+# Initialize Spark and Glue Context
+spark = SparkSession.builder \
+    .appName("AWS Glue PySpark Job") \
+    .getOrCreate()
+glueContext = GlueContext(spark)
 
-sc = SparkContext()
-glueContext = GlueContext(sc)
-spark = glueContext.spark_session
-job = Job(glueContext)
-job.init(args["JOB_NAME"], args)
+# Define paths
+SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze"
+TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver"
 
-SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
-TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
-FILE_FORMAT = "csv"
+# Read and process products_bronze
+products_bronze = spark.read.format('csv').option("header", "true").load(f"{SOURCE_PATH}/products_bronze.csv/")
+products_bronze.createOrReplaceTempView("pb")
 
-# ----------------------------
-# Read source tables from S3
-# ----------------------------
-sales_transactions_bronze_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/sales_transactions_bronze.{FILE_FORMAT}/")
+products_silver_query = """
+SELECT 
+    CAST(pb.product_id AS STRING) AS product_id,
+    UPPER(TRIM(pb.product_name)) AS product_name,
+    UPPER(TRIM(pb.category)) AS category,
+    UPPER(TRIM(pb.brand)) AS brand,
+    CAST(pb.price AS DOUBLE) AS price,
+    CASE WHEN pb.is_active = 'true' THEN 'AVAILABLE' ELSE 'NOT_AVAILABLE' END AS availability_status
+FROM (
+    SELECT *,
+        ROW_NUMBER() OVER (PARTITION BY product_id ORDER BY updated_at DESC) AS row_num
+    FROM pb
+    WHERE product_id IS NOT NULL
+) 
+WHERE row_num = 1
+"""
+
+products_silver_df = spark.sql(products_silver_query)
+products_silver_df.write.mode("overwrite").csv(TARGET_PATH + "/products_silver.csv", header=True)
+
+# Read and process stores_bronze
+stores_bronze = spark.read.format('csv').option("header", "true").load(f"{SOURCE_PATH}/stores_bronze.csv/")
+stores_bronze.createOrReplaceTempView("sb")
+
+stores_silver_query = """
+SELECT 
+    CAST(sb.store_id AS STRING) AS store_id,
+    UPPER(TRIM(sb.store_name)) AS store_name,
+    CONCAT(TRIM(sb.city), ',', TRIM(sb.state)) AS location,
+    UPPER(TRIM(sb.store_type)) AS store_type,
+    CAST(sb.open_date AS DATE) AS opening_date
+FROM (
+    SELECT *,
+        ROW_NUMBER() OVER (PARTITION BY store_id ORDER BY updated_at DESC) AS row_num
+    FROM sb
+    WHERE store_id IS NOT NULL
 )
+WHERE row_num = 1
+"""
 
-products_bronze_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/products_bronze.{FILE_FORMAT}/")
-)
+stores_silver_df = spark.sql(stores_silver_query)
+stores_silver_df.write.mode("overwrite").csv(TARGET_PATH + "/stores_silver.csv", header=True)
 
-stores_bronze_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/stores_bronze.{FILE_FORMAT}/")
-)
+# Read and process sales_transactions_bronze
+sales_transactions_bronze = spark.read.format('csv').option("header", "true").load(f"{SOURCE_PATH}/sales_transactions_bronze.csv/")
+sales_transactions_bronze.createOrReplaceTempView("stb")
 
-# ----------------------------
-# Create temp views
-# ----------------------------
-sales_transactions_bronze_df.createOrReplaceTempView("sales_transactions_bronze")
-products_bronze_df.createOrReplaceTempView("products_bronze")
-stores_bronze_df.createOrReplaceTempView("stores_bronze")
+# Ensure products_silver and stores_silver are registered for joins
+products_silver_df.createOrReplaceTempView("ps")
+stores_silver_df.createOrReplaceTempView("ss")
 
-spark.sql("CREATE OR REPLACE TEMP VIEW bronze_sales_transactions_bronze AS SELECT * FROM sales_transactions_bronze")
-spark.sql("CREATE OR REPLACE TEMP VIEW bronze_products_bronze AS SELECT * FROM products_bronze")
-spark.sql("CREATE OR REPLACE TEMP VIEW bronze_stores_bronze AS SELECT * FROM stores_bronze")
-
-# ----------------------------
-# Transform: sales_transactions_silver
-# ----------------------------
-sales_transactions_silver_df = spark.sql("""
-WITH base AS (
-    SELECT
-        stb.transaction_id,
-        stb.store_id,
-        stb.product_id,
-        CAST(stb.transaction_time AS DATE) AS transaction_date,
-        stb.quantity AS quantity_sold,
-        stb.sale_amount AS total_revenue,
-        CASE WHEN stb.quantity > 0 THEN stb.sale_amount / stb.quantity END AS price_per_unit,
-        ROW_NUMBER() OVER (
-            PARTITION BY stb.transaction_id, stb.product_id, stb.store_id, stb.transaction_time
-            ORDER BY stb.transaction_time DESC
-        ) AS rn
-    FROM bronze_sales_transactions_bronze stb
-    INNER JOIN bronze_products_bronze pb
-        ON stb.product_id = pb.product_id
-       AND pb.is_active = true
-    INNER JOIN bronze_stores_bronze sb
-        ON stb.store_id = sb.store_id
-)
+sales_transactions_silver_query = """
 SELECT
-    transaction_id,
-    store_id,
-    product_id,
-    transaction_date,
-    quantity_sold,
-    total_revenue,
-    price_per_unit
-FROM base
-WHERE rn = 1
-""")
-
-# ----------------------------
-# Write target table as SINGLE CSV file directly under TARGET_PATH
-# ----------------------------
-(
-    sales_transactions_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/sales_transactions_silver.csv")
+    stb.transaction_id,
+    stb.product_id,
+    stb.store_id,
+    DATE(stb.transaction_time) AS transaction_date,
+    stb.quantity AS quantity_sold,
+    stb.sale_amount AS total_sales_amount,
+    COALESCE(stb.sales_channel, 'IN_STORE') AS sales_channel
+FROM (
+    SELECT *,
+        ROW_NUMBER() OVER (PARTITION BY transaction_id ORDER BY updated_at DESC) AS row_num
+    FROM stb
+    WHERE quantity >= 0 AND sale_amount >= 0
 )
+WHERE row_num = 1
+AND product_id IN (SELECT product_id FROM ps)
+AND store_id IN (SELECT store_id FROM ss)
+"""
 
-job.commit()
+sales_transactions_silver_df = spark.sql(sales_transactions_silver_query)
+sales_transactions_silver_df.write.mode("overwrite").csv(TARGET_PATH + "/sales_transactions_silver.csv", header=True)
+
+# Read and process sales_aggregates_silver
+sales_aggregates_silver_query = """
+SELECT
+    sts.transaction_date AS date,
+    sts.store_id,
+    sts.product_id,
+    ps.category,
+    SUM(sts.quantity_sold) AS total_quantity_sold,
+    SUM(sts.total_sales_amount) AS total_sales_amount
+FROM sales_transactions_silver sts
+INNER JOIN products_silver ps ON sts.product_id = ps.product_id
+GROUP BY
+    sts.transaction_date,
+    sts.store_id,
+    sts.product_id,
+    ps.category
+"""
+
+sales_aggregates_silver_df = spark.sql(sales_aggregates_silver_query)
+sales_aggregates_silver_df.write.mode("overwrite").csv(TARGET_PATH + "/sales_aggregates_silver.csv", header=True)
