@@ -3,6 +3,7 @@ from awsglue.job import Job
 from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
+import sys
 
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
 
