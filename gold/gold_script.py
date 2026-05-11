@@ -1,100 +1,122 @@
-```python
-import sys
-from pyspark.sql import SparkSession
 from awsglue.context import GlueContext
-from pyspark.sql.functions import col, when, countDistinct, coalesce, upper, trim
-from pyspark.sql.window import Window
-import pyspark.sql.functions as F
+from pyspark.sql import SparkSession
 
-# Initialize Spark session and Glue context
-spark = SparkSession.builder \
-    .appName("Glue Job") \
-    .getOrCreate()
+spark = SparkSession.builder.appName('GlueApp').getOrCreate()
+glueContext = GlueContext(spark.sparkContext)
 
-glueContext = GlueContext(spark)
+# Read sales_transactions_silver
+sales_transactions_df = spark.read.format('csv') \
+    .option('header', 'true') \
+    .load('s3://sdlc-agent-bucket/engineering-agent/silver/sales_transactions_silver.csv/')
 
-SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
-TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
-FILE_FORMAT = "csv"
+# Read stores_silver
+stores_df = spark.read.format('csv') \
+    .option('header', 'true') \
+    .load('s3://sdlc-agent-bucket/engineering-agent/silver/stores_silver.csv/')
 
-# Read source tables into Spark DataFrames
-employee_certifications_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/employee_certifications_silver.{FILE_FORMAT}/")
-employees_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/employees_silver.{FILE_FORMAT}/")
-departments_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/departments_silver.{FILE_FORMAT}/")
-certifications_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/certifications_silver.{FILE_FORMAT}/")
-department_compliance_statuses_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/department_compliance_statuses_silver.{FILE_FORMAT}/")
-compliance_reports_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/compliance_reports_silver.{FILE_FORMAT}/")
-audit_trails_df = spark.read.format(FILE_FORMAT).load(f"{SOURCE_PATH}/audit_trails_silver.{FILE_FORMAT}/")
+# Read products_silver
+products_df = spark.read.format('csv') \
+    .option('header', 'true') \
+    .load('s3://sdlc-agent-bucket/engineering-agent/silver/products_silver.csv/')
 
-# Create temp views
-employee_certifications_df.createOrReplaceTempView("ecs")
-employees_df.createOrReplaceTempView("es")
-departments_df.createOrReplaceTempView("ds")
-certifications_df.createOrReplaceTempView("cs")
-department_compliance_statuses_df.createOrReplaceTempView("dcs")
-compliance_reports_df.createOrReplaceTempView("crs")
-audit_trails_df.createOrReplaceTempView("ats")
+# Create temporary views
+sales_transactions_df.createOrReplaceTempView('sales_transactions_silver')
+stores_df.createOrReplaceTempView('stores_silver')
+products_df.createOrReplaceTempView('products_silver')
 
-# Gold Certification Status
-gold_certification_query = """
-SELECT 
-    ecs.employee_id,
-    es.department_id,
-    ds.department_name,
-    ecs.certification_id,
-    cs.certification_name,
-    ecs.certification_status,
-    ecs.certification_target_date,
-    ecs.certification_completion_date,
-    CASE 
-        WHEN ecs.certification_completion_date IS NOT NULL THEN 'Completed'
-        WHEN ecs.certification_target_date < CURRENT_DATE THEN 'At Risk'
-        ELSE 'Pending'
-    END AS certification_status,
-    COALESCE((
-        SELECT count(DISTINCT ecs1.employee_id)
-        FROM ecs AS ecs1
-        WHERE ecs1.certification_status = 'Completed' 
-          AND ecs1.department_id = es.department_id 
-          AND ecs1.certification_id = ecs.certification_id
-    ), 0) AS employees_certified_count
-FROM ecs
-INNER JOIN es ON ecs.employee_id = es.employee_id
-INNER JOIN ds ON es.department_id = ds.department_id
-INNER JOIN cs ON ecs.certification_id = cs.certification_id
-"""
+# Transform and write gold_sales
+gold_sales_df = spark.sql('''
+    SELECT
+        sts.transaction_id,
+        sts.store_id,
+        sts.product_id,
+        CAST(sts.sale_date AS DATE) AS sale_date,
+        CAST(sts.quantity_sold AS INT) AS quantity_sold,
+        CAST(sts.total_revenue AS DOUBLE) AS total_revenue,
+        UPPER(TRIM(sts.sales_channel)) AS sales_channel
+    FROM sales_transactions_silver sts
+    LEFT JOIN stores_silver ss ON sts.store_id = ss.store_id
+    LEFT JOIN products_silver ps ON sts.product_id = ps.product_id
+''')
 
-gold_certification_status_df = spark.sql(gold_certification_query)
-gold_certification_status_df.write.csv(TARGET_PATH + "/gold_certification_status.csv", mode="overwrite", header=True)
+gold_sales_df.write.csv('s3://sdlc-agent-bucket/engineering-agent/gold/gold_sales.csv', header=True, mode='overwrite')
 
-# Department Compliance Report
-department_compliance_report_query = """
-SELECT 
-    dcs.report_id,
-    crs.report_generation_date,
-    dcs.department_id,
-    ds.department_name,
-    dcs.non_compliant_status,
-    dcs.non_compliance_reason
-FROM dcs
-INNER JOIN crs ON dcs.report_id = crs.report_id
-INNER JOIN ds ON dcs.department_id = ds.department_id
-"""
+# Read store_performance_silver
+store_performance_df = spark.read.format('csv') \
+    .option('header', 'true') \
+    .load('s3://sdlc-agent-bucket/engineering-agent/silver/store_performance_silver.csv/')
 
-department_compliance_report_df = spark.sql(department_compliance_report_query)
-department_compliance_report_df.write.csv(TARGET_PATH + "/department_compliance_report.csv", mode="overwrite", header=True)
+# Create temporary views
+store_performance_df.createOrReplaceTempView('store_performance_silver')
 
-# Compliance Audit Trail
-compliance_audit_trail_query = """
-SELECT 
-    ats.audit_id,
-    ats.employee_id,
-    ats.certification_id,
-    ats.verification_status,
-    ats.verification_date
-FROM ats
-"""
+# Transform and write gold_store_performance
+gold_store_performance_df = spark.sql('''
+    SELECT
+        sps.store_id,
+        CAST(sps.total_revenue AS DOUBLE) AS total_revenue,
+        CAST(sps.average_daily_sales AS DOUBLE) AS average_daily_sales,
+        TRIM(sps.location) AS location,
+        CAST(sps.last_updated AS TIMESTAMP) AS last_updated
+    FROM store_performance_silver sps
+''')
 
-compliance_audit_trail_df = spark.sql(compliance_audit_trail_query)
-compliance_audit_trail_df.write.csv(TARGET_PATH + "/compliance_audit_trail.csv", mode="overwrite", header=True)
-```
+gold_store_performance_df.write.csv('s3://sdlc-agent-bucket/engineering-agent/gold/gold_store_performance.csv', header=True, mode='overwrite')
+
+# Read product_performance_silver
+product_performance_df = spark.read.format('csv') \
+    .option('header', 'true') \
+    .load('s3://sdlc-agent-bucket/engineering-agent/silver/product_performance_silver.csv/')
+
+# Create temporary views
+product_performance_df.createOrReplaceTempView('product_performance_silver')
+
+# Transform and write gold_product_performance
+gold_product_performance_df = spark.sql('''
+    SELECT
+        pps.product_id,
+        UPPER(pps.category) AS category,
+        CAST(pps.total_units_sold AS INT) AS total_units_sold,
+        CAST(pps.total_revenue AS DOUBLE) AS total_revenue,
+        CAST(pps.top_products_flag AS BOOLEAN) AS top_products_flag
+    FROM product_performance_silver pps
+''')
+
+gold_product_performance_df.write.csv('s3://sdlc-agent-bucket/engineering-agent/gold/gold_product_performance.csv', header=True, mode='overwrite')
+
+# Read data_quality_silver
+data_quality_df = spark.read.format('csv') \
+    .option('header', 'true') \
+    .load('s3://sdlc-agent-bucket/engineering-agent/silver/data_quality_silver.csv/')
+
+# Create temporary views
+data_quality_df.createOrReplaceTempView('data_quality_silver')
+
+# Transform and write gold_data_quality
+gold_data_quality_df = spark.sql('''
+    SELECT
+        dqs.record_id,
+        CAST(dqs.data_validity_flag AS BOOLEAN) AS data_validity_flag,
+        CAST(dqs.duplicates_flag AS BOOLEAN) AS duplicates_flag,
+        CAST(dqs.last_validated AS TIMESTAMP) AS last_validated
+    FROM data_quality_silver dqs
+''')
+
+gold_data_quality_df.write.csv('s3://sdlc-agent-bucket/engineering-agent/gold/gold_data_quality.csv', header=True, mode='overwrite')
+
+# Read dashboard_refresh_silver
+dashboard_refresh_df = spark.read.format('csv') \
+    .option('header', 'true') \
+    .load('s3://sdlc-agent-bucket/engineering-agent/silver/dashboard_refresh_silver.csv/')
+
+# Create temporary views
+dashboard_refresh_df.createOrReplaceTempView('dashboard_refresh_silver')
+
+# Transform and write gold_dashboard_refresh
+gold_dashboard_refresh_df = spark.sql('''
+    SELECT
+        CAST(drs.last_refresh_date AS DATE) AS last_refresh_date,
+        LOWER(TRIM(drs.refresh_status)) AS refresh_status
+    FROM dashboard_refresh_silver drs
+''')
+
+gold_dashboard_refresh_df.write.csv('s3://sdlc-agent-bucket/engineering-agent/gold/gold_dashboard_refresh.csv', header=True, mode='overwrite')
