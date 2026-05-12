@@ -1,113 +1,67 @@
 import sys
-from awsglue.utils import getResolvedOptions
-from awsglue.context import GlueContext
-from awsglue.job import Job
 from pyspark.context import SparkContext
-from pyspark.sql import SparkSession
+from awsglue.context import GlueContext
+from awsglue.transforms import *
+from awsglue.utils import getResolvedOptions
+from pyspark.sql import SparkSession, DataFrame
+from pyspark.sql.functions import col, row_number
+from pyspark.sql.window import Window
 
-args = getResolvedOptions(sys.argv, ["JOB_NAME"])
-
+# Initialize Spark and Glue Contexts
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
-job = Job(glueContext)
-job.init(args["JOB_NAME"], args)
 
+# Paths
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-# --------------------------------------------------------------------------------
-# Source: silver.sales_analysis_silver
-# --------------------------------------------------------------------------------
-sas_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .option("inferSchema", "true")
-    .load(f"{SOURCE_PATH}/sales_analysis_silver.{FILE_FORMAT}/")
-)
-sas_df.createOrReplaceTempView("sales_analysis_silver")
+# Read source tables from S3
+departments_silver_df = spark.read.format(FILE_FORMAT).option("header", "true").load(f"{SOURCE_PATH}/departments_silver.{FILE_FORMAT}/")
+dates_silver_df = spark.read.format(FILE_FORMAT).option("header", "true").load(f"{SOURCE_PATH}/dates_silver.{FILE_FORMAT}/")
+certifications_silver_df = spark.read.format(FILE_FORMAT).option("header", "true").load(f"{SOURCE_PATH}/certifications_silver.{FILE_FORMAT}/")
+employees_silver_df = spark.read.format(FILE_FORMAT).option("header", "true").load(f"{SOURCE_PATH}/employees_silver.{FILE_FORMAT}/")
 
-# --------------------------------------------------------------------------------
-# Target: gold.sales_analysis
-# --------------------------------------------------------------------------------
-sales_analysis_df = spark.sql("""
-SELECT
-    CAST(sas.transaction_id AS STRING)          AS transaction_id,
-    DATE(sas.transaction_date)                  AS transaction_date,
-    CAST(sas.store_id AS STRING)                AS store_id,
-    CAST(sas.product_id AS STRING)              AS product_id,
-    CAST(sas.quantity_sold AS INT)              AS quantity_sold,
-    CAST(sas.sales_amount AS DOUBLE)            AS sales_amount,
-    CAST(sas.store_region AS STRING)            AS store_region,
-    CAST(sas.store_manager AS STRING)           AS store_manager,
-    CAST(sas.product_category AS STRING)        AS product_category,
-    CAST(sas.product_brand AS STRING)           AS product_brand
-FROM sales_analysis_silver sas
-""")
+# Create temp views
+departments_silver_df.createOrReplaceTempView("ds")
+dates_silver_df.createOrReplaceTempView("dts")
+certifications_silver_df.createOrReplaceTempView("cs")
+employees_silver_df.createOrReplaceTempView("es")
 
-(
-    sales_analysis_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/sales_analysis.csv")
-)
+# Transform: gold_dim_departments
+gold_dim_departments_df = spark.sql("""
+    SELECT 
+        ds.department_id AS department_id,
+        TRIM(ds.department_name) AS department_name,
+        UPPER(ds.normalized_department_code) AS normalized_department_code
+    FROM ds
+    """)
+gold_dim_departments_df.write.mode("overwrite").option("header", "true").csv(f"{TARGET_PATH}/gold_dim_departments.csv")
 
-# --------------------------------------------------------------------------------
-# Target: gold.store_performance
-# --------------------------------------------------------------------------------
-store_performance_df = spark.sql("""
-SELECT
-    CAST(sas.store_id AS STRING)                        AS store_id,
-    DATE(sas.transaction_date)                          AS transaction_date,
-    CAST(SUM(CAST(sas.sales_amount AS DOUBLE)) AS DOUBLE) AS total_sales,
-    CAST(SUM(CAST(sas.quantity_sold AS INT)) AS INT)     AS total_units_sold,
-    CAST(COUNT(DISTINCT sas.transaction_id) AS INT)      AS number_of_transactions,
-    CAST(
-        SUM(CAST(sas.sales_amount AS DOUBLE)) / COUNT(DISTINCT sas.transaction_id)
-        AS DOUBLE
-    ) AS average_transaction_value
-FROM sales_analysis_silver sas
-GROUP BY
-    sas.store_id,
-    sas.transaction_date
-""")
+# Transform: gold_dim_dates
+gold_dim_dates_df = spark.sql("""
+    SELECT 
+        dts.date_id AS date_id,
+        dts.date AS date,
+        dts.fiscal_year AS fiscal_year,
+        dts.fiscal_period AS fiscal_period
+    FROM dts
+    """)
+gold_dim_dates_df.write.mode("overwrite").option("header", "true").csv(f"{TARGET_PATH}/gold_dim_dates.csv")
 
-(
-    store_performance_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/store_performance.csv")
-)
-
-# --------------------------------------------------------------------------------
-# Target: gold.product_performance
-# --------------------------------------------------------------------------------
-product_performance_df = spark.sql("""
-SELECT
-    CAST(sas.product_id AS STRING)                        AS product_id,
-    DATE(sas.transaction_date)                            AS transaction_date,
-    CAST(SUM(CAST(sas.sales_amount AS DOUBLE)) AS DOUBLE) AS total_sales,
-    CAST(SUM(CAST(sas.quantity_sold AS INT)) AS INT)       AS total_units_sold,
-    CAST(
-        SUM(CAST(sas.sales_amount AS DOUBLE)) / SUM(CAST(sas.quantity_sold AS INT))
-        AS DOUBLE
-    ) AS average_price,
-    CAST(COUNT(DISTINCT sas.store_id) AS INT)              AS total_stores_selling
-FROM sales_analysis_silver sas
-GROUP BY
-    sas.product_id,
-    sas.transaction_date
-""")
-
-(
-    product_performance_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/product_performance.csv")
-)
-
-job.commit()
+# Transform: gold_fact_certifications
+gold_fact_certifications_df = spark.sql("""
+    SELECT 
+        cs.certification_id AS certification_id,
+        cs.employee_id AS employee_id,
+        TRIM(cs.certification_name) AS certification_name,
+        ds.department_id AS department_id,
+        cs.completion_date AS completion_date,
+        cs.deadline_date AS deadline_date,
+        CASE WHEN cs.completion_date <= cs.deadline_date THEN TRUE ELSE FALSE END AS is_compliant
+    FROM cs
+    INNER JOIN es ON cs.employee_id = es.employee_id
+    INNER JOIN ds ON es.department_id = ds.department_id
+    """)
+gold_fact_certifications_df.write.mode("overwrite").option("header", "true").csv(f"{TARGET_PATH}/gold_fact_certifications.csv")
