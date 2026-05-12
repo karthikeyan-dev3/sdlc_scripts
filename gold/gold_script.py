@@ -1,95 +1,59 @@
+
 import sys
-from awsglue.transforms import *
-from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
-from awsglue.context import GlueContext
-from awsglue.dynamicframe import DynamicFrame
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, expr
+from awsglue.context import GlueContext
 
 # Initialize GlueContext and SparkSession
-glueContext = GlueContext(SparkContext.getOrCreate())
+sc = SparkContext.getOrCreate()
+glueContext = GlueContext(sc)
 spark = glueContext.spark_session
 
-# Set source and target paths
-SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
-TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
+# Constants
+SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver"
+TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold"
 FILE_FORMAT = "csv"
 
-# Load source tables
-sales_transactions_silver_df = spark.read \
-    .format(FILE_FORMAT) \
-    .option("header", "true") \
-    .load(f"{SOURCE_PATH}/sales_transactions_silver.{FILE_FORMAT}/")
-
-products_silver_df = spark.read \
-    .format(FILE_FORMAT) \
-    .option("header", "true") \
-    .load(f"{SOURCE_PATH}/products_silver.{FILE_FORMAT}/")
-
-stores_silver_df = spark.read \
-    .format(FILE_FORMAT) \
-    .option("header", "true") \
-    .load(f"{SOURCE_PATH}/stores_silver.{FILE_FORMAT}/")
+# Read source tables
+department_information_df = spark.read.format(FILE_FORMAT).option("header", "true").load(f"{SOURCE_PATH}/department_information_silver.{FILE_FORMAT}/")
+certification_records_df = spark.read.format(FILE_FORMAT).option("header", "true").load(f"{SOURCE_PATH}/certification_records_silver.{FILE_FORMAT}/")
+risk_assessment_df = spark.read.format(FILE_FORMAT).option("header", "true").load(f"{SOURCE_PATH}/risk_assessment_silver.{FILE_FORMAT}/")
 
 # Create temp views
-sales_transactions_silver_df.createOrReplaceTempView("sales_transactions_silver")
-products_silver_df.createOrReplaceTempView("products_silver")
-stores_silver_df.createOrReplaceTempView("stores_silver")
+department_information_df.createOrReplaceTempView("dis")
+certification_records_df.createOrReplaceTempView("crs")
+risk_assessment_df.createOrReplaceTempView("ras")
 
-# Transformations for each table and save the results
-
-# gold_sales_transactions
-gold_sales_transactions_df = spark.sql("""
-    SELECT 
-        transaction_id,
-        CAST(transaction_date AS DATE) AS transaction_date,
-        store_id,
-        product_id,
-        CAST(quantity_sold AS INT) AS quantity_sold,
-        CAST(sales_amount AS DOUBLE) AS sales_amount
-    FROM sales_transactions_silver
+# SQL Transformation for gold_department_dimension
+gold_department_dimension_df = spark.sql("""
+SELECT
+    TRIM(dis.department_id) AS department_id,
+    TRIM(COALESCE(dis.normalized_department_code, '')) AS normalized_department_code,
+    TRIM(COALESCE(dis.business_unit, '')) AS business_unit
+FROM (
+    SELECT *,
+           ROW_NUMBER() OVER (PARTITION BY department_id ORDER BY department_id) as rn
+    FROM dis
+) filtered_dis
+WHERE rn = 1
 """)
-gold_sales_transactions_df.write.csv(f"{TARGET_PATH}/gold_sales_transactions.csv", mode="overwrite", header=True)
 
-# gold_product_master
-gold_product_master_df = spark.sql("""
-    SELECT 
-        product_id,
-        product_name,
-        category,
-        brand
-    FROM products_silver
-""")
-gold_product_master_df.write.csv(f"{TARGET_PATH}/gold_product_master.csv", mode="overwrite", header=True)
+# Write the result to S3
+gold_department_dimension_df.write.mode('overwrite').option("header", "true").csv(f"{TARGET_PATH}/gold_department_dimension.csv")
 
-# gold_store_master
-gold_store_master_df = spark.sql("""
-    SELECT 
-        store_id,
-        store_name,
-        region,
-        store_type
-    FROM stores_silver
+# SQL Transformation for gold_certification_compliance
+gold_certification_compliance_df = spark.sql("""
+SELECT
+    TRIM(dis.department_id) AS department_id,
+    TRIM(COALESCE(dis.department_name, '')) AS department_name,
+    COUNT(DISTINCT crs.employee_id) AS employees_certified_count,
+    SUM(CASE WHEN crs.certification_completed IS NULL THEN 1 ELSE 0 END) AS certifications_due,
+    CAST(COALESCE(ras.risk_criteria_met, false) AS BOOLEAN) AS at_risk_flag
+FROM dis
+LEFT JOIN crs ON dis.department_id = crs.department_id
+LEFT JOIN ras ON dis.department_id = ras.department_id
+GROUP BY dis.department_id, dis.department_name, ras.risk_criteria_met
 """)
-gold_store_master_df.write.csv(f"{TARGET_PATH}/gold_store_master.csv", mode="overwrite", header=True)
 
-# gold_integrated_sales
-gold_integrated_sales_df = spark.sql("""
-    SELECT 
-        sts.transaction_id,
-        CAST(sts.transaction_date AS DATE) AS transaction_date,
-        sts.store_id,
-        ss.store_name,
-        ss.region,
-        sts.product_id,
-        ps.product_name,
-        ps.category,
-        ps.brand,
-        CAST(sts.quantity_sold AS INT) AS quantity_sold,
-        CAST(sts.sales_amount AS DOUBLE) AS sales_amount
-    FROM sales_transactions_silver sts
-    LEFT JOIN stores_silver ss ON sts.store_id = ss.store_id
-    LEFT JOIN products_silver ps ON sts.product_id = ps.product_id
-""")
-gold_integrated_sales_df.write.csv(f"{TARGET_PATH}/gold_integrated_sales.csv", mode="overwrite", header=True)
+# Write the result to S3
+gold_certification_compliance_df.write.mode('overwrite').option("header", "true").csv(f"{TARGET_PATH}/gold_certification_compliance.csv")
