@@ -1,72 +1,102 @@
-import sys
-from awsglue.transforms import *
-from awsglue.utils import getResolvedOptions
-from pyspark.context import SparkContext
 from awsglue.context import GlueContext
-from awsglue.job import Job
+from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 
-# Initialize GlueContext and SparkSession
-glueContext = GlueContext(SparkContext.getOrCreate())
+# Initialize GlueContext and Spark session
+sc = SparkContext()
+glueContext = GlueContext(sc)
 spark = glueContext.spark_session
 
-# Job parameters
-args = getResolvedOptions(sys.argv, ['JOB_NAME'])
-job = Job(glueContext)
-job.init(args['JOB_NAME'], args)
-
-# Paths
-SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver"
-TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold"
+# Set paths
+SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
+TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-# Load data
-certification_tracking_silver = (
-    spark.read
-    .format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/certification_tracking_silver.{FILE_FORMAT}/")
-)
+# Read source tables
+departments_df = spark.read\
+    .format(FILE_FORMAT)\
+    .option("header", "true")\
+    .load(f"{SOURCE_PATH}/departments_silver.{FILE_FORMAT}/")
 
-# Create temp view
-certification_tracking_silver.createOrReplaceTempView("cts")
+department_coordinator_df = spark.read\
+    .format(FILE_FORMAT)\
+    .option("header", "true")\
+    .load(f"{SOURCE_PATH}/department_coordinator_assignment_silver.{FILE_FORMAT}/")
 
-# Transform and write gold_certification_tracking
-gold_certification_tracking_df = spark.sql("""
+department_certifications_df = spark.read\
+    .format(FILE_FORMAT)\
+    .option("header", "true")\
+    .load(f"{SOURCE_PATH}/department_required_certifications_silver.{FILE_FORMAT}/")
+
+employees_df = spark.read\
+    .format(FILE_FORMAT)\
+    .option("header", "true")\
+    .load(f"{SOURCE_PATH}/employees_silver.{FILE_FORMAT}/")
+
+employee_certification_status_df = spark.read\
+    .format(FILE_FORMAT)\
+    .option("header", "true")\
+    .load(f"{SOURCE_PATH}/employee_certification_status_silver.{FILE_FORMAT}/")
+
+fiscal_calendar_df = spark.read\
+    .format(FILE_FORMAT)\
+    .option("header", "true")\
+    .load(f"{SOURCE_PATH}/fiscal_calendar_silver.{FILE_FORMAT}/")
+
+certifications_df = spark.read\
+    .format(FILE_FORMAT)\
+    .option("header", "true")\
+    .load(f"{SOURCE_PATH}/certifications_silver.{FILE_FORMAT}/")
+
+# Create temp views
+departments_df.createOrReplaceTempView("ds")
+department_coordinator_df.createOrReplaceTempView("dca")
+department_certifications_df.createOrReplaceTempView("drc")
+employees_df.createOrReplaceTempView("es")
+employee_certification_status_df.createOrReplaceTempView("ecs")
+fiscal_calendar_df.createOrReplaceTempView("fcs")
+certifications_df.createOrReplaceTempView("cs")
+
+# Transformations for gold_certification_compliance
+gold_certification_compliance_query = """
 SELECT
-    cts.department_id,
-    cts.department_name,
-    cts.coordinator_id,
-    cts.coordinator_name,
-    cts.certification_id,
-    cts.certification_name,
-    cts.completion_status,
-    cts.completion_date,
-    cts.compliance_deadline,
-    cts.flagged_for_incomplete
-FROM
-    cts
-""")
+    ds.department_id,
+    dca.training_coordinator_id,
+    ds.department_name,
+    ds.department_code,
+    COUNT(DISTINCT drc.certification_id) AS required_certifications,
+    COUNT(DISTINCT CASE WHEN ecs.status = 'completed' OR ecs.completion_date IS NOT NULL THEN CONCAT(ecs.employee_id, ecs.certification_id) END) AS completed_certifications,
+    CASE WHEN COUNT(DISTINCT CASE WHEN ecs.status = 'completed' OR ecs.completion_date IS NOT NULL THEN CONCAT(ecs.employee_id, ecs.certification_id) END) >= COUNT(DISTINCT drc.certification_id) THEN 'compliant' ELSE 'non-compliant' END AS compliance_status,
+    CURRENT_DATE AS report_date
+FROM ds
+LEFT JOIN dca ON ds.department_id = dca.department_id
+LEFT JOIN drc ON ds.department_id = drc.department_id
+LEFT JOIN es ON ds.department_id = es.department_id
+LEFT JOIN ecs ON es.employee_id = ecs.employee_id AND drc.certification_id = ecs.certification_id
+LEFT JOIN fcs ON fcs.calendar_date = CURRENT_DATE
+GROUP BY ds.department_id, dca.training_coordinator_id, ds.department_name, ds.department_code
+"""
 
-gold_certification_tracking_df.coalesce(1).write.csv(f"{TARGET_PATH}/gold_certification_tracking.csv", header=True, mode="overwrite")
+gold_certification_compliance_df = spark.sql(gold_certification_compliance_query)
 
-# Transform and write gold_department_compliance_report
-gold_department_compliance_report_df = spark.sql("""
+# Write gold_certification_compliance to target
+gold_certification_compliance_df.coalesce(1).write.mode('overwrite').csv(TARGET_PATH + "/gold_certification_compliance.csv", header=True)
+
+# Transformations for gold_training_completion
+gold_training_completion_query = """
 SELECT
-    cts.department_id,
-    cts.department_name,
-    COUNT(cts.certification_id) AS total_certifications,
-    SUM(CASE WHEN cts.completion_status = 'COMPLETED' THEN 1 ELSE 0 END) AS completed_certifications,
-    SUM(CASE WHEN cts.flagged_for_incomplete = true THEN 1 ELSE 0 END) AS non_compliant_certifications,
-    (SUM(CASE WHEN cts.completion_status = 'COMPLETED' THEN 1 ELSE 0 END) / COUNT(cts.certification_id)) AS compliance_rate,
-    CURRENT_TIMESTAMP AS last_updated
-FROM
-    cts
-GROUP BY
-    cts.department_id,
-    cts.department_name
-""")
+    ecs.employee_id,
+    ecs.certification_id,
+    ecs.completion_date,
+    ecs.status,
+    fcs.fiscal_period
+FROM ecs
+INNER JOIN es ON ecs.employee_id = es.employee_id
+INNER JOIN cs ON ecs.certification_id = cs.certification_id
+LEFT JOIN fcs ON ecs.completion_date = fcs.calendar_date
+"""
 
-gold_department_compliance_report_df.coalesce(1).write.csv(f"{TARGET_PATH}/gold_department_compliance_report.csv", header=True, mode="overwrite")
+gold_training_completion_df = spark.sql(gold_training_completion_query)
 
-job.commit()
+# Write gold_training_completion to target
+gold_training_completion_df.coalesce(1).write.mode('overwrite').csv(TARGET_PATH + "/gold_training_completion.csv", header=True)
