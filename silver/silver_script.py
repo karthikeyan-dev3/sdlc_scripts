@@ -1,142 +1,174 @@
-import sys
+
 from pyspark.sql import SparkSession
 from awsglue.context import GlueContext
-from awsglue.job import Job
-from awsglue.utils import getResolvedOptions
-from pyspark.sql.functions import coalesce, trim, upper, lower, col, current_date, when
+from pyspark.sql.functions import col, row_number
 from pyspark.sql.window import Window
-from pyspark.sql.functions import row_number
 
-args = getResolvedOptions(sys.argv, ['JOB_NAME'])
-
-spark = SparkSession.builder.appName('glue-pyspark-transform').getOrCreate()
-glueContext = GlueContext(spark.sparkContext)
-job = Job(glueContext)
-job.init(args['JOB_NAME'], args)
+# Initialize GlueContext and SparkSession
+glueContext = GlueContext(SparkSession.builder.getOrCreate())
+spark = glueContext.spark_session
 
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 FILE_FORMAT = "csv"
 
-# Departments Table
+# Read and process departments_silver
 departments_df = spark.read.format(FILE_FORMAT).option("header", "true").load(f"{SOURCE_PATH}/departments_bronze.{FILE_FORMAT}/")
-departments_df.createOrReplaceTempView('db')
+departments_df.createOrReplaceTempView("db")
 
-departments_silver = spark.sql("""
-    SELECT
-        TRIM(department_id) AS department_id,
-        UPPER(TRIM(department_name)) AS department_name
+departments_silver_df = spark.sql("""
+    SELECT 
+        department_id, 
+        TRIM(UPPER(department_name)) AS department_name, 
+        TRIM(LOWER(department_code)) AS department_code
     FROM (
-        SELECT *, ROW_NUMBER() OVER (PARTITION BY department_id ORDER BY department_id) as rn 
+        SELECT 
+            db.department_id, 
+            db.department_name, 
+            db.department_code,
+            ROW_NUMBER() OVER (PARTITION BY db.department_id ORDER BY db.department_id) as row_num
         FROM db
-    ) tmp
-    WHERE rn = 1
+    ) WHERE row_num = 1
 """)
 
-departments_silver.write.csv(TARGET_PATH + "/departments_silver.csv", header=True, mode="overwrite")
+departments_silver_df.drop("row_num").write.mode("overwrite").csv(f"{TARGET_PATH}/departments_silver.csv", header=True)
 
-# Coordinators Table
-coordinators_df = spark.read.format(FILE_FORMAT).option("header", "true").load(f"{SOURCE_PATH}/coordinators_bronze.{FILE_FORMAT}/")
-coordinators_df.createOrReplaceTempView('cb')
+# Read and process training_coordinators_silver
+training_coordinators_df = spark.read.format(FILE_FORMAT).option("header", "true").load(f"{SOURCE_PATH}/training_coordinators_bronze.{FILE_FORMAT}/")
+training_coordinators_df.createOrReplaceTempView("tcb")
 
-coordinators_silver = spark.sql("""
-    SELECT
-        TRIM(coordinator_id) AS coordinator_id,
-        UPPER(TRIM(coordinator_name)) AS coordinator_name
+training_coordinators_silver_df = spark.sql("""
+    SELECT 
+        training_coordinator_id
     FROM (
-        SELECT *, ROW_NUMBER() OVER (PARTITION BY coordinator_id ORDER BY coordinator_id) as rn 
-        FROM cb
-    ) tmp
-    WHERE rn = 1
+        SELECT 
+            tcb.training_coordinator_id,
+            ROW_NUMBER() OVER (PARTITION BY tcb.training_coordinator_id ORDER BY tcb.training_coordinator_id) as row_num
+        FROM tcb
+    ) WHERE row_num = 1
 """)
 
-coordinators_silver.write.csv(TARGET_PATH + "/coordinators_silver.csv", header=True, mode="overwrite")
+training_coordinators_silver_df.drop("row_num").write.mode("overwrite").csv(f"{TARGET_PATH}/training_coordinators_silver.csv", header=True)
 
-# Certifications Table
+# Read and process department_coordinator_assignment_silver
+department_coordinator_assignment_df = spark.read.format(FILE_FORMAT).option("header", "true").load(f"{SOURCE_PATH}/department_coordinator_assignment_bronze.{FILE_FORMAT}/")
+department_coordinator_assignment_df.createOrReplaceTempView("dcab")
+
+department_coordinator_assignment_silver_df = spark.sql("""
+    SELECT 
+        dcab.department_id, 
+        dcab.training_coordinator_id
+    FROM (
+        SELECT 
+            dcab.department_id,
+            dcab.training_coordinator_id,
+            ROW_NUMBER() OVER (PARTITION BY dcab.department_id, dcab.training_coordinator_id ORDER BY dcab.department_id) as row_num
+        FROM dcab
+        JOIN departments_silver ds ON dcab.department_id = ds.department_id
+        JOIN training_coordinators_silver tcs ON dcab.training_coordinator_id = tcs.training_coordinator_id
+    ) WHERE row_num = 1
+""")
+
+department_coordinator_assignment_silver_df.drop("row_num").write.mode("overwrite").csv(f"{TARGET_PATH}/department_coordinator_assignment_silver.csv", header=True)
+
+# Read and process employees_silver
+employees_df = spark.read.format(FILE_FORMAT).option("header", "true").load(f"{SOURCE_PATH}/employees_bronze.{FILE_FORMAT}/")
+employees_df.createOrReplaceTempView("eb")
+
+employees_silver_df = spark.sql("""
+    SELECT 
+        eb.employee_id, 
+        eb.department_id
+    FROM (
+        SELECT 
+            eb.employee_id, 
+            eb.department_id,
+            ROW_NUMBER() OVER (PARTITION BY eb.employee_id ORDER BY eb.employee_id) as row_num
+        FROM eb
+        JOIN departments_silver ds ON eb.department_id = ds.department_id
+    ) WHERE row_num = 1
+""")
+
+employees_silver_df.drop("row_num").write.mode("overwrite").csv(f"{TARGET_PATH}/employees_silver.csv", header=True)
+
+# Read and process certifications_silver
 certifications_df = spark.read.format(FILE_FORMAT).option("header", "true").load(f"{SOURCE_PATH}/certifications_bronze.{FILE_FORMAT}/")
-certifications_df.createOrReplaceTempView('cfb')
+certifications_df.createOrReplaceTempView("cb")
 
-certifications_silver = spark.sql("""
-    SELECT
-        TRIM(certification_id) AS certification_id,
-        UPPER(TRIM(certification_name)) AS certification_name
+certifications_silver_df = spark.sql("""
+    SELECT 
+        certification_id
     FROM (
-        SELECT *, ROW_NUMBER() OVER (PARTITION BY certification_id ORDER BY certification_id) as rn 
-        FROM cfb
-    ) tmp
-    WHERE rn = 1
+        SELECT 
+            cb.certification_id,
+            ROW_NUMBER() OVER (PARTITION BY cb.certification_id ORDER BY cb.certification_id) as row_num
+        FROM cb
+    ) WHERE row_num = 1
 """)
 
-certifications_silver.write.csv(TARGET_PATH + "/certifications_silver.csv", header=True, mode="overwrite")
+certifications_silver_df.drop("row_num").write.mode("overwrite").csv(f"{TARGET_PATH}/certifications_silver.csv", header=True)
 
-# Department Certification Assignments Table
-department_certification_assignments_df = spark.read.format(FILE_FORMAT).option("header", "true").load(f"{SOURCE_PATH}/department_certification_assignments_bronze.{FILE_FORMAT}/")
-department_certification_assignments_df.createOrReplaceTempView('dcb')
+# Read and process department_required_certifications_silver
+department_required_certifications_df = spark.read.format(FILE_FORMAT).option("header", "true").load(f"{SOURCE_PATH}/department_required_certifications_bronze.{FILE_FORMAT}/")
+department_required_certifications_df.createOrReplaceTempView("drcb")
 
-department_certification_assignments_silver = spark.sql("""
-    SELECT
-        TRIM(department_id) AS department_id,
-        TRIM(certification_id) AS certification_id,
-        TRIM(coordinator_id) AS coordinator_id,
-        CAST(compliance_deadline AS DATE) AS compliance_deadline
+department_required_certifications_silver_df = spark.sql("""
+    SELECT 
+        drcb.department_id, 
+        drcb.certification_id
     FROM (
-        SELECT *, ROW_NUMBER() OVER (PARTITION BY department_id, certification_id, coordinator_id ORDER BY department_id, certification_id, coordinator_id) as rn
-        FROM dcb
-    ) tmp
-    WHERE rn = 1
+        SELECT 
+            drcb.department_id, 
+            drcb.certification_id,
+            ROW_NUMBER() OVER (PARTITION BY drcb.department_id, drcb.certification_id ORDER BY drcb.department_id) as row_num
+        FROM drcb
+        JOIN departments_silver ds ON drcb.department_id = ds.department_id
+        JOIN certifications_silver cs ON drcb.certification_id = cs.certification_id
+    ) WHERE row_num = 1
 """)
 
-department_certification_assignments_silver.write.csv(TARGET_PATH + "/department_certification_assignments_silver.csv", header=True, mode="overwrite")
+department_required_certifications_silver_df.drop("row_num").write.mode("overwrite").csv(f"{TARGET_PATH}/department_required_certifications_silver.csv", header=True)
 
-# Certification Completions Table
-certification_completions_df = spark.read.format(FILE_FORMAT).option("header", "true").load(f"{SOURCE_PATH}/certification_completions_bronze.{FILE_FORMAT}/")
-certification_completions_df.createOrReplaceTempView('ccb')
+# Read and process employee_certification_status_silver
+employee_certification_events_df = spark.read.format(FILE_FORMAT).option("header", "true").load(f"{SOURCE_PATH}/employee_certification_events_bronze.{FILE_FORMAT}/")
+employee_certification_events_df.createOrReplaceTempView("eceb")
 
-certification_completions_silver = spark.sql("""
-    SELECT
-        TRIM(department_id) AS department_id,
-        TRIM(coordinator_id) AS coordinator_id,
-        TRIM(certification_id) AS certification_id,
-        completion_status,
-        CAST(completion_date AS DATE) AS completion_date
+employee_certification_status_silver_df = spark.sql("""
+    SELECT 
+        eceb.employee_id, 
+        eceb.certification_id, 
+        eceb.status, 
+        CAST(eceb.completion_date AS DATE) AS completion_date
     FROM (
-        SELECT *, ROW_NUMBER() OVER (PARTITION BY department_id, coordinator_id, certification_id ORDER BY completion_date DESC) as rn
-        FROM ccb
-    ) tmp
-    WHERE rn = 1
+        SELECT 
+            eceb.employee_id, 
+            eceb.certification_id, 
+            eceb.status, 
+            eceb.completion_date,
+            ROW_NUMBER() OVER (PARTITION BY eceb.employee_id, eceb.certification_id ORDER BY eceb.completion_date DESC) as row_num
+        FROM eceb
+        JOIN employees_silver es ON eceb.employee_id = es.employee_id
+        JOIN certifications_silver cs ON eceb.certification_id = cs.certification_id
+    ) WHERE row_num = 1
 """)
 
-certification_completions_silver.write.csv(TARGET_PATH + "/certification_completions_silver.csv", header=True, mode="overwrite")
+employee_certification_status_silver_df.drop("row_num").write.mode("overwrite").csv(f"{TARGET_PATH}/employee_certification_status_silver.csv", header=True)
 
-# Certification Tracking Table
-department_certification_assignments_silver.createOrReplaceTempView('dcas')
-certification_completions_silver.createOrReplaceTempView('ccs')
-departments_silver.createOrReplaceTempView('ds')
-coordinators_silver.createOrReplaceTempView('cos')
-certifications_silver.createOrReplaceTempView('cfs')
+# Read and process fiscal_calendar_silver
+fiscal_calendar_df = spark.read.format(FILE_FORMAT).option("header", "true").load(f"{SOURCE_PATH}/fiscal_calendar_bronze.{FILE_FORMAT}/")
+fiscal_calendar_df.createOrReplaceTempView("fcb")
 
-certification_tracking_silver = spark.sql("""
-    SELECT
-        dcas.department_id,
-        ds.department_name,
-        dcas.coordinator_id,
-        cos.coordinator_name,
-        dcas.certification_id,
-        cfs.certification_name,
-        ccs.completion_status,
-        ccs.completion_date,
-        dcas.compliance_deadline,
-        CASE WHEN ccs.completion_status <> 'COMPLETED' AND CURRENT_DATE > dcas.compliance_deadline THEN TRUE ELSE FALSE END AS flagged_for_incomplete
-    FROM dcas
-    LEFT JOIN ccs
-    ON dcas.department_id = ccs.department_id 
-    AND dcas.coordinator_id = ccs.coordinator_id 
-    AND dcas.certification_id = ccs.certification_id
-    INNER JOIN ds ON dcas.department_id = ds.department_id
-    INNER JOIN cos ON dcas.coordinator_id = cos.coordinator_id
-    INNER JOIN cfs ON dcas.certification_id = cfs.certification_id
+fiscal_calendar_silver_df = spark.sql("""
+    SELECT 
+        CAST(fcb.calendar_date AS DATE) AS calendar_date, 
+        fcb.fiscal_period
+    FROM (
+        SELECT 
+            fcb.calendar_date, 
+            fcb.fiscal_period,
+            ROW_NUMBER() OVER (PARTITION BY fcb.calendar_date ORDER BY fcb.calendar_date) as row_num
+        FROM fcb
+    ) WHERE row_num = 1
 """)
 
-certification_tracking_silver.write.csv(TARGET_PATH + "/certification_tracking_silver.csv", header=True, mode="overwrite")
-
-job.commit()
+fiscal_calendar_silver_df.drop("row_num").write.mode("overwrite").csv(f"{TARGET_PATH}/fiscal_calendar_silver.csv", header=True)
