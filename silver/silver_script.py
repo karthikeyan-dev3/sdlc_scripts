@@ -1,121 +1,90 @@
 from pyspark.sql import SparkSession
 from awsglue.context import GlueContext
-from pyspark.sql.functions import col, row_number, trim, upper, coalesce
-from pyspark.sql.window import Window
+from awsglue.utils import getResolvedOptions
+import sys
 
-# Initialize SparkSession and GlueContext
-spark = SparkSession.builder \
-    .appName("GlueApp") \
-    .getOrCreate()
+# Create GlueContext and SparkSession
+args = getResolvedOptions(sys.argv, ['JOB_NAME'])
+spark = SparkSession.builder.appName(args['JOB_NAME']).getOrCreate()
+glueContext = GlueContext(spark)
 
-glueContext = GlueContext(spark.sparkContext)
+# Define source and target paths
+SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
+TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
+FILE_FORMAT = "csv"
 
-# Read and process products_bronze
-products_df = spark.read \
-    .format("csv") \
+# Process department_information_silver
+department_information_df = spark.read \
+    .format(FILE_FORMAT) \
     .option("header", "true") \
-    .load("s3://sdlc-agent-bucket/engineering-agent/bronze/products_bronze.csv")
+    .load(f"{SOURCE_PATH}/department_information_bronze.{FILE_FORMAT}/")
 
-products_df.createOrReplaceTempView("products_bronze")
+department_information_df.createOrReplaceTempView("dib")
 
-products_silver_df = spark.sql("""
-SELECT product_id, 
-       TRIM(UPPER(product_name)) AS product_name, 
-       TRIM(UPPER(category)) AS category, 
-       TRIM(UPPER(brand)) AS brand
+department_information_silver_df = spark.sql("""
+SELECT
+    department_id,
+    department_name,
+    department_code,
+    upper(trim(department_code)) AS normalized_department_code,
+    business_unit
 FROM (
-    SELECT *, 
-           ROW_NUMBER() OVER(PARTITION BY product_id ORDER BY is_active DESC, ingestion_time DESC) AS rn
-    FROM products_bronze
-    WHERE COALESCE(TRIM(product_id), '') <> ''
+    SELECT *,
+           ROW_NUMBER() OVER (PARTITION BY department_id ORDER BY department_id DESC) as rn
+    FROM dib
 ) tmp
 WHERE rn = 1
 """)
 
-products_silver_df.write \
-    .mode("overwrite") \
+department_information_silver_df.write.mode("overwrite").csv(f"{TARGET_PATH}/department_information_silver.csv", header=True)
+
+# Process certification_records_silver
+certification_records_df = spark.read \
+    .format(FILE_FORMAT) \
     .option("header", "true") \
-    .csv("s3://sdlc-agent-bucket/engineering-agent/silver/products_silver.csv")
+    .load(f"{SOURCE_PATH}/certification_records_bronze.{FILE_FORMAT}/")
 
-# Read and process stores_bronze
-stores_df = spark.read \
-    .format("csv") \
-    .option("header", "true") \
-    .load("s3://sdlc-agent-bucket/engineering-agent/bronze/stores_bronze.csv")
+certification_records_df.createOrReplaceTempView("crb")
 
-stores_df.createOrReplaceTempView("stores_bronze")
-
-stores_silver_df = spark.sql("""
-SELECT store_id,
-       TRIM(UPPER(store_name)) AS store_name,
-       TRIM(UPPER(state)) AS region,
-       TRIM(UPPER(store_type)) AS store_type
+certification_records_silver_df = spark.sql("""
+SELECT
+    crb.employee_id,
+    crb.certification_id,
+    dis.department_id,
+    crb.certification_date,
+    crb.due_date
 FROM (
-    SELECT *, 
-           ROW_NUMBER() OVER(PARTITION BY store_id ORDER BY is_open DESC, updated_at DESC) AS rn
-    FROM stores_bronze
-    WHERE COALESCE(TRIM(store_id), '') <> ''
+    SELECT *,
+           ROW_NUMBER() OVER (PARTITION BY employee_id, certification_id, due_date 
+                              ORDER BY certification_date DESC) as rn
+    FROM crb
+    INNER JOIN department_information_silver dis ON crb.department_id = dis.department_id
 ) tmp
 WHERE rn = 1
 """)
 
-stores_silver_df.write \
-    .mode("overwrite") \
+certification_records_silver_df.write.mode("overwrite").csv(f"{TARGET_PATH}/certification_records_silver.csv", header=True)
+
+# Process risk_assessment_silver
+risk_assessment_df = spark.read \
+    .format(FILE_FORMAT) \
     .option("header", "true") \
-    .csv("s3://sdlc-agent-bucket/engineering-agent/silver/stores_silver.csv")
+    .load(f"{SOURCE_PATH}/risk_assessment_bronze.{FILE_FORMAT}/")
 
-# Read and process sales_transactions_bronze
-transactions_df = spark.read \
-    .format("csv") \
-    .option("header", "true") \
-    .load("s3://sdlc-agent-bucket/engineering-agent/bronze/sales_transactions_bronze.csv")
+risk_assessment_df.createOrReplaceTempView("rab")
 
-transactions_df.createOrReplaceTempView("sales_transactions_bronze")
-
-sales_transactions_silver_df = spark.sql("""
-SELECT transaction_id, 
-       CAST(transaction_time AS DATE) AS transaction_date, 
-       store_id,
-       product_id,
-       COALESCE(quantity, 0) AS quantity_sold,
-       COALESCE(sale_amount, 0.0) AS sales_amount
+risk_assessment_silver_df = spark.sql("""
+SELECT
+    dis.department_id,
+    rab.risk_criteria_met,
+    rab.assessment_date
 FROM (
-    SELECT *, 
-           ROW_NUMBER() OVER(PARTITION BY transaction_id ORDER BY recorded_at DESC) AS rn
-    FROM sales_transactions_bronze
-    WHERE COALESCE(TRIM(transaction_id), '') <> ''
+    SELECT *,
+           ROW_NUMBER() OVER (PARTITION BY department_id ORDER BY assessment_date DESC) as rn
+    FROM rab
+    INNER JOIN department_information_silver dis ON rab.department_id = dis.department_id
 ) tmp
-WHERE rn = 1 AND quantity_sold >= 0 AND sales_amount >= 0
+WHERE rn = 1
 """)
 
-sales_transactions_silver_df.write \
-    .mode("overwrite") \
-    .option("header", "true") \
-    .csv("s3://sdlc-agent-bucket/engineering-agent/silver/sales_transactions_silver.csv")
-
-# Read and join data for sales_integrated_silver
-sales_transactions_silver_df.createOrReplaceTempView("sales_transactions_silver")
-stores_silver_df.createOrReplaceTempView("stores_silver")
-products_silver_df.createOrReplaceTempView("products_silver")
-
-sales_integrated_silver_df = spark.sql("""
-SELECT sts.transaction_id,
-       sts.transaction_date,
-       sts.store_id,
-       ss.store_name,
-       ss.region,
-       sts.product_id,
-       ps.product_name,
-       ps.category,
-       ps.brand,
-       sts.quantity_sold,
-       sts.sales_amount
-FROM sales_transactions_silver sts
-LEFT JOIN stores_silver ss ON sts.store_id = ss.store_id
-LEFT JOIN products_silver ps ON sts.product_id = ps.product_id
-""")
-
-sales_integrated_silver_df.write \
-    .mode("overwrite") \
-    .option("header", "true") \
-    .csv("s3://sdlc-agent-bucket/engineering-agent/silver/sales_integrated_silver.csv")
+risk_assessment_silver_df.write.mode("overwrite").csv(f"{TARGET_PATH}/risk_assessment_silver.csv", header=True)
