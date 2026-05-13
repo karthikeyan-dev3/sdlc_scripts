@@ -1,177 +1,99 @@
-import sys
-from awsglue.context import GlueContext
-from awsglue.job import Job
-from awsglue.utils import getResolvedOptions
-from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
+from awsglue.context import GlueContext
+from awsglue.utils import getResolvedOptions
+import sys
 
-args = getResolvedOptions(sys.argv, ["JOB_NAME"])
+# Initialize Spark and Glue context
+args = getResolvedOptions(sys.argv, ['JOB_NAME'])
+spark = SparkSession.builder.appName(args['JOB_NAME']).getOrCreate()
+glueContext = GlueContext(spark.sparkContext)
 
+# Define source and target paths
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-sc = SparkContext()
-glueContext = GlueContext(sc)
-spark = glueContext.spark_session
-job = Job(glueContext)
-job.init(args["JOB_NAME"], args)
+# Read silver.sales_transactions_silver
+sales_transactions_df = spark.read \
+    .format(FILE_FORMAT) \
+    .option("header", "true") \
+    .load(f"{SOURCE_PATH}/sales_transactions_silver.{FILE_FORMAT}/")
+sales_transactions_df.createOrReplaceTempView("sts")
 
-spark.conf.set("spark.sql.legacy.timeParserPolicy", "LEGACY")
+# Read silver.products_silver
+products_df = spark.read \
+    .format(FILE_FORMAT) \
+    .option("header", "true") \
+    .load(f"{SOURCE_PATH}/products_silver.{FILE_FORMAT}/")
+products_df.createOrReplaceTempView("ps")
 
-# ---------------------------------------------------------------------
-# 1) Read source tables from S3 (Silver)
-# ---------------------------------------------------------------------
-patient_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/patient_silver.{FILE_FORMAT}/")
-)
+# Read silver.stores_silver
+stores_df = spark.read \
+    .format(FILE_FORMAT) \
+    .option("header", "true") \
+    .load(f"{SOURCE_PATH}/stores_silver.{FILE_FORMAT}/")
+stores_df.createOrReplaceTempView("ss")
 
-drug_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/drug_silver.{FILE_FORMAT}/")
-)
-
-site_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/site_silver.{FILE_FORMAT}/")
-)
-
-adverse_event_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/adverse_event_silver.{FILE_FORMAT}/")
-)
-
-aggregated_dataset_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/aggregated_dataset_silver.{FILE_FORMAT}/")
-)
-
-# ---------------------------------------------------------------------
-# 2) Create temp views
-# ---------------------------------------------------------------------
-patient_silver_df.createOrReplaceTempView("patient_silver")
-drug_silver_df.createOrReplaceTempView("drug_silver")
-site_silver_df.createOrReplaceTempView("site_silver")
-adverse_event_silver_df.createOrReplaceTempView("adverse_event_silver")
-aggregated_dataset_silver_df.createOrReplaceTempView("aggregated_dataset_silver")
-
-# ---------------------------------------------------------------------
-# 3) Transform + 4) Save outputs (each target table separately)
-# ---------------------------------------------------------------------
-
-# =========================
-# gold.patient_master (gpm)
-# =========================
-patient_master_df = spark.sql(
-    """
+# Transformation for gold_sales
+gold_sales_df = spark.sql("""
     SELECT
-        CAST(ps.patient_id AS STRING) AS patient_id,
-        CAST(ps.age AS INT) AS age,
-        CAST(ps.gender AS STRING) AS gender,
-        CAST(ps.enrollment_date AS DATE) AS enrollment_date
-    FROM patient_silver ps
-    """
-)
+        transaction_id,
+        transaction_date,
+        store_id,
+        product_id,
+        quantity_sold,
+        sales_amount,
+        price_per_unit
+    FROM sts
+""")
+gold_sales_df.write.mode('overwrite').csv(TARGET_PATH + "/gold_sales.csv", header=True)
 
-(
-    patient_master_df.coalesce(1)
-    .write.mode("overwrite")
-    .option("header", "true")
-    .csv(f"{TARGET_PATH}/patient_master.csv")
-)
-
-# ======================
-# gold.drug_master (gdm)
-# ======================
-drug_master_df = spark.sql(
-    """
+# Transformation for gold_product_details
+gold_product_details_df = spark.sql("""
     SELECT
-        CAST(ds.drug_id AS STRING) AS drug_id,
-        CAST(ds.drug_name AS STRING) AS drug_name,
-        CAST(ds.drug_category AS STRING) AS drug_category,
-        CAST(ds.manufacturer AS STRING) AS manufacturer
-    FROM drug_silver ds
-    """
-)
+        product_id,
+        product_name,
+        category,
+        brand
+    FROM ps
+""")
+gold_product_details_df.write.mode('overwrite').csv(TARGET_PATH + "/gold_product_details.csv", header=True)
 
-(
-    drug_master_df.coalesce(1)
-    .write.mode("overwrite")
-    .option("header", "true")
-    .csv(f"{TARGET_PATH}/drug_master.csv")
-)
-
-# ======================
-# gold.site_master (gsm)
-# ======================
-site_master_df = spark.sql(
-    """
+# Transformation for gold_store_details
+gold_store_details_df = spark.sql("""
     SELECT
-        CAST(ss.site_id AS STRING) AS site_id,
-        CAST(ss.site_location AS STRING) AS site_location
-    FROM site_silver ss
-    """
-)
+        store_id,
+        store_name,
+        store_region,
+        store_manager
+    FROM ss
+""")
+gold_store_details_df.write.mode('overwrite').csv(TARGET_PATH + "/gold_store_details.csv", header=True)
 
-(
-    site_master_df.coalesce(1)
-    .write.mode("overwrite")
-    .option("header", "true")
-    .csv(f"{TARGET_PATH}/site_master.csv")
-)
-
-# ==================================
-# gold.adverse_event_analytics (gaea)
-# ==================================
-adverse_event_analytics_df = spark.sql(
-    """
+# Transformation for gold_store_performance
+gold_store_performance_df = spark.sql("""
     SELECT
-        CAST(aes.ae_id AS STRING) AS adverse_event_id,
-        CAST(aes.patient_id AS STRING) AS patient_id,
-        CAST(aes.drug_id AS STRING) AS drug_id,
-        CAST(aes.site_id AS STRING) AS site_id,
-        CAST(aes.event_date AS DATE) AS event_date,
-        CAST(aes.event_type AS STRING) AS event_type,
-        CAST(aes.severity AS STRING) AS severity
-    FROM adverse_event_silver aes
-    LEFT JOIN patient_silver ps
-        ON aes.patient_id = ps.patient_id
-    LEFT JOIN drug_silver ds
-        ON aes.drug_id = ds.drug_id
-    LEFT JOIN site_silver ss
-        ON aes.site_id = ss.site_id
-    """
-)
+        sts.store_id,
+        sts.transaction_date AS date,
+        SUM(sts.sales_amount) AS total_sales,
+        COUNT(DISTINCT sts.transaction_id) AS total_transactions,
+        SUM(sts.sales_amount) / COUNT(DISTINCT sts.transaction_id) AS average_transaction_value
+    FROM sts
+    INNER JOIN ss ON sts.store_id = ss.store_id
+    GROUP BY sts.store_id, sts.transaction_date
+""")
+gold_store_performance_df.write.mode('overwrite').csv(TARGET_PATH + "/gold_store_performance.csv", header=True)
 
-(
-    adverse_event_analytics_df.coalesce(1)
-    .write.mode("overwrite")
-    .option("header", "true")
-    .csv(f"{TARGET_PATH}/adverse_event_analytics.csv")
-)
-
-# =================================
-# gold.aggregated_datasets (gad)
-# =================================
-aggregated_datasets_df = spark.sql(
-    """
+# Transformation for gold_product_performance
+gold_product_performance_df = spark.sql("""
     SELECT
-        CAST(ads.report_date AS DATE) AS report_date
-    FROM aggregated_dataset_silver ads
-    """
-)
-
-(
-    aggregated_datasets_df.coalesce(1)
-    .write.mode("overwrite")
-    .option("header", "true")
-    .csv(f"{TARGET_PATH}/aggregated_datasets.csv")
-)
-
-job.commit()
+        sts.product_id,
+        sts.transaction_date AS date,
+        SUM(sts.sales_amount) AS total_sales,
+        SUM(sts.quantity_sold) AS total_units_sold,
+        SUM(sts.sales_amount) / SUM(sts.quantity_sold) AS average_price
+    FROM sts
+    INNER JOIN ps ON sts.product_id = ps.product_id
+    GROUP BY sts.product_id, sts.transaction_date
+""")
+gold_product_performance_df.write.mode('overwrite').csv(TARGET_PATH + "/gold_product_performance.csv", header=True)
