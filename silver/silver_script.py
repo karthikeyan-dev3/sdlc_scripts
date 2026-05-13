@@ -1,115 +1,131 @@
-```python
-from pyspark.sql import SparkSession
+from pyspark.context import SparkContext
 from awsglue.context import GlueContext
-from pyspark.sql.functions import col, row_number, trim, upper, lower, concat
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, coalesce, row_number
 from pyspark.sql.window import Window
 
-# Initialize SparkSession and GlueContext
-spark = SparkSession.builder.appName("GlueJob").getOrCreate()
-glueContext = GlueContext(spark.sparkContext)
+# Initialize GlueContext and SparkSession
+glueContext = GlueContext(SparkContext.getOrCreate())
+spark = glueContext.spark_session
 
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 FILE_FORMAT = "csv"
 
-# Read source tables and create temp views
-
-# Sales Transactions Bronze
-sales_transactions_df = spark.read \
+# Read bronze_gps_logs_bronze
+bronze_gps_logs_bronze_df = spark.read \
     .format(FILE_FORMAT) \
     .option("header", "true") \
-    .load(f"{SOURCE_PATH}/sales_transactions_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/bronze_gps_logs_bronze.{FILE_FORMAT}/")
 
-sales_transactions_df.createOrReplaceTempView("stb")
+bronze_gps_logs_bronze_df.createOrReplaceTempView("glb")
 
-# Products Bronze
-products_df = spark.read \
+# Read bronze_fuel_transactions_bronze
+bronze_fuel_transactions_bronze_df = spark.read \
     .format(FILE_FORMAT) \
     .option("header", "true") \
-    .load(f"{SOURCE_PATH}/products_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/bronze_fuel_transactions_bronze.{FILE_FORMAT}/")
 
-products_df.createOrReplaceTempView("pb")
+bronze_fuel_transactions_bronze_df.createOrReplaceTempView("ftb")
 
-# Stores Bronze
-stores_df = spark.read \
+# Read bronze_maintenance_records_bronze
+bronze_maintenance_records_bronze_df = spark.read \
     .format(FILE_FORMAT) \
     .option("header", "true") \
-    .load(f"{SOURCE_PATH}/stores_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/bronze_maintenance_records_bronze.{FILE_FORMAT}/")
 
-stores_df.createOrReplaceTempView("sb")
+bronze_maintenance_records_bronze_df.createOrReplaceTempView("mrb")
 
-# Sales Transactions Silver Transformations
-sales_transactions_silver_query = """
-SELECT sales_id, product_id, store_id, transaction_date, quantity_sold, sales_amount
-FROM (
-    SELECT
-        stb.transaction_id AS sales_id,
-        stb.product_id AS product_id,
-        stb.store_id AS store_id,
-        CAST(stb.transaction_time AS date) AS transaction_date,
-        stb.quantity AS quantity_sold,
-        stb.sale_amount AS sales_amount,
-        ROW_NUMBER() OVER (PARTITION BY stb.transaction_id ORDER BY stb.transaction_time DESC) AS row_num
-    FROM stb
-    WHERE stb.quantity > 0 AND stb.sale_amount >= 0
-) filt
-WHERE row_num = 1
-AND sales_id IS NOT NULL
-AND product_id IS NOT NULL
-AND store_id IS NOT NULL
-AND transaction_date IS NOT NULL
-AND quantity_sold IS NOT NULL
-AND sales_amount IS NOT NULL
-"""
+# Vehicles Silver transformation
+vehicles_silver_df = spark.sql("""
+    SELECT 
+        COALESCE(glb.vehicle_id, ftb.vehicle_id, mrb.vehicle_id) as vehicle_id
+    FROM 
+        glb 
+        FULL OUTER JOIN ftb ON glb.vehicle_id = ftb.vehicle_id
+        FULL OUTER JOIN mrb ON COALESCE(glb.vehicle_id, ftb.vehicle_id) = mrb.vehicle_id
+    """)
+vehicles_silver_df.write.csv(f"{TARGET_PATH}/vehicles_silver.csv", header=True, mode="overwrite")
 
-sales_transactions_silver_df = spark.sql(sales_transactions_silver_query)
-sales_transactions_silver_df.write.csv(f"{TARGET_PATH}/sales_transactions_silver.csv", mode="overwrite", header=True)
+# GPS Logs Silver transformation
+gps_logs_silver = spark.sql("""
+    SELECT 
+        glb.log_id,
+        glb.vehicle_id,
+        glb.latitude,
+        glb.longitude,
+        glb.speed,
+        glb.log_timestamp
+    FROM 
+        (
+            SELECT *,
+                ROW_NUMBER() OVER (PARTITION BY vehicle_id, log_timestamp ORDER BY log_id) as row_num
+            FROM glb
+        ) subquery
+    WHERE row_num = 1
+    """)
+gps_logs_silver.write.csv(f"{TARGET_PATH}/gps_logs_silver.csv", header=True, mode="overwrite")
 
-# Products Silver Transformations
-products_silver_query = """
-SELECT product_id, TRIM(product_name) AS product_name, TRIM(category) AS category, TRIM(brand) AS brand, list_price
-FROM (
-    SELECT
-        pb.product_id AS product_id,
-        pb.product_name AS product_name,
-        pb.category AS category,
-        pb.brand AS brand,
-        pb.price AS list_price,
-        ROW_NUMBER() OVER (PARTITION BY pb.product_id ORDER BY pb.ingestion_time DESC) AS row_num
-    FROM pb
-    WHERE pb.is_active = 'true' AND pb.price >= 0
-) filt
-WHERE row_num = 1
-AND product_id IS NOT NULL
-AND product_name IS NOT NULL
-AND category IS NOT NULL
-AND brand IS NOT NULL
-AND list_price IS NOT NULL
-"""
+# Fuel Transactions Silver transformation
+fuel_transactions_silver = spark.sql("""
+    SELECT 
+        ftb.transaction_id,
+        ftb.vehicle_id,
+        ftb.fuel_quantity,
+        TRIM(UPPER(ftb.fuel_vendor)) as fuel_vendor,
+        ftb.transaction_date
+    FROM 
+        (
+            SELECT *,
+                ROW_NUMBER() OVER (PARTITION BY transaction_id ORDER BY vehicle_id) as row_num
+            FROM ftb
+            WHERE COALESCE(fuel_quantity, 0) >= 0
+        ) subquery
+    WHERE row_num = 1
+    """)
+fuel_transactions_silver.write.csv(f"{TARGET_PATH}/fuel_transactions_silver.csv", header=True, mode="overwrite")
 
-products_silver_df = spark.sql(products_silver_query)
-products_silver_df.write.csv(f"{TARGET_PATH}/products_silver.csv", mode="overwrite", header=True)
+# Maintenance Records Silver transformation
+maintenance_records_silver = spark.sql("""
+    SELECT 
+        mrb.maintenance_id,
+        mrb.vehicle_id,
+        mrb.maintenance_type,
+        mrb.maintenance_date,
+        mrb.maintenance_cost,
+        mrb.next_maintenance_due
+    FROM 
+        (
+            SELECT *,
+                ROW_NUMBER() OVER (PARTITION BY maintenance_id ORDER BY vehicle_id) as row_num
+            FROM mrb
+            WHERE COALESCE(maintenance_cost, 0) >= 0
+        ) subquery
+    WHERE row_num = 1
+    """)
+maintenance_records_silver.write.csv(f"{TARGET_PATH}/maintenance_records_silver.csv", header=True, mode="overwrite")
 
-# Stores Silver Transformations
-stores_silver_query = """
-SELECT store_id, TRIM(store_name) AS store_name, CONCAT(TRIM(city), ', ', TRIM(state)) AS location, TRIM(store_type) AS store_type
-FROM (
-    SELECT
-        sb.store_id AS store_id,
-        sb.store_name AS store_name,
-        sb.city AS city,
-        sb.state AS state,
-        sb.store_type AS store_type,
-        ROW_NUMBER() OVER (PARTITION BY sb.store_id ORDER BY sb.ingestion_time DESC) AS row_num
-    FROM sb
-) filt
-WHERE row_num = 1
-AND store_id IS NOT NULL
-AND store_name IS NOT NULL
-AND location IS NOT NULL
-AND store_type IS NOT NULL
-"""
-
-stores_silver_df = spark.sql(stores_silver_query)
-stores_silver_df.write.csv(f"{TARGET_PATH}/stores_silver.csv", mode="overwrite", header=True)
-```
+# Fleet Events Silver transformation
+fleet_events_silver = spark.sql("""
+    SELECT 
+        gls.log_id,
+        gls.vehicle_id,
+        gls.latitude,
+        gls.longitude,
+        gls.speed,
+        gls.log_timestamp,
+        fts.transaction_id,
+        fts.fuel_quantity,
+        fts.transaction_date,
+        fts.fuel_vendor,
+        mrs.maintenance_id,
+        mrs.maintenance_type,
+        mrs.maintenance_date,
+        mrs.maintenance_cost,
+        mrs.next_maintenance_due
+    FROM 
+        gps_logs_silver gls 
+        LEFT JOIN fuel_transactions_silver fts ON gls.vehicle_id = fts.vehicle_id AND DATE_TRUNC('hour', gls.log_timestamp) = DATE_TRUNC('hour', fts.transaction_date)
+        LEFT JOIN maintenance_records_silver mrs ON gls.vehicle_id = mrs.vehicle_id AND DATE(gls.log_timestamp) = DATE(mrs.maintenance_date)
+    """)
+fleet_events_silver.write.csv(f"{TARGET_PATH}/fleet_events_silver.csv", header=True, mode="overwrite")
