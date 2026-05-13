@@ -1,92 +1,227 @@
-from pyspark.context import SparkContext
+import sys
 from awsglue.context import GlueContext
+from awsglue.job import Job
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, count, current_timestamp, row_number
-from pyspark.sql.window import Window
 
-# Initialize Spark and Glue contexts
+args = getResolvedOptions(sys.argv, ["JOB_NAME"])
+
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args["JOB_NAME"], args)
 
-# Read source tables
-hr_employees_df = spark.read.format("csv").option("header", "true").load(f"s3://sdlc-agent-bucket/engineering-agent/bronze/hr_employees_raw.csv/")
-hr_departments_df = spark.read.format("csv").option("header", "true").load(f"s3://sdlc-agent-bucket/engineering-agent/bronze/hr_departments_raw.csv/")
-lms_certification_completions_df = spark.read.format("csv").option("header", "true").load(f"s3://sdlc-agent-bucket/engineering-agent/bronze/lms_certification_completions_raw.csv/")
-lms_certifications_df = spark.read.format("csv").option("header", "true").load(f"s3://sdlc-agent-bucket/engineering-agent/bronze/lms_certifications_raw.csv/")
+SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
+TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
+FILE_FORMAT = "csv"
 
-# Create temp views
-hr_employees_df.createOrReplaceTempView("hr_employees_raw")
-hr_departments_df.createOrReplaceTempView("hr_departments_raw")
-lms_certification_completions_df.createOrReplaceTempView("lms_certification_completions_raw")
-lms_certifications_df.createOrReplaceTempView("lms_certifications_raw")
+# ------------------------------------------------------------------------------
+# 1) READ SOURCE TABLES (BRONZE) + CREATE TEMP VIEWS
+# ------------------------------------------------------------------------------
 
-# Step 1: Department Employees Silver
-department_employees_query = """
-SELECT
-    er.employee_id,
-    er.department_id,
-    UPPER(TRIM(dr.department_name)) AS department_name
-FROM hr_employees_raw er
-LEFT JOIN hr_departments_raw dr ON er.department_id = dr.department_id
-"""
-department_employees_df = spark.sql(department_employees_query)
-department_employees_dedup_df = department_employees_df.withColumn(
-    "row_num",
-    row_number().over(Window.partitionBy("employee_id").orderBy(col("employee_id")))
-).filter("row_num = 1").drop("row_num")
+adverse_event_bronze_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/adverse_event_bronze.{FILE_FORMAT}/")
+)
+adverse_event_bronze_df.createOrReplaceTempView("adverse_event_bronze")
 
-department_employees_dedup_df.write.mode("overwrite").csv(f"s3://sdlc-agent-bucket/engineering-agent/silver/department_employees_silver.csv", header=True)
+patient_bronze_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/patient_bronze.{FILE_FORMAT}/")
+)
+patient_bronze_df.createOrReplaceTempView("patient_bronze")
 
-# Step 2: Certification Records Silver
-certification_records_query = """
-SELECT
-    ccr.employee_id,
-    ccr.certification_id,
-    UPPER(TRIM(lcr.certification_name)) AS certification_name,
-    ccr.completion_date
-FROM lms_certification_completions_raw ccr
-LEFT JOIN lms_certifications_raw lcr ON ccr.certification_id = lcr.certification_id
-"""
-certification_records_df = spark.sql(certification_records_query)
-certification_records_dedup_df = certification_records_df.withColumn(
-    "row_num",
-    row_number().over(Window.partitionBy("employee_id", "certification_id").orderBy(col("completion_date").desc()))
-).filter("row_num = 1").drop("row_num")
+drug_bronze_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/drug_bronze.{FILE_FORMAT}/")
+)
+drug_bronze_df.createOrReplaceTempView("drug_bronze")
 
-certification_records_dedup_df.write.mode("overwrite").csv(f"s3://sdlc-agent-bucket/engineering-agent/silver/certification_records_silver.csv", header=True)
+site_bronze_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/site_bronze.{FILE_FORMAT}/")
+)
+site_bronze_df.createOrReplaceTempView("site_bronze")
 
-# Step 3: Department Certification Summary Silver
-certification_records_dedup_df.createOrReplaceTempView("certification_records_silver")
-department_employees_dedup_df.createOrReplaceTempView("department_employees_silver")
+# ------------------------------------------------------------------------------
+# 2) adverse_event_silver (DEDUP by ae_id using ROW_NUMBER)
+# ------------------------------------------------------------------------------
 
-department_certification_summary_query = """
-SELECT
-    des.department_id,
-    des.department_name,
-    COUNT(DISTINCT des.employee_id) AS total_employees,
-    COUNT(DISTINCT crs.employee_id) AS employees_certified_count
-FROM department_employees_silver des
-LEFT JOIN certification_records_silver crs ON des.employee_id = crs.employee_id
-GROUP BY des.department_id, des.department_name
-"""
-department_certification_summary_df = spark.sql(department_certification_summary_query)
+adverse_event_silver_df = spark.sql(
+    """
+    WITH ranked AS (
+        SELECT
+            CAST(TRIM(aeb.ae_id) AS STRING) AS ae_id,
+            CAST(TRIM(aeb.patient_id) AS STRING) AS patient_id,
+            CAST(TRIM(aeb.drug_id) AS STRING) AS drug_id,
+            CAST(TRIM(aeb.site_id) AS STRING) AS site_id,
+            CAST(TRIM(aeb.symptom) AS STRING) AS event_type,
+            DATE(aeb.report_date) AS event_date,
+            CAST(TRIM(aeb.severity) AS STRING) AS severity,
+            ROW_NUMBER() OVER (
+                PARTITION BY TRIM(aeb.ae_id)
+                ORDER BY TRIM(aeb.ae_id)
+            ) AS rn
+        FROM adverse_event_bronze aeb
+    )
+    SELECT
+        ae_id,
+        patient_id,
+        drug_id,
+        site_id,
+        event_type,
+        event_date,
+        severity
+    FROM ranked
+    WHERE rn = 1
+    """
+)
+adverse_event_silver_df.createOrReplaceTempView("adverse_event_silver")
 
-department_certification_summary_df.write.mode("overwrite").csv(f"s3://sdlc-agent-bucket/engineering-agent/silver/department_certification_summary_silver.csv", header=True)
+(
+    adverse_event_silver_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/adverse_event_silver.csv")
+)
 
-# Step 4: Department Compliance Status Silver
-department_certification_summary_df.createOrReplaceTempView("department_certification_summary_silver")
+# ------------------------------------------------------------------------------
+# 3) patient_silver (DEDUP by patient_id using ROW_NUMBER)
+# ------------------------------------------------------------------------------
 
-department_compliance_status_query = """
-SELECT
-    dcss.department_id,
-    CASE
-        WHEN dcss.employees_certified_count >= dcss.total_employees THEN 'COMPLIANT'
-        ELSE 'NON_COMPLIANT'
-    END AS compliance_status,
-    CURRENT_TIMESTAMP AS last_report_update
-FROM department_certification_summary_silver dcss
-"""
-department_compliance_status_df = spark.sql(department_compliance_status_query)
+patient_silver_df = spark.sql(
+    """
+    WITH ranked AS (
+        SELECT
+            CAST(TRIM(pb.patient_id) AS STRING) AS patient_id,
+            CAST(pb.age AS INT) AS age,
+            CAST(TRIM(pb.gender) AS STRING) AS gender,
+            DATE(pb.enrollment_date) AS enrollment_date,
+            ROW_NUMBER() OVER (
+                PARTITION BY TRIM(pb.patient_id)
+                ORDER BY TRIM(pb.patient_id)
+            ) AS rn
+        FROM patient_bronze pb
+    )
+    SELECT
+        patient_id,
+        age,
+        gender,
+        enrollment_date
+    FROM ranked
+    WHERE rn = 1
+    """
+)
+patient_silver_df.createOrReplaceTempView("patient_silver")
 
-department_compliance_status_df.write.mode("overwrite").csv(f"s3://sdlc-agent-bucket/engineering-agent/silver/department_compliance_status_silver.csv", header=True)
+(
+    patient_silver_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/patient_silver.csv")
+)
+
+# ------------------------------------------------------------------------------
+# 4) drug_silver (DEDUP by drug_id using ROW_NUMBER)
+# ------------------------------------------------------------------------------
+
+drug_silver_df = spark.sql(
+    """
+    WITH ranked AS (
+        SELECT
+            CAST(TRIM(db.drug_id) AS STRING) AS drug_id,
+            CAST(TRIM(db.drug_name) AS STRING) AS drug_name,
+            CAST(TRIM(db.drug_category) AS STRING) AS drug_category,
+            CAST(TRIM(db.manufacturer) AS STRING) AS manufacturer,
+            ROW_NUMBER() OVER (
+                PARTITION BY TRIM(db.drug_id)
+                ORDER BY TRIM(db.drug_id)
+            ) AS rn
+        FROM drug_bronze db
+    )
+    SELECT
+        drug_id,
+        drug_name,
+        drug_category,
+        manufacturer
+    FROM ranked
+    WHERE rn = 1
+    """
+)
+drug_silver_df.createOrReplaceTempView("drug_silver")
+
+(
+    drug_silver_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/drug_silver.csv")
+)
+
+# ------------------------------------------------------------------------------
+# 5) site_silver (DEDUP by site_id using ROW_NUMBER)
+# ------------------------------------------------------------------------------
+
+site_silver_df = spark.sql(
+    """
+    WITH ranked AS (
+        SELECT
+            CAST(TRIM(sb.site_id) AS STRING) AS site_id,
+            CAST(TRIM(sb.city) AS STRING) AS site_location,
+            ROW_NUMBER() OVER (
+                PARTITION BY TRIM(sb.site_id)
+                ORDER BY TRIM(sb.site_id)
+            ) AS rn
+        FROM site_bronze sb
+    )
+    SELECT
+        site_id,
+        site_location
+    FROM ranked
+    WHERE rn = 1
+    """
+)
+site_silver_df.createOrReplaceTempView("site_silver")
+
+(
+    site_silver_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/site_silver.csv")
+)
+
+# ------------------------------------------------------------------------------
+# 6) aggregated_dataset_silver (report_date = aes.event_date)
+# ------------------------------------------------------------------------------
+
+aggregated_dataset_silver_df = spark.sql(
+    """
+    SELECT
+        DATE(aes.event_date) AS report_date
+    FROM adverse_event_silver aes
+    LEFT JOIN patient_silver ps
+        ON aes.patient_id = ps.patient_id
+    LEFT JOIN drug_silver ds
+        ON aes.drug_id = ds.drug_id
+    """
+)
+aggregated_dataset_silver_df.createOrReplaceTempView("aggregated_dataset_silver")
+
+(
+    aggregated_dataset_silver_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/aggregated_dataset_silver.csv")
+)
+
+job.commit()
