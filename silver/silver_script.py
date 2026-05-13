@@ -1,232 +1,144 @@
-import sys
 from awsglue.context import GlueContext
-from awsglue.job import Job
-from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
+from pyspark.sql.functions import row_number, col, isnull, expr
+from pyspark.sql.window import Window
 
-args = getResolvedOptions(sys.argv, ["JOB_NAME"])
-
-sc = SparkContext()
+sc = SparkContext.getOrCreate()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
-job = Job(glueContext)
-job.init(args["JOB_NAME"], args)
 
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 FILE_FORMAT = "csv"
 
-# ------------------------------------------------------------------------------------
-# 1) Read source tables from S3
-# ------------------------------------------------------------------------------------
-products_bronze_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/products_bronze.{FILE_FORMAT}/")
-)
-products_bronze_df.createOrReplaceTempView("products_bronze")
+# Load smart_meter_readings_bronze
+smart_meter_readings_bronze_df = spark.read\
+    .format(FILE_FORMAT)\
+    .option("header", "true")\
+    .load(f"{SOURCE_PATH}/smart_meter_readings_bronze.{FILE_FORMAT}/")
 
-stores_bronze_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/stores_bronze.{FILE_FORMAT}/")
-)
-stores_bronze_df.createOrReplaceTempView("stores_bronze")
+# Create a temporary view for smart_meter_readings_bronze
+smart_meter_readings_bronze_df.createOrReplaceTempView("smart_meter_readings_bronze")
 
-sales_transactions_bronze_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/sales_transactions_bronze.{FILE_FORMAT}/")
-)
-sales_transactions_bronze_df.createOrReplaceTempView("sales_transactions_bronze")
-
-# ------------------------------------------------------------------------------------
-# 2) product_master_silver
-#    - Deduplicate on product_id
-#    - Standardize casing & trimming for product_name/category/brand
-#    - Enforce numeric types for price
-#    - Filter to active products (is_active = true)
-#    - Derived cost not available -> not included (no target column provided in UDT)
-# ------------------------------------------------------------------------------------
-product_master_silver_df = spark.sql(
-    """
-    WITH base AS (
-        SELECT
-            CAST(pb.product_id AS STRING) AS product_id,
-            TRIM(UPPER(pb.product_name)) AS product_name,
-            TRIM(UPPER(pb.category)) AS category,
-            TRIM(UPPER(pb.brand)) AS brand,
-            CAST(pb.price AS FLOAT) AS price,
-            CAST(pb.is_active AS BOOLEAN) AS is_active
-        FROM products_bronze pb
-        WHERE CAST(pb.is_active AS BOOLEAN) = TRUE
-    ),
-    dedup AS (
-        SELECT
-            *,
-            ROW_NUMBER() OVER (
-                PARTITION BY product_id
-                ORDER BY
-                    CASE WHEN product_name IS NOT NULL AND product_name <> '' THEN 1 ELSE 0 END DESC,
-                    CASE WHEN category IS NOT NULL AND category <> '' THEN 1 ELSE 0 END DESC,
-                    CASE WHEN brand IS NOT NULL AND brand <> '' THEN 1 ELSE 0 END DESC,
-                    CASE WHEN price IS NOT NULL THEN 1 ELSE 0 END DESC
-            ) AS rn
-        FROM base
-    )
-    SELECT
-        product_id,
-        product_name,
-        category,
-        brand,
-        price,
-        is_active
-    FROM dedup
+# Transform smart_meter_readings_silver
+smart_meter_readings_silver_df = spark.sql("""
+    SELECT 
+        meter_id,
+        CAST(timestamp AS timestamp) AS timestamp,
+        energy_consumed_kwh
+    FROM (
+        SELECT 
+            meter_id,
+            timestamp,
+            energy_consumed_kwh,
+            ROW_NUMBER() OVER (PARTITION BY meter_id, timestamp ORDER BY timestamp DESC) as rn
+        FROM smart_meter_readings_bronze
+        WHERE 
+            meter_id IS NOT NULL AND
+            timestamp IS NOT NULL AND
+            energy_consumed_kwh >= 0
+    ) smrb_filtered
     WHERE rn = 1
-    """
-)
+""")
 
-(
-    product_master_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/product_master_silver.csv")
-)
+# Write smart_meter_readings_silver to target
+smart_meter_readings_silver_df.coalesce(1).write.mode("overwrite").csv(f"{TARGET_PATH}/smart_meter_readings_silver.csv", header=True)
 
-product_master_silver_df.createOrReplaceTempView("product_master_silver")
+# Load outage_logs_bronze
+outage_logs_bronze_df = spark.read\
+    .format(FILE_FORMAT)\
+    .option("header", "true")\
+    .load(f"{SOURCE_PATH}/outage_logs_bronze.{FILE_FORMAT}/")
 
-# ------------------------------------------------------------------------------------
-# 3) store_master_silver
-#    - Deduplicate on store_id
-#    - Standardize trimming & casing for store_name/city/state
-#    - Derive location = CONCAT(city, ', ', state)
-#    - Rename open_date -> opening_date (cast to DATE)
-#    - Retain store_type
-# ------------------------------------------------------------------------------------
-store_master_silver_df = spark.sql(
-    """
-    WITH base AS (
-        SELECT
-            CAST(sb.store_id AS STRING) AS store_id,
-            TRIM(UPPER(sb.store_name)) AS store_name,
-            TRIM(UPPER(sb.city)) AS city,
-            TRIM(UPPER(sb.state)) AS state,
-            CAST(sb.store_type AS STRING) AS store_type,
-            CAST(sb.open_date AS DATE) AS opening_date,
-            CONCAT(TRIM(UPPER(sb.city)), ', ', TRIM(UPPER(sb.state))) AS location
-        FROM stores_bronze sb
-    ),
-    dedup AS (
-        SELECT
-            *,
-            ROW_NUMBER() OVER (
-                PARTITION BY store_id
-                ORDER BY
-                    CASE WHEN store_name IS NOT NULL AND store_name <> '' THEN 1 ELSE 0 END DESC,
-                    CASE WHEN city IS NOT NULL AND city <> '' THEN 1 ELSE 0 END DESC,
-                    CASE WHEN state IS NOT NULL AND state <> '' THEN 1 ELSE 0 END DESC,
-                    CASE WHEN store_type IS NOT NULL AND store_type <> '' THEN 1 ELSE 0 END DESC,
-                    CASE WHEN opening_date IS NOT NULL THEN 1 ELSE 0 END DESC
-            ) AS rn
-        FROM base
-    )
-    SELECT
-        store_id,
-        store_name,
-        city,
-        state,
-        store_type,
-        opening_date,
-        location
-    FROM dedup
+# Create a temporary view for outage_logs_bronze
+outage_logs_bronze_df.createOrReplaceTempView("outage_logs_bronze")
+
+# Transform outage_event_details_silver
+outage_event_details_silver_df = spark.sql("""
+    SELECT 
+        outage_id,
+        UPPER(TRIM(region)) AS region,
+        CAST(start_time AS timestamp) AS start_time,
+        CAST(end_time AS timestamp) AS end_time,
+        COALESCE(duration, UNIX_TIMESTAMP(end_time) - UNIX_TIMESTAMP(start_time)) AS duration
+    FROM (
+        SELECT 
+            outage_id,
+            region,
+            start_time,
+            end_time,
+            duration,
+            ROW_NUMBER() OVER (PARTITION BY outage_id ORDER BY start_time DESC) as rn
+        FROM outage_logs_bronze
+        WHERE 
+            outage_id IS NOT NULL AND
+            region IS NOT NULL AND
+            start_time IS NOT NULL AND
+            end_time IS NOT NULL AND
+            start_time <= end_time
+    ) olb_filtered
     WHERE rn = 1
-    """
-)
+""")
 
-(
-    store_master_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/store_master_silver.csv")
-)
+# Write outage_event_details_silver to target
+outage_event_details_silver_df.coalesce(1).write.mode("overwrite").csv(f"{TARGET_PATH}/outage_event_details_silver.csv", header=True)
 
-store_master_silver_df.createOrReplaceTempView("store_master_silver")
+# Load grid_reliability_reports_bronze
+grid_reliability_reports_bronze_df = spark.read\
+    .format(FILE_FORMAT)\
+    .option("header", "true")\
+    .load(f"{SOURCE_PATH}/grid_reliability_reports_bronze.{FILE_FORMAT}/")
 
-# ------------------------------------------------------------------------------------
-# 4) sales_transactions_silver
-#    - Deduplicate on transaction_id
-#    - transaction_date = CAST(transaction_time AS DATE)
-#    - quantity_sold = quantity
-#    - total_sales_amount = sale_amount
-#    - discount_amount = 0.0
-#    - net_sales_amount = sale_amount - 0.0
-#    - Enforce non-negative quantity and amounts
-#    - Ensure referential integrity: keep records with valid product_id/store_id
-# ------------------------------------------------------------------------------------
-sales_transactions_silver_df = spark.sql(
-    """
-    WITH joined AS (
-        SELECT
-            CAST(stb.transaction_id AS STRING) AS transaction_id,
-            CAST(stb.transaction_time AS DATE) AS transaction_date,
-            CAST(stb.product_id AS STRING) AS product_id,
-            CAST(stb.store_id AS STRING) AS store_id,
-            CAST(stb.quantity AS INT) AS quantity_sold,
-            CAST(stb.sale_amount AS DOUBLE) AS total_sales_amount,
-            CAST(0.0 AS DOUBLE) AS discount_amount,
-            CAST(CAST(stb.sale_amount AS DOUBLE) - 0.0 AS DOUBLE) AS net_sales_amount
-        FROM sales_transactions_bronze stb
-        LEFT JOIN product_master_silver pms
-            ON CAST(stb.product_id AS STRING) = pms.product_id
-        LEFT JOIN store_master_silver sms
-            ON CAST(stb.store_id AS STRING) = sms.store_id
-        WHERE pms.product_id IS NOT NULL
-          AND sms.store_id IS NOT NULL
-    ),
-    validated AS (
-        SELECT
-            *
-        FROM joined
-        WHERE COALESCE(quantity_sold, 0) >= 0
-          AND COALESCE(total_sales_amount, 0.0) >= 0.0
-          AND COALESCE(discount_amount, 0.0) >= 0.0
-          AND COALESCE(net_sales_amount, 0.0) >= 0.0
-    ),
-    dedup AS (
-        SELECT
-            *,
-            ROW_NUMBER() OVER (
-                PARTITION BY transaction_id
-                ORDER BY
-                    CASE WHEN transaction_date IS NOT NULL THEN 1 ELSE 0 END DESC,
-                    CASE WHEN total_sales_amount IS NOT NULL THEN 1 ELSE 0 END DESC,
-                    CASE WHEN net_sales_amount IS NOT NULL THEN 1 ELSE 0 END DESC
-            ) AS rn
-        FROM validated
-    )
-    SELECT
-        transaction_id,
-        transaction_date,
-        product_id,
-        store_id,
-        quantity_sold,
-        total_sales_amount,
-        discount_amount,
-        net_sales_amount
-    FROM dedup
+# Create a temporary view for grid_reliability_reports_bronze
+grid_reliability_reports_bronze_df.createOrReplaceTempView("grid_reliability_reports_bronze")
+
+# Transform grid_reliability_analysis_silver
+grid_reliability_analysis_silver_df = spark.sql("""
+    SELECT 
+        grb.report_date,
+        grb.peak_demand,
+        COALESCE(grb.outage_zones_high_risk, oeds.region) AS outage_zones_high_risk,
+        grb.report_generation_time
+    FROM grid_reliability_reports_bronze grb
+    LEFT JOIN outage_event_details_silver oeds
+    ON CAST(oeds.start_time AS date) = grb.report_date
+    WHERE
+        grb.peak_demand >= 0
+""")
+
+# Write grid_reliability_analysis_silver to target
+grid_reliability_analysis_silver_df.coalesce(1).write.mode("overwrite").csv(f"{TARGET_PATH}/grid_reliability_analysis_silver.csv", header=True)
+
+# Load normalized_data_bronze
+normalized_data_bronze_df = spark.read\
+    .format(FILE_FORMAT)\
+    .option("header", "true")\
+    .load(f"{SOURCE_PATH}/normalized_data_bronze.{FILE_FORMAT}/")
+
+# Create a temporary view for normalized_data_bronze
+normalized_data_bronze_df.createOrReplaceTempView("normalized_data_bronze")
+
+# Transform data_normalization_results_silver
+data_normalization_results_silver_df = spark.sql("""
+    SELECT 
+        TRIM(data_source) AS data_source,
+        normalized_value,
+        standardized_format
+    FROM (
+        SELECT 
+            data_source,
+            normalized_value,
+            standardized_format,
+            ROW_NUMBER() OVER (PARTITION BY data_source, standardized_format ORDER BY timestamp DESC) as rn
+        FROM normalized_data_bronze
+        WHERE 
+            data_source IS NOT NULL AND
+            normalized_value IS NOT NULL AND
+            standardized_format IS NOT NULL
+    ) ndb_filtered
     WHERE rn = 1
-    """
-)
+""")
 
-(
-    sales_transactions_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/sales_transactions_silver.csv")
-)
-
-job.commit()
+# Write data_normalization_results_silver to target
+data_normalization_results_silver_df.coalesce(1).write.mode("overwrite").csv(f"{TARGET_PATH}/data_normalization_results_silver.csv", header=True)
