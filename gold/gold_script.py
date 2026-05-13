@@ -1,88 +1,90 @@
-```python
 from awsglue.context import GlueContext
-from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
+from pyspark.sql.functions import row_number
+from pyspark.sql.window import Window
 
-# Initialize GlueContext and SparkSession
-sc = SparkContext.getOrCreate()
+sc = SparkContext()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
 
-# Define source and target paths
-SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
-TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
-FILE_FORMAT = "csv"
-
-# Process for gold_sales
-sales_transactions_df = spark.read \
-    .format(FILE_FORMAT) \
+# Reading and processing for gold_gps_logs
+gps_logs_df = spark.read \
+    .format("csv") \
     .option("header", "true") \
-    .load(f"{SOURCE_PATH}/sales_transactions_silver.{FILE_FORMAT}/")
+    .load(f"s3://sdlc-agent-bucket/engineering-agent/silver/gps_logs_silver.csv/")
+gps_logs_df.createOrReplaceTempView("gls")
 
-sales_transactions_df.createOrReplaceTempView("sales_transactions_silver")
+gold_gps_logs_df = spark.sql("""
+SELECT 
+    gls.log_id,
+    gls.vehicle_id,
+    gls.latitude,
+    gls.longitude,
+    gls.speed,
+    gls.log_timestamp
+FROM gls
+""")
+gold_gps_logs_df.write.csv("s3://sdlc-agent-bucket/engineering-agent/gold/gold_gps_logs.csv", header=True, mode="overwrite")
 
-gold_sales_sql = """
-SELECT
-    CAST(sales_id AS STRING) AS sales_id,
-    CAST(product_id AS STRING) AS product_id,
-    CAST(store_id AS STRING) AS store_id,
-    CAST(transaction_date AS DATE) AS transaction_date,
-    CAST(quantity_sold AS INT) AS quantity_sold,
-    CAST(sales_amount AS DOUBLE) AS sales_amount
-FROM sales_transactions_silver
-"""
-
-gold_sales_df = spark.sql(gold_sales_sql)
-
-gold_sales_df.coalesce(1).write \
+# Reading and processing for gold_fuel_transactions
+fuel_transactions_df = spark.read \
+    .format("csv") \
     .option("header", "true") \
-    .csv(f"{TARGET_PATH}/gold_sales.csv", mode='overwrite')
+    .load(f"s3://sdlc-agent-bucket/engineering-agent/silver/fuel_transactions_silver.csv/")
+fuel_transactions_df.createOrReplaceTempView("fts")
 
-# Process for gold_product
-products_df = spark.read \
-    .format(FILE_FORMAT) \
+gold_fuel_transactions_df = spark.sql("""
+SELECT 
+    fts.transaction_id,
+    fts.vehicle_id,
+    fts.fuel_quantity,
+    fts.transaction_date,
+    fts.fuel_vendor
+FROM fts
+""")
+gold_fuel_transactions_df.write.csv("s3://sdlc-agent-bucket/engineering-agent/gold/gold_fuel_transactions.csv", header=True, mode="overwrite")
+
+# Reading and processing for gold_maintenance_records
+maintenance_records_df = spark.read \
+    .format("csv") \
     .option("header", "true") \
-    .load(f"{SOURCE_PATH}/products_silver.{FILE_FORMAT}/")
+    .load(f"s3://sdlc-agent-bucket/engineering-agent/silver/maintenance_records_silver.csv/")
+maintenance_records_df.createOrReplaceTempView("mrs")
 
-products_df.createOrReplaceTempView("products_silver")
+gold_maintenance_records_df = spark.sql("""
+SELECT 
+    mrs.maintenance_id,
+    mrs.vehicle_id,
+    mrs.maintenance_type,
+    mrs.maintenance_date,
+    mrs.maintenance_cost,
+    mrs.next_maintenance_due
+FROM mrs
+""")
+gold_maintenance_records_df.write.csv("s3://sdlc-agent-bucket/engineering-agent/gold/gold_maintenance_records.csv", header=True, mode="overwrite")
 
-gold_product_sql = """
-SELECT
-    CAST(product_id AS STRING) AS product_id,
-    TRIM(product_name) AS product_name,
-    TRIM(category) AS category,
-    TRIM(brand) AS brand,
-    CAST(list_price AS FLOAT) AS list_price
-FROM products_silver
-"""
-
-gold_product_df = spark.sql(gold_product_sql)
-
-gold_product_df.coalesce(1).write \
+# Reading and processing for gold_fleet_data
+fleet_events_df = spark.read \
+    .format("csv") \
     .option("header", "true") \
-    .csv(f"{TARGET_PATH}/gold_product.csv", mode='overwrite')
+    .load(f"s3://sdlc-agent-bucket/engineering-agent/silver/fleet_events_silver.csv/")
+fleet_events_df.createOrReplaceTempView("fes")
 
-# Process for gold_store
-stores_df = spark.read \
-    .format(FILE_FORMAT) \
+vehicles_df = spark.read \
+    .format("csv") \
     .option("header", "true") \
-    .load(f"{SOURCE_PATH}/stores_silver.{FILE_FORMAT}/")
+    .load(f"s3://sdlc-agent-bucket/engineering-agent/silver/vehicles_silver.csv/")
+vehicles_df.createOrReplaceTempView("vs")
 
-stores_df.createOrReplaceTempView("stores_silver")
-
-gold_store_sql = """
-SELECT
-    CAST(store_id AS STRING) AS store_id,
-    TRIM(store_name) AS store_name,
-    TRIM(location) AS location,
-    TRIM(store_type) AS store_type
-FROM stores_silver
-"""
-
-gold_store_df = spark.sql(gold_store_sql)
-
-gold_store_df.coalesce(1).write \
-    .option("header", "true") \
-    .csv(f"{TARGET_PATH}/gold_store.csv", mode='overwrite')
-```
+gold_fleet_data_df = spark.sql("""
+SELECT 
+    vs.vehicle_id,
+    fes.log_timestamp AS timestamp,
+    fes.latitude AS vehicle_location_latitude,
+    fes.longitude AS vehicle_location_longitude,
+    fes.fuel_quantity AS fuel_consumption
+FROM fes
+LEFT JOIN vs ON fes.vehicle_id = vs.vehicle_id
+""")
+gold_fleet_data_df.write.csv("s3://sdlc-agent-bucket/engineering-agent/gold/gold_fleet_data.csv", header=True, mode="overwrite")
