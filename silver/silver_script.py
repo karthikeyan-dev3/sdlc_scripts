@@ -1,295 +1,92 @@
-import sys
-from awsglue.context import GlueContext
-from awsglue.job import Job
-from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
+from awsglue.context import GlueContext
 from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, count, current_timestamp, row_number
+from pyspark.sql.window import Window
 
-args = getResolvedOptions(sys.argv, ["JOB_NAME"])
-
+# Initialize Spark and Glue contexts
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
-job = Job(glueContext)
-job.init(args["JOB_NAME"], args)
 
-SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
-TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
-FILE_FORMAT = "csv"
+# Read source tables
+hr_employees_df = spark.read.format("csv").option("header", "true").load(f"s3://sdlc-agent-bucket/engineering-agent/bronze/hr_employees_raw.csv/")
+hr_departments_df = spark.read.format("csv").option("header", "true").load(f"s3://sdlc-agent-bucket/engineering-agent/bronze/hr_departments_raw.csv/")
+lms_certification_completions_df = spark.read.format("csv").option("header", "true").load(f"s3://sdlc-agent-bucket/engineering-agent/bronze/lms_certification_completions_raw.csv/")
+lms_certifications_df = spark.read.format("csv").option("header", "true").load(f"s3://sdlc-agent-bucket/engineering-agent/bronze/lms_certifications_raw.csv/")
 
-# =============================================================================
-# 1) Read source tables (Bronze)
-# =============================================================================
-products_bronze_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/products_bronze.{FILE_FORMAT}/")
-)
-products_bronze_df.createOrReplaceTempView("products_bronze")
+# Create temp views
+hr_employees_df.createOrReplaceTempView("hr_employees_raw")
+hr_departments_df.createOrReplaceTempView("hr_departments_raw")
+lms_certification_completions_df.createOrReplaceTempView("lms_certification_completions_raw")
+lms_certifications_df.createOrReplaceTempView("lms_certifications_raw")
 
-stores_bronze_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/stores_bronze.{FILE_FORMAT}/")
-)
-stores_bronze_df.createOrReplaceTempView("stores_bronze")
-
-sales_transactions_bronze_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/sales_transactions_bronze.{FILE_FORMAT}/")
-)
-sales_transactions_bronze_df.createOrReplaceTempView("sales_transactions_bronze")
-
-# =============================================================================
-# 2) products_silver
-#    - Cleanses text fields (TRIM/UPPER where applicable)
-#    - Filters to active products (is_active = true)
-#    - De-duplicates by product_id keeping "latest/most complete" record
-#      (no audit columns in UDT; use completeness heuristic on key attributes)
-# =============================================================================
-products_silver_sql = """
-WITH base AS (
-  SELECT
-    TRIM(pb.product_id) AS product_id,
-    TRIM(pb.product_name) AS product_name,
-    UPPER(TRIM(pb.category)) AS category,
-    UPPER(TRIM(pb.brand)) AS brand
-  FROM products_bronze pb
-  WHERE pb.is_active = true
-),
-ranked AS (
-  SELECT
-    product_id,
-    product_name,
-    category,
-    brand,
-    ROW_NUMBER() OVER (
-      PARTITION BY product_id
-      ORDER BY
-        CASE WHEN product_name IS NOT NULL AND product_name <> '' THEN 1 ELSE 0 END DESC,
-        CASE WHEN category IS NOT NULL AND category <> '' THEN 1 ELSE 0 END DESC,
-        CASE WHEN brand IS NOT NULL AND brand <> '' THEN 1 ELSE 0 END DESC
-    ) AS rn
-  FROM base
-)
+# Step 1: Department Employees Silver
+department_employees_query = """
 SELECT
-  product_id,
-  product_name,
-  category,
-  brand
-FROM ranked
-WHERE rn = 1
+    er.employee_id,
+    er.department_id,
+    UPPER(TRIM(dr.department_name)) AS department_name
+FROM hr_employees_raw er
+LEFT JOIN hr_departments_raw dr ON er.department_id = dr.department_id
 """
-products_silver_df = spark.sql(products_silver_sql)
-products_silver_df.createOrReplaceTempView("products_silver")
+department_employees_df = spark.sql(department_employees_query)
+department_employees_dedup_df = department_employees_df.withColumn(
+    "row_num",
+    row_number().over(Window.partitionBy("employee_id").orderBy(col("employee_id")))
+).filter("row_num = 1").drop("row_num")
 
-(
-    products_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .option("header", "true")
-    .format("csv")
-    .save(f"{TARGET_PATH}/products_silver.csv")
-)
+department_employees_dedup_df.write.mode("overwrite").csv(f"s3://sdlc-agent-bucket/engineering-agent/silver/department_employees_silver.csv", header=True)
 
-# =============================================================================
-# 3) stores_silver
-#    - Standardizes location fields (TRIM/UPPER)
-#    - Derives store_location as 'city, state'
-#    - Sets store_manager to NULL
-#    - De-duplicates by store_id keeping "latest/most complete" record
-# =============================================================================
-stores_silver_sql = """
-WITH base AS (
-  SELECT
-    TRIM(sb.store_id) AS store_id,
-    (UPPER(TRIM(sb.city)) || ', ' || UPPER(TRIM(sb.state))) AS store_location,
-    CAST(NULL AS STRING) AS store_manager
-  FROM stores_bronze sb
-),
-ranked AS (
-  SELECT
-    store_id,
-    store_location,
-    store_manager,
-    ROW_NUMBER() OVER (
-      PARTITION BY store_id
-      ORDER BY
-        CASE WHEN store_location IS NOT NULL AND store_location <> '' THEN 1 ELSE 0 END DESC
-    ) AS rn
-  FROM base
-)
+# Step 2: Certification Records Silver
+certification_records_query = """
 SELECT
-  store_id,
-  store_location,
-  store_manager
-FROM ranked
-WHERE rn = 1
+    ccr.employee_id,
+    ccr.certification_id,
+    UPPER(TRIM(lcr.certification_name)) AS certification_name,
+    ccr.completion_date
+FROM lms_certification_completions_raw ccr
+LEFT JOIN lms_certifications_raw lcr ON ccr.certification_id = lcr.certification_id
 """
-stores_silver_df = spark.sql(stores_silver_sql)
-stores_silver_df.createOrReplaceTempView("stores_silver")
+certification_records_df = spark.sql(certification_records_query)
+certification_records_dedup_df = certification_records_df.withColumn(
+    "row_num",
+    row_number().over(Window.partitionBy("employee_id", "certification_id").orderBy(col("completion_date").desc()))
+).filter("row_num = 1").drop("row_num")
 
-(
-    stores_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .option("header", "true")
-    .format("csv")
-    .save(f"{TARGET_PATH}/stores_silver.csv")
-)
+certification_records_dedup_df.write.mode("overwrite").csv(f"s3://sdlc-agent-bucket/engineering-agent/silver/certification_records_silver.csv", header=True)
 
-# =============================================================================
-# 4) sales_transactions_silver
-#    - Enforces referential integrity (join to products_silver + stores_silver)
-#    - transaction_date = DATE(transaction_time)
-#    - sales_amount = sale_amount; units_sold = quantity
-#    - De-duplicates by transaction_id keeping latest transaction_time
-# =============================================================================
-sales_transactions_silver_sql = """
-WITH joined AS (
-  SELECT
-    TRIM(stb.transaction_id) AS transaction_id,
-    TRIM(stb.product_id) AS product_id,
-    TRIM(stb.store_id) AS store_id,
-    DATE(stb.transaction_time) AS transaction_date,
-    CAST(stb.sale_amount AS DOUBLE) AS sales_amount,
-    CAST(stb.quantity AS INT) AS units_sold,
-    stb.transaction_time AS transaction_time
-  FROM sales_transactions_bronze stb
-  INNER JOIN products_silver ps
-    ON TRIM(stb.product_id) = ps.product_id
-  INNER JOIN stores_silver ss
-    ON TRIM(stb.store_id) = ss.store_id
-),
-ranked AS (
-  SELECT
-    transaction_id,
-    product_id,
-    store_id,
-    transaction_date,
-    sales_amount,
-    units_sold,
-    ROW_NUMBER() OVER (
-      PARTITION BY transaction_id
-      ORDER BY transaction_time DESC
-    ) AS rn
-  FROM joined
-)
+# Step 3: Department Certification Summary Silver
+certification_records_dedup_df.createOrReplaceTempView("certification_records_silver")
+department_employees_dedup_df.createOrReplaceTempView("department_employees_silver")
+
+department_certification_summary_query = """
 SELECT
-  transaction_id,
-  product_id,
-  store_id,
-  transaction_date,
-  sales_amount,
-  units_sold
-FROM ranked
-WHERE rn = 1
+    des.department_id,
+    des.department_name,
+    COUNT(DISTINCT des.employee_id) AS total_employees,
+    COUNT(DISTINCT crs.employee_id) AS employees_certified_count
+FROM department_employees_silver des
+LEFT JOIN certification_records_silver crs ON des.employee_id = crs.employee_id
+GROUP BY des.department_id, des.department_name
 """
-sales_transactions_silver_df = spark.sql(sales_transactions_silver_sql)
-sales_transactions_silver_df.createOrReplaceTempView("sales_transactions_silver")
+department_certification_summary_df = spark.sql(department_certification_summary_query)
 
-(
-    sales_transactions_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .option("header", "true")
-    .format("csv")
-    .save(f"{TARGET_PATH}/sales_transactions_silver.csv")
-)
+department_certification_summary_df.write.mode("overwrite").csv(f"s3://sdlc-agent-bucket/engineering-agent/silver/department_certification_summary_silver.csv", header=True)
 
-# =============================================================================
-# 5) cleaned_sales_silver
-#    - De-duplicates by transaction_id keeping latest transaction_time
-#    - Standardizes IDs (TRIM/UPPER)
-#    - cleaned_transaction_date = DATE(transaction_time)
-#    - Enforces non-negative cleaned_sales_amount and non-negative units
-#    - Outputs: transaction_id, cleaned_product_id, cleaned_store_id,
-#               cleaned_transaction_date, cleaned_sales_amount
-# =============================================================================
-cleaned_sales_silver_sql = """
-WITH base AS (
-  SELECT
-    TRIM(stb.transaction_id) AS transaction_id,
-    UPPER(TRIM(stb.product_id)) AS cleaned_product_id,
-    UPPER(TRIM(stb.store_id)) AS cleaned_store_id,
-    DATE(stb.transaction_time) AS cleaned_transaction_date,
-    CAST(stb.sale_amount AS DOUBLE) AS sale_amount,
-    CAST(stb.quantity AS INT) AS quantity,
-    stb.transaction_time AS transaction_time
-  FROM sales_transactions_bronze stb
-),
-filtered AS (
-  SELECT
-    transaction_id,
-    cleaned_product_id,
-    cleaned_store_id,
-    cleaned_transaction_date,
-    sale_amount,
-    quantity,
-    transaction_time
-  FROM base
-  WHERE CAST(sale_amount AS DOUBLE) >= 0
-    AND CAST(quantity AS INT) >= 0
-),
-ranked AS (
-  SELECT
-    transaction_id,
-    cleaned_product_id,
-    cleaned_store_id,
-    cleaned_transaction_date,
-    sale_amount,
-    ROW_NUMBER() OVER (
-      PARTITION BY transaction_id
-      ORDER BY transaction_time DESC
-    ) AS rn
-  FROM filtered
-)
+# Step 4: Department Compliance Status Silver
+department_certification_summary_df.createOrReplaceTempView("department_certification_summary_silver")
+
+department_compliance_status_query = """
 SELECT
-  transaction_id,
-  cleaned_product_id,
-  cleaned_store_id,
-  cleaned_transaction_date,
-  sale_amount AS cleaned_sales_amount
-FROM ranked
-WHERE rn = 1
+    dcss.department_id,
+    CASE
+        WHEN dcss.employees_certified_count >= dcss.total_employees THEN 'COMPLIANT'
+        ELSE 'NON_COMPLIANT'
+    END AS compliance_status,
+    CURRENT_TIMESTAMP AS last_report_update
+FROM department_certification_summary_silver dcss
 """
-cleaned_sales_silver_df = spark.sql(cleaned_sales_silver_sql)
-cleaned_sales_silver_df.createOrReplaceTempView("cleaned_sales_silver")
+department_compliance_status_df = spark.sql(department_compliance_status_query)
 
-(
-    cleaned_sales_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .option("header", "true")
-    .format("csv")
-    .save(f"{TARGET_PATH}/cleaned_sales_silver.csv")
-)
-
-# =============================================================================
-# 6) sales_aggregated_silver
-#    - Aggregates from sales_transactions_silver
-#    - Group by store_id, product_id, record_date = transaction_date
-# =============================================================================
-sales_aggregated_silver_sql = """
-SELECT
-  sts.store_id AS store_id,
-  sts.product_id AS product_id,
-  SUM(sts.sales_amount) AS total_sales_amount,
-  SUM(sts.units_sold) AS total_units_sold,
-  AVG(sts.sales_amount) AS average_sales_amount,
-  sts.transaction_date AS record_date
-FROM sales_transactions_silver sts
-GROUP BY
-  sts.store_id,
-  sts.product_id,
-  sts.transaction_date
-"""
-sales_aggregated_silver_df = spark.sql(sales_aggregated_silver_sql)
-sales_aggregated_silver_df.createOrReplaceTempView("sales_aggregated_silver")
-
-(
-    sales_aggregated_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .option("header", "true")
-    .format("csv")
-    .save(f"{TARGET_PATH}/sales_aggregated_silver.csv")
-)
-
-job.commit()
+department_compliance_status_df.write.mode("overwrite").csv(f"s3://sdlc-agent-bucket/engineering-agent/silver/department_compliance_status_silver.csv", header=True)
