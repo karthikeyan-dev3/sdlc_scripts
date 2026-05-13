@@ -13,206 +13,206 @@ metadata = {
     'tables': [
         {
             'target_schema': 'bronze',
-            'target_table': 'products_bronze',
-            'target_alias': 'pb',
-            'mapping_details': 'products_raw pr',
-            'description': 'Direct ingest of raw product master data from products_raw with no transformations, joins, or aggregations. Columns retained: product_id, product_name, category, brand, price, is_active.'
-        },
-        {
-            'target_schema': 'bronze',
             'target_table': 'sales_transactions_bronze',
             'target_alias': 'stb',
             'mapping_details': 'sales_transactions_raw str',
-            'description': 'Direct ingest of raw sales transaction data from sales_transactions_raw with no transformations, joins, or aggregations. Columns retained: transaction_id, store_id, product_id, quantity, sale_amount, transaction_time.'
+            'description': 'Bronze ingestion of raw sales transaction records at transaction-level grain with no transformations, joins, or aggregations. Columns sourced from sales_transactions_raw: transaction_id, store_id, product_id, quantity, sale_amount, transaction_time.'
+        },
+        {
+            'target_schema': 'bronze',
+            'target_table': 'products_bronze',
+            'target_alias': 'pb',
+            'mapping_details': 'products_raw pr',
+            'description': 'Bronze ingestion of raw product master data with no transformations, joins, or aggregations. Columns sourced from products_raw: product_id, product_name, category, brand, price, is_active.'
         },
         {
             'target_schema': 'bronze',
             'target_table': 'stores_bronze',
             'target_alias': 'sb',
             'mapping_details': 'stores_raw sr',
-            'description': 'Direct ingest of raw store reference data from stores_raw with no transformations, joins, or aggregations. Columns retained: store_id, store_name, city, state, store_type, open_date.'
+            'description': 'Bronze ingestion of raw store master data with no transformations, joins, or aggregations. Columns sourced from stores_raw: store_id, store_name, city, state, store_type, open_date.'
         }
     ],
     'columns': [
         {
-            'source_column': "['pr.product_id']",
+            'source_column': "['stb.transaction_id']",
             'source_type': 'varchar(10)',
-            'source_nullable': 'not accepted',
-            'target_column': 'product_id',
-            'target_type': 'varchar(10)',
-            'target_nullable': 'not accepted',
-            'transformation': 'pr.product_id = pb.product_id',
-            'target_table': 'pr'
-        },
-        {
-            'source_column': "['pr.product_name']",
-            'source_type': 'varchar(255)',
-            'source_nullable': 'accepted',
-            'target_column': 'product_name',
-            'target_type': 'varchar(255)',
-            'target_nullable': 'accepted',
-            'transformation': 'pr.product_name = pb.product_name',
-            'target_table': 'pr'
-        },
-        {
-            'source_column': "['pr.category']",
-            'source_type': 'varchar(100)',
-            'source_nullable': 'accepted',
-            'target_column': 'category',
-            'target_type': 'varchar(100)',
-            'target_nullable': 'accepted',
-            'transformation': 'pr.category = pb.category',
-            'target_table': 'pr'
-        },
-        {
-            'source_column': "['pr.brand']",
-            'source_type': 'varchar(100)',
-            'source_nullable': 'accepted',
-            'target_column': 'brand',
-            'target_type': 'varchar(100)',
-            'target_nullable': 'accepted',
-            'transformation': 'pr.brand = pb.brand',
-            'target_table': 'pr'
-        },
-        {
-            'source_column': "['pr.price']",
-            'source_type': 'float',
-            'source_nullable': 'accepted',
-            'target_column': 'price',
-            'target_type': 'float',
-            'target_nullable': 'accepted',
-            'transformation': 'pr.price = pb.price',
-            'target_table': 'pr'
-        },
-        {
-            'source_column': "['pr.is_active']",
-            'source_type': 'boolean',
-            'source_nullable': 'accepted',
-            'target_column': 'is_active',
-            'target_type': 'boolean',
-            'target_nullable': 'accepted',
-            'transformation': 'pr.is_active = pb.is_active',
-            'target_table': 'pr'
-        },
-        {
-            'source_column': "['str.transaction_id']",
-            'source_type': 'varchar(10)',
-            'source_nullable': 'not accepted',
+            'source_nullable': 'not_null',
             'target_column': 'transaction_id',
             'target_type': 'varchar(10)',
-            'target_nullable': 'not accepted',
-            'transformation': 'str.transaction_id = stb.transaction_id',
-            'target_table': 'str'
+            'target_nullable': 'not_null',
+            'transformation': 'stb.transaction_id = str.transaction_id',
+            'target_table': 'stb'
         },
         {
-            'source_column': "['str.store_id']",
+            'source_column': "['stb.store_id']",
             'source_type': 'varchar(10)',
-            'source_nullable': 'not accepted',
+            'source_nullable': 'not_null',
             'target_column': 'store_id',
             'target_type': 'varchar(10)',
-            'target_nullable': 'not accepted',
-            'transformation': 'str.store_id = stb.store_id',
-            'target_table': 'str'
+            'target_nullable': 'not_null',
+            'transformation': 'stb.store_id = str.store_id',
+            'target_table': 'stb'
         },
         {
-            'source_column': "['str.product_id']",
+            'source_column': "['stb.product_id']",
             'source_type': 'varchar(10)',
-            'source_nullable': 'not accepted',
+            'source_nullable': 'not_null',
             'target_column': 'product_id',
             'target_type': 'varchar(10)',
-            'target_nullable': 'not accepted',
-            'transformation': 'str.product_id = stb.product_id',
-            'target_table': 'str'
+            'target_nullable': 'not_null',
+            'transformation': 'stb.product_id = str.product_id',
+            'target_table': 'stb'
         },
         {
-            'source_column': "['str.quantity']",
+            'source_column': "['stb.quantity']",
             'source_type': 'int',
-            'source_nullable': 'accepted',
+            'source_nullable': 'not_null',
             'target_column': 'quantity',
             'target_type': 'int',
-            'target_nullable': 'accepted',
-            'transformation': 'str.quantity = stb.quantity',
-            'target_table': 'str'
+            'target_nullable': 'not_null',
+            'transformation': 'stb.quantity = str.quantity',
+            'target_table': 'stb'
         },
         {
-            'source_column': "['str.sale_amount']",
+            'source_column': "['stb.sale_amount']",
             'source_type': 'double',
-            'source_nullable': 'accepted',
+            'source_nullable': 'not_null',
             'target_column': 'sale_amount',
             'target_type': 'double',
-            'target_nullable': 'accepted',
-            'transformation': 'str.sale_amount = stb.sale_amount',
-            'target_table': 'str'
+            'target_nullable': 'not_null',
+            'transformation': 'stb.sale_amount = str.sale_amount',
+            'target_table': 'stb'
         },
         {
-            'source_column': "['str.transaction_time']",
+            'source_column': "['stb.transaction_time']",
             'source_type': 'timestamp',
-            'source_nullable': 'accepted',
+            'source_nullable': 'not_null',
             'target_column': 'transaction_time',
             'target_type': 'timestamp',
-            'target_nullable': 'accepted',
-            'transformation': 'str.transaction_time = stb.transaction_time',
-            'target_table': 'str'
+            'target_nullable': 'not_null',
+            'transformation': 'stb.transaction_time = str.transaction_time',
+            'target_table': 'stb'
         },
         {
-            'source_column': "['sr.store_id']",
+            'source_column': "['pb.product_id']",
             'source_type': 'varchar(10)',
-            'source_nullable': 'not accepted',
+            'source_nullable': 'not_null',
+            'target_column': 'product_id',
+            'target_type': 'varchar(10)',
+            'target_nullable': 'not_null',
+            'transformation': 'pb.product_id = pr.product_id',
+            'target_table': 'pb'
+        },
+        {
+            'source_column': "['pb.product_name']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'not_null',
+            'target_column': 'product_name',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'not_null',
+            'transformation': 'pb.product_name = pr.product_name',
+            'target_table': 'pb'
+        },
+        {
+            'source_column': "['pb.category']",
+            'source_type': 'varchar(100)',
+            'source_nullable': 'not_null',
+            'target_column': 'category',
+            'target_type': 'varchar(100)',
+            'target_nullable': 'not_null',
+            'transformation': 'pb.category = pr.category',
+            'target_table': 'pb'
+        },
+        {
+            'source_column': "['pb.brand']",
+            'source_type': 'varchar(100)',
+            'source_nullable': 'not_null',
+            'target_column': 'brand',
+            'target_type': 'varchar(100)',
+            'target_nullable': 'not_null',
+            'transformation': 'pb.brand = pr.brand',
+            'target_table': 'pb'
+        },
+        {
+            'source_column': "['pb.price']",
+            'source_type': 'float',
+            'source_nullable': 'not_null',
+            'target_column': 'price',
+            'target_type': 'float',
+            'target_nullable': 'not_null',
+            'transformation': 'pb.price = pr.price',
+            'target_table': 'pb'
+        },
+        {
+            'source_column': "['pb.is_active']",
+            'source_type': 'boolean',
+            'source_nullable': 'not_null',
+            'target_column': 'is_active',
+            'target_type': 'boolean',
+            'target_nullable': 'not_null',
+            'transformation': 'pb.is_active = pr.is_active',
+            'target_table': 'pb'
+        },
+        {
+            'source_column': "['sb.store_id']",
+            'source_type': 'varchar(10)',
+            'source_nullable': 'not_null',
             'target_column': 'store_id',
             'target_type': 'varchar(10)',
-            'target_nullable': 'not accepted',
-            'transformation': 'sr.store_id = sb.store_id',
-            'target_table': 'sr'
+            'target_nullable': 'not_null',
+            'transformation': 'sb.store_id = sr.store_id',
+            'target_table': 'sb'
         },
         {
-            'source_column': "['sr.store_name']",
+            'source_column': "['sb.store_name']",
             'source_type': 'varchar(255)',
-            'source_nullable': 'accepted',
+            'source_nullable': 'not_null',
             'target_column': 'store_name',
             'target_type': 'varchar(255)',
-            'target_nullable': 'accepted',
-            'transformation': 'sr.store_name = sb.store_name',
-            'target_table': 'sr'
+            'target_nullable': 'not_null',
+            'transformation': 'sb.store_name = sr.store_name',
+            'target_table': 'sb'
         },
         {
-            'source_column': "['sr.city']",
+            'source_column': "['sb.city']",
             'source_type': 'varchar(100)',
-            'source_nullable': 'accepted',
+            'source_nullable': 'not_null',
             'target_column': 'city',
             'target_type': 'varchar(100)',
-            'target_nullable': 'accepted',
-            'transformation': 'sr.city = sb.city',
-            'target_table': 'sr'
+            'target_nullable': 'not_null',
+            'transformation': 'sb.city = sr.city',
+            'target_table': 'sb'
         },
         {
-            'source_column': "['sr.state']",
+            'source_column': "['sb.state']",
             'source_type': 'varchar(100)',
-            'source_nullable': 'accepted',
+            'source_nullable': 'not_null',
             'target_column': 'state',
             'target_type': 'varchar(100)',
-            'target_nullable': 'accepted',
-            'transformation': 'sr.state = sb.state',
-            'target_table': 'sr'
+            'target_nullable': 'not_null',
+            'transformation': 'sb.state = sr.state',
+            'target_table': 'sb'
         },
         {
-            'source_column': "['sr.store_type']",
+            'source_column': "['sb.store_type']",
             'source_type': 'varchar(50)',
-            'source_nullable': 'accepted',
+            'source_nullable': 'not_null',
             'target_column': 'store_type',
             'target_type': 'varchar(50)',
-            'target_nullable': 'accepted',
-            'transformation': 'sr.store_type = sb.store_type',
-            'target_table': 'sr'
+            'target_nullable': 'not_null',
+            'transformation': 'sb.store_type = sr.store_type',
+            'target_table': 'sb'
         },
         {
-            'source_column': "['sr.open_date']",
+            'source_column': "['sb.open_date']",
             'source_type': 'date',
-            'source_nullable': 'accepted',
+            'source_nullable': 'not_null',
             'target_column': 'open_date',
             'target_type': 'date',
-            'target_nullable': 'accepted',
-            'transformation': 'sr.open_date = sb.open_date',
-            'target_table': 'sr'
+            'target_nullable': 'not_null',
+            'transformation': 'sb.open_date = sr.open_date',
+            'target_table': 'sb'
         }
     ],
     'runtime_config': {
@@ -232,22 +232,22 @@ write_format = runtime_config['write_format']
 write_mode = runtime_config['write_mode']
 
 for table in metadata['tables']:
-    mapping_details = table['mapping_details'].split()
-    source_table = mapping_details[0]
-    source_alias = mapping_details[1]
+    mapping_details = table['mapping_details']
+    source_table = mapping_details.split()[0]
+    source_alias = mapping_details.split()[1]
     target_table = table['target_table']
     target_alias = table['target_alias']
 
     reader = spark.read.format(read_format)
     if read_format == 'csv':
-        reader = reader.option('header', 'true').option('inferSchema', 'true')
+        reader = reader.option("header", "true").option("inferSchema", "true")
 
-    df = reader.load(base_path + f"{source_table}.{read_format}")
+    df = reader.load(base_path + source_table + "." + read_format)
     df = df.alias(source_alias)
 
     transformations = []
     for col_meta in metadata['columns']:
-        if col_meta.get('target_table') == source_alias:
+        if col_meta.get('target_table') == target_alias:
             rhs = col_meta['transformation'].split('=', 1)[1].strip()
             target_column = col_meta['target_column']
             transformations.append(f"{rhs} as {target_column}")
@@ -256,8 +256,8 @@ for table in metadata['tables']:
 
     writer = df.write.mode(write_mode).format(write_format)
     if write_format == 'csv':
-        writer = writer.option('header', 'true')
+        writer = writer.option("header", "true")
 
-    writer.save(target_path + f"{target_table}.{write_format}")
+    writer.save(target_path + target_table + "." + write_format)
 
 job.commit()
