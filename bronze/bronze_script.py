@@ -251,7 +251,6 @@ for table_meta in metadata.get('tables', []):
         if col_meta.get('target_table') == source_alias:
             transformation = col_meta.get('transformation', '')
             rhs = transformation.split('=', 1)[1].strip() if '=' in transformation else transformation.strip()
-            rhs = rhs.replace(f"{target_alias}.", f"{source_alias}.")
             target_column = col_meta.get('target_column', '')
             transformations.append(f"{rhs} as {target_column}")
 
