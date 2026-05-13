@@ -1,160 +1,70 @@
 import sys
-from awsglue.utils import getResolvedOptions
-from awsglue.context import GlueContext
-from awsglue.job import Job
-from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
+from awsglue.context import GlueContext
+from awsglue.transforms import *
 
-args = getResolvedOptions(sys.argv, ["JOB_NAME"])
+# Initialize Glue Context and Spark Session
+glueContext = GlueContext(SparkSession.builder.getOrCreate())
+spark = glueContext.spark_session
 
+# Define source path and target path
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-sc = SparkContext()
-glueContext = GlueContext(sc)
-spark = glueContext.spark_session
-job = Job(glueContext)
-job.init(args["JOB_NAME"], args)
+# Read source tables from S3 and create temp views
+department_employees_df = spark.read.format(FILE_FORMAT).option("header", "true").load(f"{SOURCE_PATH}/department_employees_silver.{FILE_FORMAT}/")
+department_employees_df.createOrReplaceTempView("department_employees_silver")
 
-# ------------------------------------------------------------
-# 1) Read source tables from S3
-# ------------------------------------------------------------
-sales_transactions_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/sales_transactions_silver.{FILE_FORMAT}/")
-)
+certification_records_df = spark.read.format(FILE_FORMAT).option("header", "true").load(f"{SOURCE_PATH}/certification_records_silver.{FILE_FORMAT}/")
+certification_records_df.createOrReplaceTempView("certification_records_silver")
 
-products_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/products_silver.{FILE_FORMAT}/")
-)
+department_certification_summary_df = spark.read.format(FILE_FORMAT).option("header", "true").load(f"{SOURCE_PATH}/department_certification_summary_silver.{FILE_FORMAT}/")
+department_certification_summary_df.createOrReplaceTempView("department_certification_summary_silver")
 
-stores_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/stores_silver.{FILE_FORMAT}/")
-)
+department_compliance_status_df = spark.read.format(FILE_FORMAT).option("header", "true").load(f"{SOURCE_PATH}/department_compliance_status_silver.{FILE_FORMAT}/")
+department_compliance_status_df.createOrReplaceTempView("department_compliance_status_silver")
 
-sales_aggregated_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/sales_aggregated_silver.{FILE_FORMAT}/")
-)
+# Transformation for gold_certification_data
+gold_certification_data_query = """
+SELECT 
+    des.employee_id,
+    des.department_id,
+    des.department_name,
+    crs.certification_name,
+    crs.completion_date,
+    dcss.employees_certified_count
+FROM 
+    department_employees_silver des
+LEFT JOIN 
+    certification_records_silver crs 
+ON 
+    des.employee_id = crs.employee_id
+LEFT JOIN 
+    department_certification_summary_silver dcss 
+ON 
+    des.department_id = dcss.department_id
+"""
 
-cleaned_sales_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/cleaned_sales_silver.{FILE_FORMAT}/")
-)
+gold_certification_data_df = spark.sql(gold_certification_data_query)
+gold_certification_data_df.coalesce(1).write.mode("overwrite").option("header", "true").csv(f"{TARGET_PATH}/gold_certification_data.csv")
 
-# ------------------------------------------------------------
-# 2) Create temp views
-# ------------------------------------------------------------
-sales_transactions_silver_df.createOrReplaceTempView("sales_transactions_silver")
-products_silver_df.createOrReplaceTempView("products_silver")
-stores_silver_df.createOrReplaceTempView("stores_silver")
-sales_aggregated_silver_df.createOrReplaceTempView("sales_aggregated_silver")
-cleaned_sales_silver_df.createOrReplaceTempView("cleaned_sales_silver")
+# Transformation for gold_department_compliance_report
+gold_department_compliance_report_query = """
+SELECT 
+    dcs.department_id,
+    dcss.department_name,
+    dcss.total_employees,
+    dcss.employees_certified_count,
+    dcs.compliance_status,
+    dcs.last_report_update AS last_report_generated
+FROM 
+    department_compliance_status_silver dcs
+INNER JOIN 
+    department_certification_summary_silver dcss 
+ON 
+    dcs.department_id = dcss.department_id
+"""
 
-# ------------------------------------------------------------
-# 3) Transformations using Spark SQL
-# 4) Save output (single CSV file directly under TARGET_PATH)
-# ------------------------------------------------------------
-
-# ---- gold_sales_transactions ----
-gold_sales_transactions_df = spark.sql("""
-SELECT
-  CAST(sts.transaction_id AS STRING) AS transaction_id,
-  CAST(sts.product_id AS STRING) AS product_id,
-  CAST(sts.store_id AS STRING) AS store_id,
-  CAST(sts.transaction_date AS DATE) AS transaction_date,
-  CAST(sts.sales_amount AS DOUBLE) AS sales_amount,
-  CAST(sts.units_sold AS INT) AS units_sold
-FROM sales_transactions_silver sts
-""")
-
-(
-    gold_sales_transactions_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_sales_transactions.csv")
-)
-
-# ---- gold_product_master ----
-gold_product_master_df = spark.sql("""
-SELECT
-  CAST(ps.product_id AS STRING) AS product_id,
-  CAST(ps.product_name AS STRING) AS product_name,
-  CAST(ps.category AS STRING) AS category,
-  CAST(ps.brand AS STRING) AS brand
-FROM products_silver ps
-""")
-
-(
-    gold_product_master_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_product_master.csv")
-)
-
-# ---- gold_store_master ----
-gold_store_master_df = spark.sql("""
-SELECT
-  CAST(ss.store_id AS STRING) AS store_id,
-  CAST(ss.store_location AS STRING) AS store_location
-FROM stores_silver ss
-""")
-
-(
-    gold_store_master_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_store_master.csv")
-)
-
-# ---- gold_sales_aggregated ----
-gold_sales_aggregated_df = spark.sql("""
-SELECT
-  CAST(sas.store_id AS STRING) AS store_id,
-  CAST(sas.product_id AS STRING) AS product_id,
-  CAST(sas.total_sales_amount AS DOUBLE) AS total_sales_amount,
-  CAST(sas.total_units_sold AS INT) AS total_units_sold,
-  CAST(sas.average_sales_amount AS DOUBLE) AS average_sales_amount,
-  CAST(sas.record_date AS DATE) AS record_date
-FROM sales_aggregated_silver sas
-""")
-
-(
-    gold_sales_aggregated_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_sales_aggregated.csv")
-)
-
-# ---- gold_cleaned_sales ----
-gold_cleaned_sales_df = spark.sql("""
-SELECT
-  CAST(css.transaction_id AS STRING) AS transaction_id,
-  CAST(css.cleaned_product_id AS STRING) AS cleaned_product_id,
-  CAST(css.cleaned_store_id AS STRING) AS cleaned_store_id,
-  CAST(css.cleaned_transaction_date AS DATE) AS cleaned_transaction_date,
-  CAST(css.cleaned_sales_amount AS DOUBLE) AS cleaned_sales_amount
-FROM cleaned_sales_silver css
-""")
-
-(
-    gold_cleaned_sales_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_cleaned_sales.csv")
-)
-
-job.commit()
+gold_department_compliance_report_df = spark.sql(gold_department_compliance_report_query)
+gold_department_compliance_report_df.coalesce(1).write.mode("overwrite").option("header", "true").csv(f"{TARGET_PATH}/gold_department_compliance_report.csv")
