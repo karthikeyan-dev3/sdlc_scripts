@@ -1,106 +1,148 @@
 
-from pyspark.sql import SparkSession
+import sys
 from awsglue.context import GlueContext
+from awsglue.job import Job
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from pyspark.sql import SparkSession
 
-spark = SparkSession.builder \
-    .appName("AWS Glue PySpark Job") \
-    .getOrCreate()
+args = getResolvedOptions(sys.argv, ["JOB_NAME"])
 
-glueContext = GlueContext(spark.sparkContext)
+sc = SparkContext.getOrCreate()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args["JOB_NAME"], args)
 
-# Table: gold_sales_transactions
+SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
+TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
+FILE_FORMAT = "csv"
 
-df_sales_transactions = spark.read \
-    .format("csv") \
-    .option("header", "true") \
-    .load(f"s3://sdlc-agent-bucket/engineering-agent/silver/sales_transactions_silver.csv/")
+# -------------------------------------
+# Read Source Tables (Silver) + Temp Views
+# -------------------------------------
 
-df_sales_transactions.createOrReplaceTempView("sts")
+sts_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/sales_transactions_silver.{FILE_FORMAT}/")
+)
+sts_df.createOrReplaceTempView("sales_transactions_silver")
 
-gold_sales_transactions_query = """
-    SELECT
-        CAST(sts.transaction_id AS STRING) AS transaction_id,
-        CAST(sts.transaction_date AS DATE) AS transaction_date,
-        CAST(sts.product_id AS STRING) AS product_id,
-        CAST(sts.store_id AS STRING) AS store_id,
-        CAST(sts.quantity_sold AS INT) AS quantity_sold,
-        CAST(sts.sales_amount AS DOUBLE) AS sales_amount
-    FROM
-        sts
+spm_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/product_master_silver.{FILE_FORMAT}/")
+)
+spm_df.createOrReplaceTempView("product_master_silver")
+
+ssm_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/store_master_silver.{FILE_FORMAT}/")
+)
+ssm_df.createOrReplaceTempView("store_master_silver")
+
+sdsa_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/daily_sales_aggregated_silver.{FILE_FORMAT}/")
+)
+sdsa_df.createOrReplaceTempView("daily_sales_aggregated_silver")
+
+# -------------------------------------
+# Target: gold.sales_transactions
+# -------------------------------------
+
+sales_transactions_sql = """
+SELECT
+  CAST(sts.transaction_id AS STRING)      AS transaction_id,
+  CAST(sts.store_id AS STRING)            AS store_id,
+  CAST(sts.product_id AS STRING)          AS product_id,
+  DATE(sts.transaction_date)              AS transaction_date,
+  CAST(sts.quantity_sold AS INT)          AS quantity_sold,
+  CAST(sts.total_sales_amount AS DOUBLE)  AS total_sales_amount
+FROM sales_transactions_silver sts
 """
 
-gold_sales_transactions_df = spark.sql(gold_sales_transactions_query)
+gsts_df = spark.sql(sales_transactions_sql)
 
-gold_sales_transactions_df.write.mode("overwrite").csv("s3://sdlc-agent-bucket/engineering-agent/gold/gold_sales_transactions.csv", header=True)
+(
+    gsts_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/sales_transactions.csv")
+)
 
-# Table: gold_product_master
+# -------------------------------------
+# Target: gold.product_master
+# -------------------------------------
 
-df_product_master = spark.read \
-    .format("csv") \
-    .option("header", "true") \
-    .load(f"s3://sdlc-agent-bucket/engineering-agent/silver/product_master_silver.csv/")
-
-df_product_master.createOrReplaceTempView("pms")
-
-gold_product_master_query = """
-    SELECT
-        CAST(pms.product_id AS STRING) AS product_id,
-        TRIM(pms.product_name) AS product_name,
-        TRIM(pms.category) AS category,
-        TRIM(pms.brand) AS brand,
-        CAST(pms.price AS FLOAT) AS price
-    FROM
-        pms
+product_master_sql = """
+SELECT
+  CAST(spm.product_id AS STRING)     AS product_id,
+  CAST(spm.product_name AS STRING)   AS product_name,
+  CAST(spm.category AS STRING)       AS category,
+  CAST(spm.price AS DOUBLE)          AS price
+FROM product_master_silver spm
 """
 
-gold_product_master_df = spark.sql(gold_product_master_query)
+gpm_df = spark.sql(product_master_sql)
 
-gold_product_master_df.write.mode("overwrite").csv("s3://sdlc-agent-bucket/engineering-agent/gold/gold_product_master.csv", header=True)
+(
+    gpm_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/product_master.csv")
+)
 
-# Table: gold_store_master
+# -------------------------------------
+# Target: gold.store_master
+# -------------------------------------
 
-df_store_master = spark.read \
-    .format("csv") \
-    .option("header", "true") \
-    .load(f"s3://sdlc-agent-bucket/engineering-agent/silver/store_master_silver.csv/")
-
-df_store_master.createOrReplaceTempView("sms")
-
-gold_store_master_query = """
-    SELECT
-        CAST(sms.store_id AS STRING) AS store_id,
-        TRIM(sms.store_name) AS store_name,
-        TRIM(sms.location) AS location,
-        TRIM(sms.region) AS region
-    FROM
-        sms
+store_master_sql = """
+SELECT
+  CAST(ssm.store_id AS STRING)     AS store_id,
+  CAST(ssm.store_name AS STRING)   AS store_name,
+  CAST(ssm.region AS STRING)       AS region,
+  DATE(ssm.opening_date)           AS opening_date
+FROM store_master_silver ssm
 """
 
-gold_store_master_df = spark.sql(gold_store_master_query)
+gsm_df = spark.sql(store_master_sql)
 
-gold_store_master_df.write.mode("overwrite").csv("s3://sdlc-agent-bucket/engineering-agent/gold/gold_store_master.csv", header=True)
+(
+    gsm_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/store_master.csv")
+)
 
-# Table: gold_sales_aggregated
+# -------------------------------------
+# Target: gold.aggregated_sales
+# -------------------------------------
 
-df_sales_aggregated = spark.read \
-    .format("csv") \
-    .option("header", "true") \
-    .load(f"s3://sdlc-agent-bucket/engineering-agent/silver/sales_aggregated_daily_silver.csv/")
-
-df_sales_aggregated.createOrReplaceTempView("sads")
-
-gold_sales_aggregated_query = """
-    SELECT
-        CAST(sads.date AS DATE) AS date,
-        CAST(sads.product_id AS STRING) AS product_id,
-        CAST(sads.store_id AS STRING) AS store_id,
-        CAST(sads.total_quantity_sold AS INT) AS total_quantity_sold,
-        CAST(sads.total_sales_amount AS DOUBLE) AS total_sales_amount,
-        CAST(sads.average_price AS DOUBLE) AS average_price
-    FROM
-        sads
+aggregated_sales_sql = """
+SELECT
+  CAST(sdsa.store_id AS STRING)          AS store_id,
+  CAST(sdsa.product_id AS STRING)        AS product_id,
+  DATE(sdsa.transaction_date)            AS transaction_date,
+  CAST(sdsa.total_revenue AS DOUBLE)     AS total_revenue,
+  CAST(sdsa.units_sold AS INT)           AS units_sold
+FROM daily_sales_aggregated_silver sdsa
 """
 
-gold_sales_aggregated_df = spark.sql(gold_sales_aggregated_query)
+gas_df = spark.sql(aggregated_sales_sql)
 
-gold_sales_aggregated_df.write.mode("overwrite").csv("s3://sdlc-agent-bucket/engineering-agent/gold/gold_sales_aggregated.csv", header=True)
+(
+    gas_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/aggregated_sales.csv")
+)
+
+job.commit()
