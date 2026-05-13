@@ -1,112 +1,146 @@
+import sys
+from awsglue.context import GlueContext
+from awsglue.job import Job
+from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
-from awsglue.context import GlueContext
-from awsglue.utils import getResolvedOptions
-from pyspark.sql.functions import row_number
-from pyspark.sql.window import Window
 
-# Initialize Glue and Spark contexts
-glueContext = GlueContext(SparkContext.getOrCreate())
+args = getResolvedOptions(sys.argv, ["JOB_NAME"])
+
+sc = SparkContext()
+glueContext = GlueContext(sc)
 spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args["JOB_NAME"], args)
 
-# Define paths
-SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver"
-TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold"
+SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
+TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-# Read and process gold_energy_consumption
-smart_meter_readings_df = spark.read \
-    .format(FILE_FORMAT) \
-    .option("header", "true") \
-    .load(f"{SOURCE_PATH}/smart_meter_readings_silver.{FILE_FORMAT}/")
+# -------------------------------------
+# 1) Read source tables from S3
+# -------------------------------------
+sales_transactions_silver_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/sales_transactions_silver.{FILE_FORMAT}/")
+)
 
-smart_meter_readings_df.createOrReplaceTempView("smrs")
+products_silver_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/products_silver.{FILE_FORMAT}/")
+)
 
-gold_energy_consumption_df = spark.sql("""
+stores_silver_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/stores_silver.{FILE_FORMAT}/")
+)
+
+# -------------------------------------
+# 2) Create temp views
+# -------------------------------------
+sales_transactions_silver_df.createOrReplaceTempView("sales_transactions_silver")
+products_silver_df.createOrReplaceTempView("products_silver")
+stores_silver_df.createOrReplaceTempView("stores_silver")
+
+# -------------------------------------
+# Target: gold_sales_transactions
+# -------------------------------------
+gold_sales_transactions_df = spark.sql(
+    """
     SELECT
-        smrs.meter_id,
-        smrs.timestamp,
-        smrs.energy_consumed_kwh
-    FROM smrs
-""")
+        CAST(sts.transaction_id AS STRING)     AS transaction_id,
+        CAST(sts.product_id AS STRING)         AS product_id,
+        CAST(sts.store_id AS STRING)           AS store_id,
+        CAST(sts.quantity AS INT)              AS quantity,
+        CAST(sts.revenue AS DOUBLE)            AS revenue,
+        CAST(sts.transaction_date AS DATE)     AS transaction_date
+    FROM sales_transactions_silver sts
+    """
+)
 
-gold_energy_consumption_df.coalesce(1).write \
-    .mode('overwrite') \
-    .option("header", "true") \
-    .csv(f"{TARGET_PATH}/gold_energy_consumption.csv")
+(
+    gold_sales_transactions_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/gold_sales_transactions.csv")
+)
 
-# Read and process gold_outage_logs
-outage_event_details_df = spark.read \
-    .format(FILE_FORMAT) \
-    .option("header", "true") \
-    .load(f"{SOURCE_PATH}/outage_event_details_silver.{FILE_FORMAT}/")
-
-outage_event_details_df.createOrReplaceTempView("oeds")
-
-gold_outage_logs_df = spark.sql("""
+# -------------------------------------
+# Target: gold_product_master
+# -------------------------------------
+gold_product_master_df = spark.sql(
+    """
     SELECT
-        oeds.outage_id,
-        oeds.region,
-        oeds.start_time,
-        oeds.end_time,
-        oeds.duration
-    FROM oeds
-""")
+        CAST(ps.product_id AS STRING)      AS product_id,
+        CAST(ps.product_name AS STRING)    AS product_name,
+        CAST(ps.category AS STRING)        AS category,
+        CAST(ps.price AS FLOAT)            AS price
+    FROM products_silver ps
+    """
+)
 
-gold_outage_logs_df.coalesce(1).write \
-    .mode('overwrite') \
-    .option("header", "true") \
-    .csv(f"{TARGET_PATH}/gold_outage_logs.csv")
+(
+    gold_product_master_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/gold_product_master.csv")
+)
 
-# Read and process gold_grid_reliability_report
-grid_reliability_analysis_df = spark.read \
-    .format(FILE_FORMAT) \
-    .option("header", "true") \
-    .load(f"{SOURCE_PATH}/grid_reliability_analysis_silver.{FILE_FORMAT}/")
-
-grid_reliability_analysis_df.createOrReplaceTempView("gras")
-
-gold_grid_reliability_report_df = spark.sql("""
+# -------------------------------------
+# Target: gold_store_master
+# -------------------------------------
+gold_store_master_df = spark.sql(
+    """
     SELECT
-        gras.report_date,
-        gras.peak_demand,
-        gras.outage_zones_high_risk,
-        gras.report_generation_time
-    FROM (
-        SELECT *,
-               ROW_NUMBER() OVER (PARTITION BY report_date ORDER BY report_generation_time DESC) as rn
-        FROM gras
-    ) tmp
-    WHERE rn = 1
-""")
+        CAST(ss.store_id AS STRING)        AS store_id,
+        CAST(ss.store_name AS STRING)      AS store_name,
+        CAST(ss.location AS STRING)        AS location
+    FROM stores_silver ss
+    """
+)
 
-gold_grid_reliability_report_df.coalesce(1).write \
-    .mode('overwrite') \
-    .option("header", "true") \
-    .csv(f"{TARGET_PATH}/gold_grid_reliability_report.csv")
+(
+    gold_store_master_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/gold_store_master.csv")
+)
 
-# Read and process gold_normalized_data
-data_normalization_results_df = spark.read \
-    .format(FILE_FORMAT) \
-    .option("header", "true") \
-    .load(f"{SOURCE_PATH}/data_normalization_results_silver.{FILE_FORMAT}/")
-
-data_normalization_results_df.createOrReplaceTempView("dnrs")
-
-gold_normalized_data_df = spark.sql("""
+# -------------------------------------
+# Target: gold_aggregated_sales
+# -------------------------------------
+gold_aggregated_sales_df = spark.sql(
+    """
     SELECT
-        data_source,
-        normalized_value,
-        standardized_format
-    FROM (
-        SELECT *,
-               ROW_NUMBER() OVER (PARTITION BY data_source, standardized_format ORDER BY data_source) as rn
-        FROM dnrs
-    ) tmp
-    WHERE rn = 1
-""")
+        CAST(sts.transaction_date AS DATE)                 AS date,
+        CAST(SUM(sts.revenue) AS DOUBLE)                   AS total_revenue,
+        CAST(SUM(sts.quantity) AS INT)                     AS total_quantity,
+        CAST(SUM(sts.revenue) AS DOUBLE)                   AS category_revenue,
+        CAST(SUM(sts.revenue) AS DOUBLE)                   AS store_revenue
+    FROM sales_transactions_silver sts
+    INNER JOIN products_silver ps
+        ON sts.product_id = ps.product_id
+    INNER JOIN stores_silver ss
+        ON sts.store_id = ss.store_id
+    GROUP BY
+        sts.transaction_date,
+        ps.category,
+        ss.store_id
+    """
+)
 
-gold_normalized_data_df.coalesce(1).write \
-    .mode('overwrite') \
-    .option("header", "true") \
-    .csv(f"{TARGET_PATH}/gold_normalized_data.csv")
+(
+    gold_aggregated_sales_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/gold_aggregated_sales.csv")
+)
+
+job.commit()
