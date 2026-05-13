@@ -1,70 +1,177 @@
 import sys
-from pyspark.sql import SparkSession
 from awsglue.context import GlueContext
-from awsglue.transforms import *
+from awsglue.job import Job
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from pyspark.sql import SparkSession
 
-# Initialize Glue Context and Spark Session
-glueContext = GlueContext(SparkSession.builder.getOrCreate())
-spark = glueContext.spark_session
+args = getResolvedOptions(sys.argv, ["JOB_NAME"])
 
-# Define source path and target path
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-# Read source tables from S3 and create temp views
-department_employees_df = spark.read.format(FILE_FORMAT).option("header", "true").load(f"{SOURCE_PATH}/department_employees_silver.{FILE_FORMAT}/")
-department_employees_df.createOrReplaceTempView("department_employees_silver")
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args["JOB_NAME"], args)
 
-certification_records_df = spark.read.format(FILE_FORMAT).option("header", "true").load(f"{SOURCE_PATH}/certification_records_silver.{FILE_FORMAT}/")
-certification_records_df.createOrReplaceTempView("certification_records_silver")
+spark.conf.set("spark.sql.legacy.timeParserPolicy", "LEGACY")
 
-department_certification_summary_df = spark.read.format(FILE_FORMAT).option("header", "true").load(f"{SOURCE_PATH}/department_certification_summary_silver.{FILE_FORMAT}/")
-department_certification_summary_df.createOrReplaceTempView("department_certification_summary_silver")
+# ---------------------------------------------------------------------
+# 1) Read source tables from S3 (Silver)
+# ---------------------------------------------------------------------
+patient_silver_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/patient_silver.{FILE_FORMAT}/")
+)
 
-department_compliance_status_df = spark.read.format(FILE_FORMAT).option("header", "true").load(f"{SOURCE_PATH}/department_compliance_status_silver.{FILE_FORMAT}/")
-department_compliance_status_df.createOrReplaceTempView("department_compliance_status_silver")
+drug_silver_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/drug_silver.{FILE_FORMAT}/")
+)
 
-# Transformation for gold_certification_data
-gold_certification_data_query = """
-SELECT 
-    des.employee_id,
-    des.department_id,
-    des.department_name,
-    crs.certification_name,
-    crs.completion_date,
-    dcss.employees_certified_count
-FROM 
-    department_employees_silver des
-LEFT JOIN 
-    certification_records_silver crs 
-ON 
-    des.employee_id = crs.employee_id
-LEFT JOIN 
-    department_certification_summary_silver dcss 
-ON 
-    des.department_id = dcss.department_id
-"""
+site_silver_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/site_silver.{FILE_FORMAT}/")
+)
 
-gold_certification_data_df = spark.sql(gold_certification_data_query)
-gold_certification_data_df.coalesce(1).write.mode("overwrite").option("header", "true").csv(f"{TARGET_PATH}/gold_certification_data.csv")
+adverse_event_silver_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/adverse_event_silver.{FILE_FORMAT}/")
+)
 
-# Transformation for gold_department_compliance_report
-gold_department_compliance_report_query = """
-SELECT 
-    dcs.department_id,
-    dcss.department_name,
-    dcss.total_employees,
-    dcss.employees_certified_count,
-    dcs.compliance_status,
-    dcs.last_report_update AS last_report_generated
-FROM 
-    department_compliance_status_silver dcs
-INNER JOIN 
-    department_certification_summary_silver dcss 
-ON 
-    dcs.department_id = dcss.department_id
-"""
+aggregated_dataset_silver_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/aggregated_dataset_silver.{FILE_FORMAT}/")
+)
 
-gold_department_compliance_report_df = spark.sql(gold_department_compliance_report_query)
-gold_department_compliance_report_df.coalesce(1).write.mode("overwrite").option("header", "true").csv(f"{TARGET_PATH}/gold_department_compliance_report.csv")
+# ---------------------------------------------------------------------
+# 2) Create temp views
+# ---------------------------------------------------------------------
+patient_silver_df.createOrReplaceTempView("patient_silver")
+drug_silver_df.createOrReplaceTempView("drug_silver")
+site_silver_df.createOrReplaceTempView("site_silver")
+adverse_event_silver_df.createOrReplaceTempView("adverse_event_silver")
+aggregated_dataset_silver_df.createOrReplaceTempView("aggregated_dataset_silver")
+
+# ---------------------------------------------------------------------
+# 3) Transform + 4) Save outputs (each target table separately)
+# ---------------------------------------------------------------------
+
+# =========================
+# gold.patient_master (gpm)
+# =========================
+patient_master_df = spark.sql(
+    """
+    SELECT
+        CAST(ps.patient_id AS STRING) AS patient_id,
+        CAST(ps.age AS INT) AS age,
+        CAST(ps.gender AS STRING) AS gender,
+        CAST(ps.enrollment_date AS DATE) AS enrollment_date
+    FROM patient_silver ps
+    """
+)
+
+(
+    patient_master_df.coalesce(1)
+    .write.mode("overwrite")
+    .option("header", "true")
+    .csv(f"{TARGET_PATH}/patient_master.csv")
+)
+
+# ======================
+# gold.drug_master (gdm)
+# ======================
+drug_master_df = spark.sql(
+    """
+    SELECT
+        CAST(ds.drug_id AS STRING) AS drug_id,
+        CAST(ds.drug_name AS STRING) AS drug_name,
+        CAST(ds.drug_category AS STRING) AS drug_category,
+        CAST(ds.manufacturer AS STRING) AS manufacturer
+    FROM drug_silver ds
+    """
+)
+
+(
+    drug_master_df.coalesce(1)
+    .write.mode("overwrite")
+    .option("header", "true")
+    .csv(f"{TARGET_PATH}/drug_master.csv")
+)
+
+# ======================
+# gold.site_master (gsm)
+# ======================
+site_master_df = spark.sql(
+    """
+    SELECT
+        CAST(ss.site_id AS STRING) AS site_id,
+        CAST(ss.site_location AS STRING) AS site_location
+    FROM site_silver ss
+    """
+)
+
+(
+    site_master_df.coalesce(1)
+    .write.mode("overwrite")
+    .option("header", "true")
+    .csv(f"{TARGET_PATH}/site_master.csv")
+)
+
+# ==================================
+# gold.adverse_event_analytics (gaea)
+# ==================================
+adverse_event_analytics_df = spark.sql(
+    """
+    SELECT
+        CAST(aes.ae_id AS STRING) AS adverse_event_id,
+        CAST(aes.patient_id AS STRING) AS patient_id,
+        CAST(aes.drug_id AS STRING) AS drug_id,
+        CAST(aes.site_id AS STRING) AS site_id,
+        CAST(aes.event_date AS DATE) AS event_date,
+        CAST(aes.event_type AS STRING) AS event_type,
+        CAST(aes.severity AS STRING) AS severity
+    FROM adverse_event_silver aes
+    LEFT JOIN patient_silver ps
+        ON aes.patient_id = ps.patient_id
+    LEFT JOIN drug_silver ds
+        ON aes.drug_id = ds.drug_id
+    LEFT JOIN site_silver ss
+        ON aes.site_id = ss.site_id
+    """
+)
+
+(
+    adverse_event_analytics_df.coalesce(1)
+    .write.mode("overwrite")
+    .option("header", "true")
+    .csv(f"{TARGET_PATH}/adverse_event_analytics.csv")
+)
+
+# =================================
+# gold.aggregated_datasets (gad)
+# =================================
+aggregated_datasets_df = spark.sql(
+    """
+    SELECT
+        CAST(ads.report_date AS DATE) AS report_date
+    FROM aggregated_dataset_silver ads
+    """
+)
+
+(
+    aggregated_datasets_df.coalesce(1)
+    .write.mode("overwrite")
+    .option("header", "true")
+    .csv(f"{TARGET_PATH}/aggregated_datasets.csv")
+)
+
+job.commit()
