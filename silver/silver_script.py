@@ -1,7 +1,7 @@
 import sys
+from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
 from awsglue.job import Job
-from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 
@@ -17,185 +17,69 @@ SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 FILE_FORMAT = "csv"
 
-# -------------------------------------------------------------------
-# 1) Read source tables (Bronze) + Create temp views
-# -------------------------------------------------------------------
-products_bronze_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/products_bronze.{FILE_FORMAT}/")
-)
-products_bronze_df.createOrReplaceTempView("products_bronze")
-
-stores_bronze_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/stores_bronze.{FILE_FORMAT}/")
-)
-stores_bronze_df.createOrReplaceTempView("stores_bronze")
-
-sales_transactions_bronze_df = (
+# ------------------------------------------------------------------------------------
+# 1) Read Source Tables (Bronze) + Create Temp Views
+# ------------------------------------------------------------------------------------
+stb_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .load(f"{SOURCE_PATH}/sales_transactions_bronze.{FILE_FORMAT}/")
 )
-sales_transactions_bronze_df.createOrReplaceTempView("sales_transactions_bronze")
+stb_df.createOrReplaceTempView("sales_transactions_bronze")
 
-# -------------------------------------------------------------------
-# 2) products_silver (Cleansed + De-duplicated)
-# -------------------------------------------------------------------
-products_silver_df = spark.sql(
-    """
-    WITH base AS (
-        SELECT
-            CAST(TRIM(pb.product_id) AS STRING) AS product_id,
-            CAST(TRIM(pb.product_name) AS STRING) AS product_name,
-            CAST(TRIM(pb.category) AS STRING) AS category,
-            CAST(pb.price AS DOUBLE) AS price
-        FROM products_bronze pb
-    ),
-    ranked AS (
-        SELECT
-            product_id,
-            product_name,
-            category,
-            price,
-            ROW_NUMBER() OVER (
-                PARTITION BY product_id
-                ORDER BY
-                    CASE WHEN product_name IS NOT NULL AND product_name <> '' THEN 1 ELSE 0 END DESC,
-                    CASE WHEN category IS NOT NULL AND category <> '' THEN 1 ELSE 0 END DESC,
-                    CASE WHEN price IS NOT NULL THEN 1 ELSE 0 END DESC
-            ) AS rn
-        FROM base
-        WHERE product_id IS NOT NULL AND product_id <> ''
-          AND (price IS NULL OR price >= 0)
-    )
-    SELECT
-        product_id,
-        product_name,
-        category,
-        CAST(price AS DOUBLE) AS price
-    FROM ranked
-    WHERE rn = 1
-    """
-)
-products_silver_df.createOrReplaceTempView("products_silver")
-
-(
-    products_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
+pdb_df = (
+    spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .save(f"{TARGET_PATH}/products_silver.csv")
+    .load(f"{SOURCE_PATH}/product_details_bronze.{FILE_FORMAT}/")
 )
+pdb_df.createOrReplaceTempView("product_details_bronze")
 
-# -------------------------------------------------------------------
-# 3) stores_silver (Cleansed + De-duplicated)
-# -------------------------------------------------------------------
-stores_silver_df = spark.sql(
-    """
-    WITH base AS (
-        SELECT
-            CAST(TRIM(sb.store_id) AS STRING) AS store_id,
-            CAST(TRIM(sb.store_name) AS STRING) AS store_name,
-            CONCAT(TRIM(sb.city), ', ', TRIM(sb.state)) AS store_location,
-            CAST(TRIM(sb.state) AS STRING) AS store_region
-        FROM stores_bronze sb
-    ),
-    ranked AS (
-        SELECT
-            store_id,
-            store_name,
-            store_location,
-            store_region,
-            ROW_NUMBER() OVER (
-                PARTITION BY store_id
-                ORDER BY
-                    CASE WHEN store_name IS NOT NULL AND store_name <> '' THEN 1 ELSE 0 END DESC,
-                    CASE WHEN store_location IS NOT NULL AND store_location <> '' THEN 1 ELSE 0 END DESC,
-                    CASE WHEN store_region IS NOT NULL AND store_region <> '' THEN 1 ELSE 0 END DESC
-            ) AS rn
-        FROM base
-        WHERE store_id IS NOT NULL AND store_id <> ''
-    )
-    SELECT
-        store_id,
-        store_name,
-        store_location,
-        store_region
-    FROM ranked
-    WHERE rn = 1
-    """
-)
-stores_silver_df.createOrReplaceTempView("stores_silver")
-
-(
-    stores_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
+sdb_df = (
+    spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .save(f"{TARGET_PATH}/stores_silver.csv")
+    .load(f"{SOURCE_PATH}/store_details_bronze.{FILE_FORMAT}/")
 )
+sdb_df.createOrReplaceTempView("store_details_bronze")
 
-# -------------------------------------------------------------------
-# 4) sales_transactions_silver (Cleansed + Conformed + De-duplicated, Inner Join to masters)
-# -------------------------------------------------------------------
+# ------------------------------------------------------------------------------------
+# 2) sales_transactions_silver
+#    - transaction_date = CAST(stb.transaction_time AS DATE)
+#    - quantity_sold = stb.quantity
+#    - total_sales_amount = stb.sale_amount
+#    - Deduplicate on transaction_id keeping latest transaction_time
+#    - Filter out null/blank transaction_id, product_id, store_id
+#    - Enforce non-negative quantity and sales amounts
+# ------------------------------------------------------------------------------------
 sales_transactions_silver_df = spark.sql(
     """
     WITH base AS (
-        SELECT
-            CAST(TRIM(stb.transaction_id) AS STRING) AS transaction_id,
-            CAST(TRIM(stb.store_id) AS STRING) AS store_id,
-            CAST(TRIM(stb.product_id) AS STRING) AS product_id,
-            CAST(stb.quantity AS INT) AS quantity,
-            CAST(stb.sale_amount AS DOUBLE) AS sale_amount,
-            CAST(stb.transaction_time AS TIMESTAMP) AS transaction_time,
-            CAST(stb.transaction_time AS DATE) AS transaction_date
-        FROM sales_transactions_bronze stb
-    ),
-    joined AS (
-        SELECT
-            b.transaction_id,
-            b.store_id,
-            b.product_id,
-            b.quantity,
-            b.sale_amount,
-            b.transaction_time,
-            b.transaction_date
-        FROM base b
-        INNER JOIN stores_silver ss
-            ON b.store_id = ss.store_id
-        INNER JOIN products_silver ps
-            ON b.product_id = ps.product_id
-        WHERE b.transaction_id IS NOT NULL AND b.transaction_id <> ''
-          AND b.quantity > 0
-          AND b.sale_amount >= 0
-    ),
-    ranked AS (
-        SELECT
-            transaction_id,
-            store_id,
-            product_id,
-            quantity,
-            sale_amount,
-            transaction_time,
-            transaction_date,
-            ROW_NUMBER() OVER (
-                PARTITION BY transaction_id
-                ORDER BY transaction_time DESC
-            ) AS rn
-        FROM joined
+      SELECT
+        stb.transaction_id,
+        stb.product_id,
+        stb.store_id,
+        CAST(stb.transaction_time AS DATE) AS transaction_date,
+        CAST(stb.quantity AS INT) AS quantity_sold,
+        CAST(stb.sale_amount AS DOUBLE) AS total_sales_amount,
+        ROW_NUMBER() OVER (
+          PARTITION BY stb.transaction_id
+          ORDER BY stb.transaction_time DESC
+        ) AS rn
+      FROM sales_transactions_bronze stb
+      WHERE
+        stb.transaction_id IS NOT NULL AND TRIM(stb.transaction_id) <> ''
+        AND stb.product_id IS NOT NULL AND TRIM(stb.product_id) <> ''
+        AND stb.store_id IS NOT NULL AND TRIM(stb.store_id) <> ''
+        AND CAST(stb.quantity AS INT) >= 0
+        AND CAST(stb.sale_amount AS DOUBLE) >= 0
     )
     SELECT
-        transaction_id,
-        store_id,
-        product_id,
-        quantity,
-        sale_amount,
-        transaction_time,
-        transaction_date
-    FROM ranked
+      transaction_id,
+      product_id,
+      store_id,
+      transaction_date,
+      quantity_sold,
+      total_sales_amount
+    FROM base
     WHERE rn = 1
     """
 )
@@ -206,32 +90,201 @@ sales_transactions_silver_df.createOrReplaceTempView("sales_transactions_silver"
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/sales_transactions_silver.csv")
+    .save(TARGET_PATH + "/sales_transactions_silver.csv")
 )
 
-# -------------------------------------------------------------------
-# 5) daily_sales_aggregates_silver (Aggregations per store per date)
-# -------------------------------------------------------------------
-daily_sales_aggregates_silver_df = spark.sql(
+# ------------------------------------------------------------------------------------
+# 3) product_master_silver
+#    - Keeps only active products (is_active = true)
+#    - Deduplicate on product_id (latest record if available)
+#    - trims/standardizes text fields; validates price >= 0
+#    - outputs product_id, product_name, category, brand, price
+# ------------------------------------------------------------------------------------
+product_master_silver_df = spark.sql(
     """
+    WITH base AS (
+      SELECT
+        pdb.product_id,
+        TRIM(pdb.product_name) AS product_name,
+        TRIM(pdb.category) AS category,
+        TRIM(pdb.brand) AS brand,
+        CAST(pdb.price AS FLOAT) AS price,
+        ROW_NUMBER() OVER (
+          PARTITION BY pdb.product_id
+          ORDER BY pdb.product_id
+        ) AS rn
+      FROM product_details_bronze pdb
+      WHERE
+        pdb.is_active = true
+        AND pdb.product_id IS NOT NULL AND TRIM(pdb.product_id) <> ''
+        AND CAST(pdb.price AS FLOAT) >= 0
+    )
     SELECT
-        sts.store_id AS store_id,
-        sts.transaction_date AS transaction_date,
-        CAST(SUM(sts.sale_amount) AS DOUBLE) AS total_revenue_per_store,
-        CAST(SUM(sts.quantity) AS INT) AS total_quantity_sold_per_store
-    FROM sales_transactions_silver sts
-    GROUP BY
-        sts.store_id,
-        sts.transaction_date
+      product_id,
+      product_name,
+      category,
+      brand,
+      price
+    FROM base
+    WHERE rn = 1
+    """
+)
+product_master_silver_df.createOrReplaceTempView("product_master_silver")
+
+(
+    product_master_silver_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(TARGET_PATH + "/product_master_silver.csv")
+)
+
+# ------------------------------------------------------------------------------------
+# 4) store_master_silver
+#    - location = CONCAT(TRIM(city), ', ', TRIM(state))
+#    - region = state_to_region_map(state) implemented via SQL CASE
+#    - Deduplicate on store_id
+#    - standardizes store_name and store_type
+#    - outputs store_id, store_name, location, region, store_type
+# ------------------------------------------------------------------------------------
+store_master_silver_df = spark.sql(
+    """
+    WITH base AS (
+      SELECT
+        sdb.store_id,
+        TRIM(sdb.store_name) AS store_name,
+        CONCAT(TRIM(sdb.city), ', ', TRIM(sdb.state)) AS location,
+        CASE
+          WHEN UPPER(TRIM(sdb.state)) IN ('CT','ME','MA','NH','RI','VT','NJ','NY','PA') THEN 'NORTHEAST'
+          WHEN UPPER(TRIM(sdb.state)) IN ('IL','IN','MI','OH','WI','IA','KS','MN','MO','NE','ND','SD') THEN 'MIDWEST'
+          WHEN UPPER(TRIM(sdb.state)) IN ('DE','FL','GA','MD','NC','SC','VA','DC','WV','AL','KY','MS','TN','AR','LA','OK','TX') THEN 'SOUTH'
+          WHEN UPPER(TRIM(sdb.state)) IN ('AZ','CO','ID','MT','NV','NM','UT','WY','AK','CA','HI','OR','WA') THEN 'WEST'
+          ELSE NULL
+        END AS region,
+        TRIM(sdb.store_type) AS store_type,
+        ROW_NUMBER() OVER (
+          PARTITION BY sdb.store_id
+          ORDER BY sdb.store_id
+        ) AS rn
+      FROM store_details_bronze sdb
+      WHERE
+        sdb.store_id IS NOT NULL AND TRIM(sdb.store_id) <> ''
+    )
+    SELECT
+      store_id,
+      store_name,
+      location,
+      region,
+      store_type
+    FROM base
+    WHERE rn = 1
+    """
+)
+store_master_silver_df.createOrReplaceTempView("store_master_silver")
+
+(
+    store_master_silver_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(TARGET_PATH + "/store_master_silver.csv")
+)
+
+# ------------------------------------------------------------------------------------
+# 5) daily_sales_aggregate_silver
+#    - reporting_date = sts.transaction_date
+#    - total_sales_amount = SUM(sts.total_sales_amount)
+#    - total_quantity_sold = SUM(sts.quantity_sold)
+#    - average_sales_per_transaction = SUM(sts.total_sales_amount)/COUNT(DISTINCT sts.transaction_id)
+#    - sales_by_category = OBJECT_AGG(pms.category, SUM(sts.total_sales_amount)) (emulated using JSON map)
+#    - sales_by_region   = OBJECT_AGG(sms.region, SUM(sts.total_sales_amount)) (emulated using JSON map)
+# ------------------------------------------------------------------------------------
+daily_sales_aggregate_silver_df = spark.sql(
+    """
+    WITH joined AS (
+      SELECT
+        sts.transaction_date AS reporting_date,
+        sts.transaction_id,
+        sts.total_sales_amount,
+        sts.quantity_sold,
+        pms.category,
+        sms.region
+      FROM sales_transactions_silver sts
+      LEFT JOIN product_master_silver pms
+        ON sts.product_id = pms.product_id
+      LEFT JOIN store_master_silver sms
+        ON sts.store_id = sms.store_id
+    ),
+    base_agg AS (
+      SELECT
+        reporting_date,
+        SUM(total_sales_amount) AS total_sales_amount,
+        SUM(quantity_sold) AS total_quantity_sold,
+        SUM(total_sales_amount) / COUNT(DISTINCT transaction_id) AS average_sales_per_transaction
+      FROM joined
+      GROUP BY reporting_date
+    ),
+    cat_kv AS (
+      SELECT
+        reporting_date,
+        to_json(
+          map_from_entries(
+            collect_list(
+              named_struct('key', category, 'value', category_sales)
+            )
+          )
+        ) AS sales_by_category
+      FROM (
+        SELECT
+          reporting_date,
+          category,
+          SUM(total_sales_amount) AS category_sales
+        FROM joined
+        GROUP BY reporting_date, category
+      ) x
+      GROUP BY reporting_date
+    ),
+    region_kv AS (
+      SELECT
+        reporting_date,
+        to_json(
+          map_from_entries(
+            collect_list(
+              named_struct('key', region, 'value', region_sales)
+            )
+          )
+        ) AS sales_by_region
+      FROM (
+        SELECT
+          reporting_date,
+          region,
+          SUM(total_sales_amount) AS region_sales
+        FROM joined
+        GROUP BY reporting_date, region
+      ) y
+      GROUP BY reporting_date
+    )
+    SELECT
+      b.reporting_date,
+      b.total_sales_amount,
+      b.total_quantity_sold,
+      b.average_sales_per_transaction,
+      c.sales_by_category,
+      r.sales_by_region
+    FROM base_agg b
+    LEFT JOIN cat_kv c
+      ON b.reporting_date = c.reporting_date
+    LEFT JOIN region_kv r
+      ON b.reporting_date = r.reporting_date
     """
 )
 
 (
-    daily_sales_aggregates_silver_df.coalesce(1)
+    daily_sales_aggregate_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/daily_sales_aggregates_silver.csv")
+    .save(TARGET_PATH + "/daily_sales_aggregate_silver.csv")
 )
 
 job.commit()
