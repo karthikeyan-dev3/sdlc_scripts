@@ -17,177 +17,211 @@ TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 FILE_FORMAT = "csv"
 
 # -----------------------------
-# Source Reads + Temp Views
+# 1) Read source tables from S3
 # -----------------------------
-products_bronze_df = (
+aeb_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/products_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/adverse_events_bronze.{FILE_FORMAT}/")
 )
-products_bronze_df.createOrReplaceTempView("products_bronze")
 
-stores_bronze_df = (
+pmb_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/stores_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/patient_master_bronze.{FILE_FORMAT}/")
 )
-stores_bronze_df.createOrReplaceTempView("stores_bronze")
 
-sales_transactions_bronze_df = (
+dmb_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/sales_transactions_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/drug_master_bronze.{FILE_FORMAT}/")
 )
-sales_transactions_bronze_df.createOrReplaceTempView("sales_transactions_bronze")
+
+smb_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/site_master_bronze.{FILE_FORMAT}/")
+)
 
 # -----------------------------
-# Target: silver.products_silver
+# 2) Create temp views
 # -----------------------------
-products_silver_df = spark.sql(
-    """
-    WITH base AS (
-      SELECT
-        CAST(pb.product_id AS string) AS product_id,
-        TRIM(pb.product_name) AS product_name,
-        TRIM(pb.category) AS category,
-        CAST(pb.price AS float) AS pricing,
-        ROW_NUMBER() OVER (
-          PARTITION BY pb.product_id
-          ORDER BY pb.product_id
-        ) AS rn
-      FROM products_bronze pb
-      WHERE pb.product_id IS NOT NULL
-        AND pb.is_active = 'true'
-    )
-    SELECT
-      product_id,
-      product_name,
-      category,
-      pricing
-    FROM base
-    WHERE rn = 1
-    """
+aeb_df.createOrReplaceTempView("adverse_events_bronze")
+pmb_df.createOrReplaceTempView("patient_master_bronze")
+dmb_df.createOrReplaceTempView("drug_master_bronze")
+smb_df.createOrReplaceTempView("site_master_bronze")
+
+# -----------------------------------------
+# adverse_event_reports_silver (aers)
+# -----------------------------------------
+aers_df = spark.sql("""
+WITH ranked AS (
+  SELECT
+    aeb.ae_id AS adverse_event_id,
+    aeb.patient_id AS patient_id,
+    aeb.drug_id AS drug_id,
+    aeb.site_id AS site_id,
+    DATE(aeb.report_date) AS event_date,
+    aeb.severity AS severity,
+    aeb.symptom AS description,
+    CAST(NULL AS string) AS outcome,
+    ROW_NUMBER() OVER (
+      PARTITION BY aeb.ae_id
+      ORDER BY DATE(aeb.report_date) DESC
+    ) AS rn
+  FROM adverse_events_bronze aeb
 )
-products_silver_df.createOrReplaceTempView("products_silver")
+SELECT
+  adverse_event_id,
+  patient_id,
+  drug_id,
+  site_id,
+  event_date,
+  severity,
+  description,
+  outcome
+FROM ranked
+WHERE rn = 1
+""")
 
 (
-    products_silver_df.coalesce(1)
+    aers_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/products_silver.csv")
+    .save(f"{TARGET_PATH}/adverse_event_reports_silver.csv")
 )
 
-# -----------------------------
-# Target: silver.stores_silver
-# -----------------------------
-stores_silver_df = spark.sql(
-    """
-    WITH base AS (
-      SELECT
-        CAST(sb.store_id AS string) AS store_id,
-        TRIM(sb.store_name) AS store_name,
-        CONCAT(TRIM(sb.city), ', ', TRIM(sb.state)) AS location,
-        ROW_NUMBER() OVER (
-          PARTITION BY sb.store_id
-          ORDER BY sb.store_id
-        ) AS rn
-      FROM stores_bronze sb
-      WHERE sb.store_id IS NOT NULL
-    )
-    SELECT
-      store_id,
-      store_name,
-      location
-    FROM base
-    WHERE rn = 1
-    """
+# -----------------------------------------
+# patient_master_silver (pms)
+# -----------------------------------------
+pms_df = spark.sql("""
+WITH ranked AS (
+  SELECT
+    pmb.patient_id AS patient_id,
+    CAST(pmb.age AS double) AS age,
+    UPPER(TRIM(pmb.gender)) AS gender,
+    CAST(NULL AS string) AS ethnicity,
+    CAST(NULL AS string) AS medical_history,
+    ROW_NUMBER() OVER (
+      PARTITION BY pmb.patient_id
+      ORDER BY DATE(pmb.enrollment_date) DESC
+    ) AS rn
+  FROM patient_master_bronze pmb
 )
-stores_silver_df.createOrReplaceTempView("stores_silver")
+SELECT
+  patient_id,
+  age,
+  gender,
+  ethnicity,
+  medical_history
+FROM ranked
+WHERE rn = 1
+""")
 
 (
-    stores_silver_df.coalesce(1)
+    pms_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/stores_silver.csv")
+    .save(f"{TARGET_PATH}/patient_master_silver.csv")
 )
 
-# -----------------------------
-# Target: silver.sales_transactions_silver
-# -----------------------------
-sales_transactions_silver_df = spark.sql(
-    """
-    WITH joined AS (
-      SELECT
-        CAST(stb.transaction_id AS string) AS transaction_id,
-        ps.product_id AS product_id,
-        ss.store_id AS store_id,
-        CASE
-          WHEN CAST(stb.quantity AS int) < 0 THEN 0
-          ELSE CAST(stb.quantity AS int)
-        END AS quantity,
-        CAST(stb.sale_amount AS double) AS revenue,
-        CAST(stb.transaction_time AS date) AS transaction_date,
-        ROW_NUMBER() OVER (
-          PARTITION BY stb.transaction_id
-          ORDER BY stb.transaction_id
-        ) AS rn
-      FROM sales_transactions_bronze stb
-      LEFT JOIN products_silver ps
-        ON stb.product_id = ps.product_id
-      LEFT JOIN stores_silver ss
-        ON stb.store_id = ss.store_id
-      WHERE stb.transaction_id IS NOT NULL
-    )
-    SELECT
-      transaction_id,
-      product_id,
-      store_id,
-      quantity,
-      revenue,
-      transaction_date
-    FROM joined
-    WHERE rn = 1
-    """
+# -----------------------------------------
+# drug_master_silver (dms)
+# -----------------------------------------
+dms_df = spark.sql("""
+WITH ranked AS (
+  SELECT
+    dmb.drug_id AS drug_id,
+    TRIM(dmb.drug_name) AS drug_name,
+    CAST(NULL AS string) AS dosage_form,
+    CAST(NULL AS date) AS manufacture_date,
+    CAST(NULL AS date) AS expiry_date,
+    CAST(NULL AS string) AS active_ingredient,
+    ROW_NUMBER() OVER (
+      PARTITION BY dmb.drug_id
+      ORDER BY CASE WHEN dmb.drug_name IS NOT NULL AND TRIM(dmb.drug_name) <> '' THEN 0 ELSE 1 END ASC
+    ) AS rn
+  FROM drug_master_bronze dmb
 )
-sales_transactions_silver_df.createOrReplaceTempView("sales_transactions_silver")
+SELECT
+  drug_id,
+  drug_name,
+  dosage_form,
+  manufacture_date,
+  expiry_date,
+  active_ingredient
+FROM ranked
+WHERE rn = 1
+""")
 
 (
-    sales_transactions_silver_df.coalesce(1)
+    dms_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/sales_transactions_silver.csv")
+    .save(f"{TARGET_PATH}/drug_master_silver.csv")
 )
 
-# -----------------------------
-# Target: silver.daily_sales_aggregates_silver
-# -----------------------------
-daily_sales_aggregates_silver_df = spark.sql(
-    """
-    SELECT
-      CAST(sts.transaction_date AS date) AS date,
-      sts.product_id AS product_id,
-      sts.store_id AS store_id,
-      CAST(SUM(sts.quantity) AS int) AS total_quantity_sold,
-      SUM(sts.revenue) AS total_revenue
-    FROM sales_transactions_silver sts
-    WHERE sts.product_id IS NOT NULL
-      AND sts.store_id IS NOT NULL
-    GROUP BY
-      CAST(sts.transaction_date AS date),
-      sts.product_id,
-      sts.store_id
-    """
+# -----------------------------------------
+# site_performance_silver (sps)
+# -----------------------------------------
+sps_df = spark.sql("""
+WITH base AS (
+  SELECT
+    smb.site_id AS site_id,
+    CONCAT(smb.city, ', ', smb.country) AS location,
+    ROW_NUMBER() OVER (
+      PARTITION BY smb.site_id
+      ORDER BY smb.site_id
+    ) AS rn
+  FROM site_master_bronze smb
+  LEFT JOIN adverse_events_bronze aeb
+    ON smb.site_id = aeb.site_id
 )
+SELECT
+  site_id,
+  location,
+  CAST(NULL AS string) AS performance_metrics,
+  CAST(NULL AS string) AS number_of_active_trials,
+  CAST(NULL AS string) AS compliance_rating
+FROM base
+WHERE rn = 1
+""")
 
 (
-    daily_sales_aggregates_silver_df.coalesce(1)
+    sps_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/daily_sales_aggregates_silver.csv")
+    .save(f"{TARGET_PATH}/site_performance_silver.csv")
+)
+
+# -----------------------------------------
+# aggregated_trial_data_silver (atds)
+# -----------------------------------------
+atds_df = spark.sql("""
+SELECT
+  pmb.trial_phase AS trial_id,
+  COUNT(aeb.ae_id) AS total_adverse_events,
+  AVG(TRY_CAST(aeb.severity AS double)) AS average_severity,
+  COUNT(DISTINCT aeb.patient_id) AS unique_patients,
+  COUNT(DISTINCT aeb.drug_id) AS drugs_involved,
+  COUNT(DISTINCT aeb.site_id) AS sites_involved
+FROM adverse_events_bronze aeb
+JOIN patient_master_bronze pmb
+  ON aeb.patient_id = pmb.patient_id
+GROUP BY
+  pmb.trial_phase
+""")
+
+(
+    atds_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/aggregated_trial_data_silver.csv")
 )
 
 job.commit()
