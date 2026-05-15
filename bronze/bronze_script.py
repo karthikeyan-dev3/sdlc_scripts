@@ -13,206 +13,440 @@ metadata = {
     'tables': [
         {
             'target_schema': 'bronze',
-            'target_table': 'products_bronze',
-            'target_alias': 'pb',
-            'mapping_details': 'products_raw pr',
-            'description': 'Bronze ingestion of raw product master data from products_raw at row-level grain. Includes product_id, product_name, category, brand, price, is_active with no joins or aggregations.'
+            'target_table': 'customers_bronze',
+            'target_alias': 'cb',
+            'mapping_details': 'customer_master cm',
+            'description': 'Bronze raw ingestion of customer profiles from customer_master (one row per customer as received from source).'
         },
         {
             'target_schema': 'bronze',
-            'target_table': 'stores_bronze',
-            'target_alias': 'sb',
-            'mapping_details': 'stores_raw sr',
-            'description': 'Bronze ingestion of raw store master data from stores_raw at row-level grain. Includes store_id, store_name, city, state, store_type, open_date with no joins or aggregations.'
+            'target_table': 'branches_bronze',
+            'target_alias': 'bb',
+            'mapping_details': 'branch_master bm',
+            'description': 'Bronze raw ingestion of branch reference data from branch_master (one row per branch as received from source).'
         },
         {
             'target_schema': 'bronze',
-            'target_table': 'sales_transactions_bronze',
-            'target_alias': 'stb',
-            'mapping_details': 'sales_transactions_raw str',
-            'description': 'Bronze ingestion of raw sales transaction data from sales_transactions_raw at transaction-level grain. Includes transaction_id, store_id, product_id, quantity, sale_amount, transaction_time with no joins or aggregations.'
+            'target_table': 'loans_bronze',
+            'target_alias': 'lb',
+            'mapping_details': 'loan_applications la',
+            'description': 'Bronze raw ingestion of loan application data from loan_applications (one row per loan application as received from source).'
+        },
+        {
+            'target_schema': 'bronze',
+            'target_table': 'loan_risk_assessment_bronze',
+            'target_alias': 'lrab',
+            'mapping_details': 'loan_risk_assessment lra',
+            'description': 'Bronze raw ingestion of loan risk assessment data from loan_risk_assessment (one row per risk assessment record as received from source).'
+        },
+        {
+            'target_schema': 'bronze',
+            'target_table': 'repayments_bronze',
+            'target_alias': 'rb',
+            'mapping_details': 'repayment_transactions rt',
+            'description': 'Bronze raw ingestion of repayment transaction events from repayment_transactions (one row per repayment transaction as received from source).'
         }
     ],
     'columns': [
         {
-            'source_column': "['pr.product_id']",
+            'source_column': "['cm.customer_id']",
             'source_type': 'varchar(10)',
-            'source_nullable': 'not specified',
-            'target_column': 'product_id',
+            'source_nullable': 'not accepted',
+            'target_column': 'customer_id',
             'target_type': 'varchar(10)',
-            'target_nullable': 'not specified',
-            'transformation': 'pb.product_id = pr.product_id',
-            'target_table': 'pb'
+            'target_nullable': 'not accepted',
+            'transformation': 'cb.customer_id = cm.customer_id',
+            'target_table': 'cb'
         },
         {
-            'source_column': "['pr.product_name']",
+            'source_column': "['cm.customer_name']",
             'source_type': 'varchar(255)',
-            'source_nullable': 'not specified',
-            'target_column': 'product_name',
+            'source_nullable': 'accepted',
+            'target_column': 'customer_name',
             'target_type': 'varchar(255)',
-            'target_nullable': 'not specified',
-            'transformation': 'pb.product_name = pr.product_name',
-            'target_table': 'pb'
+            'target_nullable': 'accepted',
+            'transformation': 'cb.customer_name = cm.customer_name',
+            'target_table': 'cb'
         },
         {
-            'source_column': "['pr.category']",
-            'source_type': 'varchar(100)',
-            'source_nullable': 'not specified',
-            'target_column': 'category',
-            'target_type': 'varchar(100)',
-            'target_nullable': 'not specified',
-            'transformation': 'pb.category = pr.category',
-            'target_table': 'pb'
-        },
-        {
-            'source_column': "['pr.brand']",
-            'source_type': 'varchar(100)',
-            'source_nullable': 'not specified',
-            'target_column': 'brand',
-            'target_type': 'varchar(100)',
-            'target_nullable': 'not specified',
-            'transformation': 'pb.brand = pr.brand',
-            'target_table': 'pb'
-        },
-        {
-            'source_column': "['pr.price']",
-            'source_type': 'float',
-            'source_nullable': 'not specified',
-            'target_column': 'price',
-            'target_type': 'float',
-            'target_nullable': 'not specified',
-            'transformation': 'pb.price = pr.price',
-            'target_table': 'pb'
-        },
-        {
-            'source_column': "['pr.is_active']",
-            'source_type': 'boolean',
-            'source_nullable': 'not specified',
-            'target_column': 'is_active',
-            'target_type': 'boolean',
-            'target_nullable': 'not specified',
-            'transformation': 'pb.is_active = pr.is_active',
-            'target_table': 'pb'
-        },
-        {
-            'source_column': "['sr.store_id']",
+            'source_column': "['cm.gender']",
             'source_type': 'varchar(10)',
-            'source_nullable': 'not specified',
-            'target_column': 'store_id',
+            'source_nullable': 'accepted',
+            'target_column': 'gender',
             'target_type': 'varchar(10)',
-            'target_nullable': 'not specified',
-            'transformation': 'sb.store_id = sr.store_id',
-            'target_table': 'sb'
+            'target_nullable': 'accepted',
+            'transformation': 'cb.gender = cm.gender',
+            'target_table': 'cb'
         },
         {
-            'source_column': "['sr.store_name']",
-            'source_type': 'varchar(255)',
-            'source_nullable': 'not specified',
-            'target_column': 'store_name',
-            'target_type': 'varchar(255)',
-            'target_nullable': 'not specified',
-            'transformation': 'sb.store_name = sr.store_name',
-            'target_table': 'sb'
-        },
-        {
-            'source_column': "['sr.city']",
+            'source_column': "['cm.city']",
             'source_type': 'varchar(100)',
-            'source_nullable': 'not specified',
+            'source_nullable': 'accepted',
             'target_column': 'city',
             'target_type': 'varchar(100)',
-            'target_nullable': 'not specified',
-            'transformation': 'sb.city = sr.city',
-            'target_table': 'sb'
+            'target_nullable': 'accepted',
+            'transformation': 'cb.city = cm.city',
+            'target_table': 'cb'
         },
         {
-            'source_column': "['sr.state']",
+            'source_column': "['cm.state']",
             'source_type': 'varchar(100)',
-            'source_nullable': 'not specified',
+            'source_nullable': 'accepted',
             'target_column': 'state',
             'target_type': 'varchar(100)',
-            'target_nullable': 'not specified',
-            'transformation': 'sb.state = sr.state',
-            'target_table': 'sb'
+            'target_nullable': 'accepted',
+            'transformation': 'cb.state = cm.state',
+            'target_table': 'cb'
         },
         {
-            'source_column': "['sr.store_type']",
-            'source_type': 'varchar(50)',
-            'source_nullable': 'not specified',
-            'target_column': 'store_type',
-            'target_type': 'varchar(50)',
-            'target_nullable': 'not specified',
-            'transformation': 'sb.store_type = sr.store_type',
-            'target_table': 'sb'
-        },
-        {
-            'source_column': "['sr.open_date']",
-            'source_type': 'date',
-            'source_nullable': 'not specified',
-            'target_column': 'open_date',
-            'target_type': 'date',
-            'target_nullable': 'not specified',
-            'transformation': 'sb.open_date = sr.open_date',
-            'target_table': 'sb'
-        },
-        {
-            'source_column': "['str.transaction_id']",
+            'source_column': "['cm.income_segment']",
             'source_type': 'varchar(10)',
-            'source_nullable': 'not specified',
-            'target_column': 'transaction_id',
+            'source_nullable': 'accepted',
+            'target_column': 'income_segment',
             'target_type': 'varchar(10)',
-            'target_nullable': 'not specified',
-            'transformation': 'stb.transaction_id = str.transaction_id',
-            'target_table': 'stb'
+            'target_nullable': 'accepted',
+            'transformation': 'cb.income_segment = cm.income_segment',
+            'target_table': 'cb'
         },
         {
-            'source_column': "['str.store_id']",
-            'source_type': 'varchar(10)',
-            'source_nullable': 'not specified',
-            'target_column': 'store_id',
-            'target_type': 'varchar(10)',
-            'target_nullable': 'not specified',
-            'transformation': 'stb.store_id = str.store_id',
-            'target_table': 'stb'
-        },
-        {
-            'source_column': "['str.product_id']",
-            'source_type': 'varchar(10)',
-            'source_nullable': 'not specified',
-            'target_column': 'product_id',
-            'target_type': 'varchar(10)',
-            'target_nullable': 'not specified',
-            'transformation': 'stb.product_id = str.product_id',
-            'target_table': 'stb'
-        },
-        {
-            'source_column': "['str.quantity']",
+            'source_column': "['cm.annual_income']",
             'source_type': 'int',
-            'source_nullable': 'not specified',
-            'target_column': 'quantity',
+            'source_nullable': 'accepted',
+            'target_column': 'annual_income',
             'target_type': 'int',
-            'target_nullable': 'not specified',
-            'transformation': 'stb.quantity = str.quantity',
-            'target_table': 'stb'
+            'target_nullable': 'accepted',
+            'transformation': 'cb.annual_income = cm.annual_income',
+            'target_table': 'cb'
         },
         {
-            'source_column': "['str.sale_amount']",
+            'source_column': "['cm.credit_score']",
+            'source_type': 'int',
+            'source_nullable': 'accepted',
+            'target_column': 'credit_score',
+            'target_type': 'int',
+            'target_nullable': 'accepted',
+            'transformation': 'cb.credit_score = cm.credit_score',
+            'target_table': 'cb'
+        },
+        {
+            'source_column': "['bm.branch_id']",
+            'source_type': 'varchar(10)',
+            'source_nullable': 'not accepted',
+            'target_column': 'branch_id',
+            'target_type': 'varchar(10)',
+            'target_nullable': 'not accepted',
+            'transformation': 'bb.branch_id = bm.branch_id',
+            'target_table': 'bb'
+        },
+        {
+            'source_column': "['bm.branch_name']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'accepted',
+            'target_column': 'branch_name',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'accepted',
+            'transformation': 'bb.branch_name = bm.branch_name',
+            'target_table': 'bb'
+        },
+        {
+            'source_column': "['bm.city']",
+            'source_type': 'varchar(100)',
+            'source_nullable': 'accepted',
+            'target_column': 'city',
+            'target_type': 'varchar(100)',
+            'target_nullable': 'accepted',
+            'transformation': 'bb.city = bm.city',
+            'target_table': 'bb'
+        },
+        {
+            'source_column': "['bm.state']",
+            'source_type': 'varchar(100)',
+            'source_nullable': 'accepted',
+            'target_column': 'state',
+            'target_type': 'varchar(100)',
+            'target_nullable': 'accepted',
+            'transformation': 'bb.state = bm.state',
+            'target_table': 'bb'
+        },
+        {
+            'source_column': "['bm.branch_type']",
+            'source_type': 'varchar(50)',
+            'source_nullable': 'accepted',
+            'target_column': 'branch_type',
+            'target_type': 'varchar(50)',
+            'target_nullable': 'accepted',
+            'transformation': 'bb.branch_type = bm.branch_type',
+            'target_table': 'bb'
+        },
+        {
+            'source_column': "['bm.manager_name']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'accepted',
+            'target_column': 'manager_name',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'accepted',
+            'transformation': 'bb.manager_name = bm.manager_name',
+            'target_table': 'bb'
+        },
+        {
+            'source_column': "['bm.opening_year']",
+            'source_type': 'int',
+            'source_nullable': 'accepted',
+            'target_column': 'opening_year',
+            'target_type': 'int',
+            'target_nullable': 'accepted',
+            'transformation': 'bb.opening_year = bm.opening_year',
+            'target_table': 'bb'
+        },
+        {
+            'source_column': "['bm.contact_number']",
+            'source_type': 'varchar(15)',
+            'source_nullable': 'accepted',
+            'target_column': 'contact_number',
+            'target_type': 'varchar(15)',
+            'target_nullable': 'accepted',
+            'transformation': 'bb.contact_number = bm.contact_number',
+            'target_table': 'bb'
+        },
+        {
+            'source_column': "['la.loan_id']",
+            'source_type': 'varchar(10)',
+            'source_nullable': 'not accepted',
+            'target_column': 'loan_id',
+            'target_type': 'varchar(10)',
+            'target_nullable': 'not accepted',
+            'transformation': 'lb.loan_id = la.loan_id',
+            'target_table': 'lb'
+        },
+        {
+            'source_column': "['la.customer_id']",
+            'source_type': 'varchar(10)',
+            'source_nullable': 'not accepted',
+            'target_column': 'customer_id',
+            'target_type': 'varchar(10)',
+            'target_nullable': 'not accepted',
+            'transformation': 'lb.customer_id = la.customer_id',
+            'target_table': 'lb'
+        },
+        {
+            'source_column': "['la.branch_id']",
+            'source_type': 'varchar(10)',
+            'source_nullable': 'not accepted',
+            'target_column': 'branch_id',
+            'target_type': 'varchar(10)',
+            'target_nullable': 'not accepted',
+            'transformation': 'lb.branch_id = la.branch_id',
+            'target_table': 'lb'
+        },
+        {
+            'source_column': "['la.loan_type']",
+            'source_type': 'varchar(50)',
+            'source_nullable': 'accepted',
+            'target_column': 'loan_type',
+            'target_type': 'varchar(50)',
+            'target_nullable': 'accepted',
+            'transformation': 'lb.loan_type = la.loan_type',
+            'target_table': 'lb'
+        },
+        {
+            'source_column': "['la.loan_amount']",
+            'source_type': 'int',
+            'source_nullable': 'accepted',
+            'target_column': 'loan_amount',
+            'target_type': 'int',
+            'target_nullable': 'accepted',
+            'transformation': 'lb.loan_amount = la.loan_amount',
+            'target_table': 'lb'
+        },
+        {
+            'source_column': "['la.interest_rate']",
+            'source_type': 'float',
+            'source_nullable': 'accepted',
+            'target_column': 'interest_rate',
+            'target_type': 'float',
+            'target_nullable': 'accepted',
+            'transformation': 'lb.interest_rate = la.interest_rate',
+            'target_table': 'lb'
+        },
+        {
+            'source_column': "['la.loan_status']",
+            'source_type': 'varchar(20)',
+            'source_nullable': 'accepted',
+            'target_column': 'loan_status',
+            'target_type': 'varchar(20)',
+            'target_nullable': 'accepted',
+            'transformation': 'lb.loan_status = la.loan_status',
+            'target_table': 'lb'
+        },
+        {
+            'source_column': "['la.application_date']",
+            'source_type': 'date',
+            'source_nullable': 'accepted',
+            'target_column': 'application_date',
+            'target_type': 'date',
+            'target_nullable': 'accepted',
+            'transformation': 'lb.application_date = la.application_date',
+            'target_table': 'lb'
+        },
+        {
+            'source_column': "['lra.risk_id']",
+            'source_type': 'varchar(10)',
+            'source_nullable': 'not accepted',
+            'target_column': 'risk_id',
+            'target_type': 'varchar(10)',
+            'target_nullable': 'not accepted',
+            'transformation': 'lrab.risk_id = lra.risk_id',
+            'target_table': 'lrab'
+        },
+        {
+            'source_column': "['lra.loan_id']",
+            'source_type': 'varchar(10)',
+            'source_nullable': 'not accepted',
+            'target_column': 'loan_id',
+            'target_type': 'varchar(10)',
+            'target_nullable': 'not accepted',
+            'transformation': 'lrab.loan_id = lra.loan_id',
+            'target_table': 'lrab'
+        },
+        {
+            'source_column': "['lra.risk_score']",
+            'source_type': 'int',
+            'source_nullable': 'accepted',
+            'target_column': 'risk_score',
+            'target_type': 'int',
+            'target_nullable': 'accepted',
+            'transformation': 'lrab.risk_score = lra.risk_score',
+            'target_table': 'lrab'
+        },
+        {
+            'source_column': "['lra.default_probability']",
             'source_type': 'double',
-            'source_nullable': 'not specified',
-            'target_column': 'sale_amount',
+            'source_nullable': 'accepted',
+            'target_column': 'default_probability',
             'target_type': 'double',
-            'target_nullable': 'not specified',
-            'transformation': 'stb.sale_amount = str.sale_amount',
-            'target_table': 'stb'
+            'target_nullable': 'accepted',
+            'transformation': 'lrab.default_probability = lra.default_probability',
+            'target_table': 'lrab'
         },
         {
-            'source_column': "['str.transaction_time']",
-            'source_type': 'timestamp',
-            'source_nullable': 'not specified',
-            'target_column': 'transaction_time',
-            'target_type': 'timestamp',
-            'target_nullable': 'not specified',
-            'transformation': 'stb.transaction_time = str.transaction_time',
-            'target_table': 'stb'
+            'source_column': "['lra.risk_category']",
+            'source_type': 'varchar(10)',
+            'source_nullable': 'accepted',
+            'target_column': 'risk_category',
+            'target_type': 'varchar(10)',
+            'target_nullable': 'accepted',
+            'transformation': 'lrab.risk_category = lra.risk_category',
+            'target_table': 'lrab'
+        },
+        {
+            'source_column': "['lra.evaluation_date']",
+            'source_type': 'date',
+            'source_nullable': 'accepted',
+            'target_column': 'evaluation_date',
+            'target_type': 'date',
+            'target_nullable': 'accepted',
+            'transformation': 'lrab.evaluation_date = lra.evaluation_date',
+            'target_table': 'lrab'
+        },
+        {
+            'source_column': "['lra.analyst_name']",
+            'source_type': 'varchar(50)',
+            'source_nullable': 'accepted',
+            'target_column': 'analyst_name',
+            'target_type': 'varchar(50)',
+            'target_nullable': 'accepted',
+            'transformation': 'lrab.analyst_name = lra.analyst_name',
+            'target_table': 'lrab'
+        },
+        {
+            'source_column': "['lra.review_status']",
+            'source_type': 'varchar(10)',
+            'source_nullable': 'accepted',
+            'target_column': 'review_status',
+            'target_type': 'varchar(10)',
+            'target_nullable': 'accepted',
+            'transformation': 'lrab.review_status = lra.review_status',
+            'target_table': 'lrab'
+        },
+        {
+            'source_column': "['rt.transaction_id']",
+            'source_type': 'varchar(20)',
+            'source_nullable': 'not accepted',
+            'target_column': 'transaction_id',
+            'target_type': 'varchar(20)',
+            'target_nullable': 'not accepted',
+            'transformation': 'rb.transaction_id = rt.transaction_id',
+            'target_table': 'rb'
+        },
+        {
+            'source_column': "['rt.loan_id']",
+            'source_type': 'varchar(20)',
+            'source_nullable': 'not accepted',
+            'target_column': 'loan_id',
+            'target_type': 'varchar(20)',
+            'target_nullable': 'not accepted',
+            'transformation': 'rb.loan_id = rt.loan_id',
+            'target_table': 'rb'
+        },
+        {
+            'source_column': "['rt.payment_date']",
+            'source_type': 'date',
+            'source_nullable': 'accepted',
+            'target_column': 'payment_date',
+            'target_type': 'date',
+            'target_nullable': 'accepted',
+            'transformation': 'rb.payment_date = rt.payment_date',
+            'target_table': 'rb'
+        },
+        {
+            'source_column': "['rt.payment_amount']",
+            'source_type': 'int',
+            'source_nullable': 'accepted',
+            'target_column': 'payment_amount',
+            'target_type': 'int',
+            'target_nullable': 'accepted',
+            'transformation': 'rb.payment_amount = rt.payment_amount',
+            'target_table': 'rb'
+        },
+        {
+            'source_column': "['rt.payment_method']",
+            'source_type': 'varchar(20)',
+            'source_nullable': 'accepted',
+            'target_column': 'payment_method',
+            'target_type': 'varchar(20)',
+            'target_nullable': 'accepted',
+            'transformation': 'rb.payment_method = rt.payment_method',
+            'target_table': 'rb'
+        },
+        {
+            'source_column': "['rt.payment_status']",
+            'source_type': 'varchar(20)',
+            'source_nullable': 'accepted',
+            'target_column': 'payment_status',
+            'target_type': 'varchar(20)',
+            'target_nullable': 'accepted',
+            'transformation': 'rb.payment_status = rt.payment_status',
+            'target_table': 'rb'
+        },
+        {
+            'source_column': "['rt.remaining_balance']",
+            'source_type': 'int',
+            'source_nullable': 'accepted',
+            'target_column': 'remaining_balance',
+            'target_type': 'int',
+            'target_nullable': 'accepted',
+            'transformation': 'rb.remaining_balance = rt.remaining_balance',
+            'target_table': 'rb'
+        },
+        {
+            'source_column': "['rt.processed_by']",
+            'source_type': 'varchar(50)',
+            'source_nullable': 'accepted',
+            'target_column': 'processed_by',
+            'target_type': 'varchar(50)',
+            'target_nullable': 'accepted',
+            'transformation': 'rb.processed_by = rt.processed_by',
+            'target_table': 'rb'
         }
     ],
     'runtime_config': {
@@ -224,45 +458,32 @@ metadata = {
     }
 }
 
-runtime_config = metadata.get('runtime_config', {})
-base_path = runtime_config.get('base_path')
-target_path = runtime_config.get('target_path')
-read_format = runtime_config.get('read_format')
-write_format = runtime_config.get('write_format')
-write_mode = runtime_config.get('write_mode')
+base_path = metadata['runtime_config']['base_path']
+target_path = metadata['runtime_config']['target_path']
+read_format = metadata['runtime_config']['read_format']
+write_format = metadata['runtime_config']['write_format']
+write_mode = metadata['runtime_config']['write_mode']
 
-for table in metadata.get('tables', []):
-    target_table = table.get('target_table')
-    target_alias = table.get('target_alias')
-
-    mapping_details = table.get('mapping_details')
-    if mapping_details is None:
-        continue
-
-    mapping_parts = str(mapping_details).split()
-    source_table = mapping_parts[0] if len(mapping_parts) > 0 else None
-    source_alias = mapping_parts[1] if len(mapping_parts) > 1 else None
-
-    if source_table is None or source_alias is None:
-        continue
+for table in metadata['tables']:
+    mapping_details = table['mapping_details']
+    source_table, source_alias = mapping_details.split()
+    target_table = table['target_table']
+    target_alias = table['target_alias']
 
     reader = spark.read.format(read_format)
     if read_format == 'csv':
         reader = reader.option("header", "true").option("inferSchema", "true")
 
-    df = reader.load(str(base_path) + str(source_table) + "." + str(read_format))
+    df = reader.load(base_path + source_table + "." + read_format)
     df = df.alias(source_alias)
 
     transformations = []
-    for col_meta in metadata.get('columns', []):
-        if col_meta.get('target_table') != target_alias:
-            continue
-        transformation = col_meta.get('transformation')
-        target_column = col_meta.get('target_column')
-        if transformation is None or target_column is None:
-            continue
-        rhs = str(transformation).split('=', 1)[1].strip() if '=' in str(transformation) else str(transformation).strip()
-        transformations.append(f"{rhs} as {target_column}")
+    for col_meta in metadata['columns']:
+        if col_meta['target_table'] == target_alias:
+            transformation = col_meta['transformation']
+            rhs = transformation.split('=', 1)[1].strip()
+            target_col = col_meta['target_column']
+            transformations.append(f"{rhs} as {target_col}")
 
     df = df.selectExpr(*transformations)
 
@@ -270,6 +491,6 @@ for table in metadata.get('tables', []):
     if write_format == 'csv':
         writer = writer.option("header", "true")
 
-    writer.save(str(target_path) + str(target_table) + "." + str(write_format))
+    writer.save(target_path + target_table + "." + write_format)
 
 job.commit()
