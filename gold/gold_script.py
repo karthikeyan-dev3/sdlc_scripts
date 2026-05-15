@@ -141,7 +141,7 @@ gold_drug_administration_df = spark.sql(
         CAST(das.drug_name AS STRING) AS drug_name,
         CAST(das.dosage AS DOUBLE) AS dosage,
         CAST(das.route AS STRING) AS route,
-        CAST(das.frequency AS STRING) AS frequency
+        CAST(NULL AS STRING) AS frequency
     FROM drug_administrations_silver das
     """
 )
