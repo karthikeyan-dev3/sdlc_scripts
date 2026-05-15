@@ -1,8 +1,7 @@
-```python
 import sys
 from awsglue.transforms import *
 from awsglue.utils import getResolvedOptions
-from pyspark.context import SparkConte
+from pyspark.context import SparkContext
 from awsglue.context import GlueContext
 from awsglue.job import Job
 from pyspark.sql import SparkSession
@@ -186,4 +185,3 @@ FROM silver_daily_sales_summary sdss
 )
 
 job.commit()
-```
