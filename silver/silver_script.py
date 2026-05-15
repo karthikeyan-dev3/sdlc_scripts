@@ -7,253 +7,270 @@ from pyspark.sql import SparkSession
 
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
 
+SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
+TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
+FILE_FORMAT = "csv"
+
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
 job = Job(glueContext)
 job.init(args["JOB_NAME"], args)
 
-SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
-TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
-FILE_FORMAT = "csv"
-
 # ============================================================
-# 1) Read source tables from S3
+# 1) READ SOURCE TABLES (S3)
 # ============================================================
 
-products_bronze_df = (
+customers_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/products_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/customers_bronze.{FILE_FORMAT}/")
 )
-products_bronze_df.createOrReplaceTempView("products_bronze")
+customers_bronze_df.createOrReplaceTempView("customers_bronze")
 
-stores_bronze_df = (
+branches_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/stores_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/branches_bronze.{FILE_FORMAT}/")
 )
-stores_bronze_df.createOrReplaceTempView("stores_bronze")
+branches_bronze_df.createOrReplaceTempView("branches_bronze")
 
-sales_transactions_bronze_df = (
+loans_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/sales_transactions_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/loans_bronze.{FILE_FORMAT}/")
 )
-sales_transactions_bronze_df.createOrReplaceTempView("sales_transactions_bronze")
+loans_bronze_df.createOrReplaceTempView("loans_bronze")
+
+repayments_bronze_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/repayments_bronze.{FILE_FORMAT}/")
+)
+repayments_bronze_df.createOrReplaceTempView("repayments_bronze")
+
+loan_risk_assessment_bronze_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/loan_risk_assessment_bronze.{FILE_FORMAT}/")
+)
+loan_risk_assessment_bronze_df.createOrReplaceTempView("loan_risk_assessment_bronze")
 
 # ============================================================
-# 2) products_silver
+# 2) customers_silver
+#    - De-dup: one row per customer_id
 # ============================================================
 
-products_silver_df = spark.sql(
+customers_silver_df = spark.sql(
     """
     WITH ranked AS (
         SELECT
-            CAST(pb.product_id AS STRING) AS product_id,
-            TRIM(pb.product_name) AS product_name,
-            TRIM(pb.category) AS category,
-            TRIM(pb.brand) AS brand,
-            CAST(pb.price AS DOUBLE) AS price,
+            CAST(TRIM(cb.customer_id) AS STRING) AS customer_id,
+            CAST(TRIM(cb.income_segment) AS STRING) AS income_segment,
             ROW_NUMBER() OVER (
-                PARTITION BY pb.product_id
-                ORDER BY
-                    TRIM(pb.product_name) ASC,
-                    TRIM(pb.category) ASC,
-                    TRIM(pb.brand) ASC
+                PARTITION BY TRIM(cb.customer_id)
+                ORDER BY TRIM(cb.customer_id)
             ) AS rn
-        FROM products_bronze pb
+        FROM customers_bronze cb
+        WHERE TRIM(cb.customer_id) IS NOT NULL
+          AND TRIM(cb.customer_id) <> ''
     )
     SELECT
-        product_id,
-        product_name,
-        category,
-        brand,
-        CAST(price AS FLOAT) AS price
+        customer_id,
+        income_segment
     FROM ranked
     WHERE rn = 1
     """
 )
-products_silver_df.createOrReplaceTempView("products_silver")
+customers_silver_df.createOrReplaceTempView("customers_silver")
 
 (
-    products_silver_df.coalesce(1)
+    customers_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/products_silver.csv")
+    .save(f"{TARGET_PATH}/customers_silver.csv")
 )
 
 # ============================================================
-# 3) stores_silver
+# 3) branches_silver
+#    - De-dup: one row per branch_id
 # ============================================================
 
-stores_silver_df = spark.sql(
+branches_silver_df = spark.sql(
     """
     WITH ranked AS (
         SELECT
-            CAST(sb.store_id AS STRING) AS store_id,
-            TRIM(sb.store_name) AS store_name,
-            CONCAT(TRIM(sb.city), ', ', TRIM(sb.state)) AS location,
-            TRIM(sb.state) AS region,
+            CAST(TRIM(bb.branch_id) AS STRING) AS branch_id,
+            CAST(TRIM(bb.city) AS STRING) AS city,
+            CAST(TRIM(bb.state) AS STRING) AS state,
+            CAST(TRIM(bb.branch_type) AS STRING) AS branch_type,
             ROW_NUMBER() OVER (
-                PARTITION BY sb.store_id
-                ORDER BY
-                    TRIM(sb.store_name) ASC,
-                    TRIM(sb.city) ASC,
-                    TRIM(sb.state) ASC
+                PARTITION BY TRIM(bb.branch_id)
+                ORDER BY TRIM(bb.branch_id)
             ) AS rn
-        FROM stores_bronze sb
+        FROM branches_bronze bb
+        WHERE TRIM(bb.branch_id) IS NOT NULL
+          AND TRIM(bb.branch_id) <> ''
     )
     SELECT
-        store_id,
-        store_name,
-        location,
-        region
+        branch_id,
+        city,
+        state,
+        branch_type
     FROM ranked
     WHERE rn = 1
     """
 )
-stores_silver_df.createOrReplaceTempView("stores_silver")
+branches_silver_df.createOrReplaceTempView("branches_silver")
 
 (
-    stores_silver_df.coalesce(1)
+    branches_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/stores_silver.csv")
+    .save(f"{TARGET_PATH}/branches_silver.csv")
 )
 
 # ============================================================
-# 4) sales_transactions_silver
+# 4) loans_silver
+#    - Ensure valid customer_id and branch_id via INNER JOIN
+#    - De-dup: one row per loan_id
 # ============================================================
 
-sales_transactions_silver_df = spark.sql(
+loans_silver_df = spark.sql(
     """
     WITH ranked AS (
         SELECT
-            CAST(stb.transaction_id AS STRING) AS transaction_id,
-            CAST(CAST(stb.transaction_time AS TIMESTAMP) AS DATE) AS transaction_date,
-            CAST(stb.store_id AS STRING) AS store_id,
-            CAST(stb.product_id AS STRING) AS product_id,
-            CAST(stb.quantity AS INT) AS quantity_sold,
-            CAST(stb.sale_amount AS DOUBLE) AS sales_amount,
+            CAST(TRIM(lb.loan_id) AS STRING) AS loan_id,
+            CAST(TRIM(lb.customer_id) AS STRING) AS customer_id,
+            CAST(TRIM(lb.branch_id) AS STRING) AS branch_id,
+            CAST(TRIM(lb.loan_amount) AS INT) AS loan_amount,
+            CAST(TRIM(lb.loan_status) AS STRING) AS loan_status,
             ROW_NUMBER() OVER (
-                PARTITION BY stb.transaction_id
-                ORDER BY CAST(stb.transaction_time AS TIMESTAMP) DESC
+                PARTITION BY TRIM(lb.loan_id)
+                ORDER BY TRIM(lb.loan_id)
             ) AS rn
-        FROM sales_transactions_bronze stb
-        LEFT JOIN stores_silver ss
-            ON stb.store_id = ss.store_id
-        LEFT JOIN products_silver ps
-            ON stb.product_id = ps.product_id
+        FROM loans_bronze lb
+        INNER JOIN customers_silver cs
+            ON TRIM(lb.customer_id) = cs.customer_id
+        INNER JOIN branches_silver bs
+            ON TRIM(lb.branch_id) = bs.branch_id
+        WHERE TRIM(lb.loan_id) IS NOT NULL
+          AND TRIM(lb.loan_id) <> ''
+          AND TRIM(lb.customer_id) IS NOT NULL
+          AND TRIM(lb.customer_id) <> ''
+          AND TRIM(lb.branch_id) IS NOT NULL
+          AND TRIM(lb.branch_id) <> ''
+    )
+    SELECT
+        loan_id,
+        customer_id,
+        branch_id,
+        loan_amount,
+        loan_status
+    FROM ranked
+    WHERE rn = 1
+    """
+)
+loans_silver_df.createOrReplaceTempView("loans_silver")
+
+(
+    loans_silver_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/loans_silver.csv")
+)
+
+# ============================================================
+# 5) repayments_silver
+#    - Ensure valid loan_id via INNER JOIN
+#    - De-dup: one row per transaction_id
+# ============================================================
+
+repayments_silver_df = spark.sql(
+    """
+    WITH ranked AS (
+        SELECT
+            CAST(TRIM(rb.transaction_id) AS STRING) AS transaction_id,
+            CAST(TRIM(rb.loan_id) AS STRING) AS loan_id,
+            DATE(TRIM(rb.payment_date)) AS payment_date,
+            CAST(TRIM(rb.payment_amount) AS INT) AS payment_amount,
+            ROW_NUMBER() OVER (
+                PARTITION BY TRIM(rb.transaction_id)
+                ORDER BY TRIM(rb.transaction_id)
+            ) AS rn
+        FROM repayments_bronze rb
+        INNER JOIN loans_silver ls
+            ON TRIM(rb.loan_id) = ls.loan_id
+        WHERE TRIM(rb.transaction_id) IS NOT NULL
+          AND TRIM(rb.transaction_id) <> ''
+          AND TRIM(rb.loan_id) IS NOT NULL
+          AND TRIM(rb.loan_id) <> ''
     )
     SELECT
         transaction_id,
-        transaction_date,
-        store_id,
-        product_id,
-        quantity_sold,
-        sales_amount,
-        CAST(NULL AS STRING) AS customer_id
+        loan_id,
+        payment_date,
+        payment_amount
     FROM ranked
     WHERE rn = 1
     """
 )
-sales_transactions_silver_df.createOrReplaceTempView("sales_transactions_silver")
+repayments_silver_df.createOrReplaceTempView("repayments_silver")
 
 (
-    sales_transactions_silver_df.coalesce(1)
+    repayments_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/sales_transactions_silver.csv")
+    .save(f"{TARGET_PATH}/repayments_silver.csv")
 )
 
 # ============================================================
-# 5) aggregated_sales_silver
+# 6) loan_risk_assessments_silver
+#    - Ensure valid loan_id via INNER JOIN
+#    - De-dup: one row per risk_id
 # ============================================================
 
-aggregated_sales_silver_df = spark.sql(
+loan_risk_assessments_silver_df = spark.sql(
     """
+    WITH ranked AS (
+        SELECT
+            CAST(TRIM(lrab.risk_id) AS STRING) AS risk_id,
+            CAST(TRIM(lrab.loan_id) AS STRING) AS loan_id,
+            CAST(TRIM(lrab.risk_category) AS STRING) AS risk_category,
+            DATE(TRIM(lrab.evaluation_date)) AS evaluation_date,
+            ROW_NUMBER() OVER (
+                PARTITION BY TRIM(lrab.risk_id)
+                ORDER BY TRIM(lrab.risk_id)
+            ) AS rn
+        FROM loan_risk_assessment_bronze lrab
+        INNER JOIN loans_silver ls
+            ON TRIM(lrab.loan_id) = ls.loan_id
+        WHERE TRIM(lrab.risk_id) IS NOT NULL
+          AND TRIM(lrab.risk_id) <> ''
+          AND TRIM(lrab.loan_id) IS NOT NULL
+          AND TRIM(lrab.loan_id) <> ''
+    )
     SELECT
-        sts.store_id AS store_id,
-        sts.product_id AS product_id,
-        sts.transaction_date AS aggregation_date,
-        CAST(SUM(sts.quantity_sold) AS INT) AS total_quantity_sold,
-        CAST(SUM(sts.sales_amount) AS DOUBLE) AS total_sales_amount,
-        CAST(
-            CASE
-                WHEN SUM(sts.quantity_sold) > 0
-                    THEN SUM(sts.sales_amount) / SUM(sts.quantity_sold)
-            END
-            AS DOUBLE
-        ) AS average_price
-    FROM sales_transactions_silver sts
-    GROUP BY
-        sts.store_id,
-        sts.product_id,
-        sts.transaction_date
+        risk_id,
+        loan_id,
+        risk_category,
+        evaluation_date
+    FROM ranked
+    WHERE rn = 1
     """
 )
-aggregated_sales_silver_df.createOrReplaceTempView("aggregated_sales_silver")
+loan_risk_assessments_silver_df.createOrReplaceTempView("loan_risk_assessments_silver")
 
 (
-    aggregated_sales_silver_df.coalesce(1)
+    loan_risk_assessments_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/aggregated_sales_silver.csv")
-)
-
-# ============================================================
-# 6) sales_data_quality_silver
-# ============================================================
-
-sales_data_quality_silver_df = spark.sql(
-    """
-    SELECT
-        sts.transaction_date AS data_date,
-        CAST(COUNT(sts.transaction_id) AS INT) AS total_records,
-        CAST(COUNT(DISTINCT sts.transaction_id) - COUNT(sts.transaction_id) AS INT) AS duplicate_records,
-        CAST(
-            SUM(
-                CASE
-                    WHEN sts.transaction_id IS NULL
-                      OR sts.store_id IS NULL
-                      OR sts.product_id IS NULL
-                    THEN 1 ELSE 0
-                END
-            ) AS INT
-        ) AS missing_identifiers,
-        CAST(
-            100 * (
-                1 - (
-                    SUM(
-                        CASE
-                            WHEN sts.transaction_id IS NULL
-                              OR sts.store_id IS NULL
-                              OR sts.product_id IS NULL
-                            THEN 1 ELSE 0
-                        END
-                    ) / NULLIF(COUNT(*), 0)
-                )
-            )
-            AS DOUBLE
-        ) AS accuracy_percentage
-    FROM sales_transactions_silver sts
-    GROUP BY
-        sts.transaction_date
-    """
-)
-sales_data_quality_silver_df.createOrReplaceTempView("sales_data_quality_silver")
-
-(
-    sales_data_quality_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/sales_data_quality_silver.csv")
+    .save(f"{TARGET_PATH}/loan_risk_assessments_silver.csv")
 )
 
 job.commit()
