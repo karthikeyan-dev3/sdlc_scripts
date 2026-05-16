@@ -17,152 +17,68 @@ SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-# ==============================
-# 1) Read source tables from S3
-# ==============================
-trials_silver_df = (
+# ------------------------------------------------------------
+# SOURCE: silver.adverse_events_silver (aes)
+# TARGET: gold.gold_adverse_events
+# ------------------------------------------------------------
+aes_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/trials_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/adverse_events_silver.{FILE_FORMAT}/")
 )
+aes_df.createOrReplaceTempView("adverse_events_silver")
 
-patient_enrollments_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/patient_enrollments_silver.{FILE_FORMAT}/")
-)
-
-patient_visits_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/patient_visits_silver.{FILE_FORMAT}/")
-)
-
-sites_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/sites_silver.{FILE_FORMAT}/")
-)
-
-# ==============================
-# 2) Create temp views
-# ==============================
-trials_silver_df.createOrReplaceTempView("trials_silver")
-patient_enrollments_silver_df.createOrReplaceTempView("patient_enrollments_silver")
-patient_visits_silver_df.createOrReplaceTempView("patient_visits_silver")
-sites_silver_df.createOrReplaceTempView("sites_silver")
-
-# =========================================================
-# Target: gold.gold_trial_performance (gtp)
-# =========================================================
-gold_trial_performance_df = spark.sql(
+gold_adverse_events_df = spark.sql(
     """
     SELECT
-        ts.trial_id AS trial_id,
-        ts.trial_name AS trial_name,
-        COUNT(DISTINCT pes.patient_id) AS total_enrolled_patients,
-        COUNT(DISTINCT CASE WHEN pes.patient_status = 'ACTIVE' THEN pes.patient_id END) AS active_patients,
-        COUNT(DISTINCT CASE WHEN pes.patient_status = 'DROPPED' THEN pes.patient_id END) AS dropout_count,
-        CAST(COUNT(pes.enrollment_date) AS varchar(255)) AS enrollment_trend,
-        CAST(
-            100.00 * COUNT(DISTINCT pvs.visit_id) / NULLIF(COUNT(DISTINCT pvs.visit_id), 0)
-            AS decimal(5,2)
-        ) AS visit_completion_percentage
-    FROM trials_silver ts
-    LEFT JOIN patient_enrollments_silver pes
-        ON ts.trial_id = pes.trial_id
-    LEFT JOIN patient_visits_silver pvs
-        ON ts.trial_id = pvs.trial_id
-    GROUP BY
-        ts.trial_id,
-        ts.trial_name
+        CAST(aes.adverse_event_id AS STRING) AS adverse_event_id,
+        CAST(aes.description AS STRING) AS description,
+        CAST(aes.severity_classification AS STRING) AS severity_classification
+    FROM adverse_events_silver aes
     """
 )
 
 (
-    gold_trial_performance_df.coalesce(1)
+    gold_adverse_events_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_trial_performance.csv")
+    .save(f"{TARGET_PATH}/gold_adverse_events.csv")
 )
 
-# =========================================================
-# Target: gold.gold_country_performance (gcp)
-# =========================================================
-gold_country_performance_df = spark.sql(
+# ------------------------------------------------------------
+# SOURCE: silver.drug_safety_analysis_silver (dsas)
+# TARGET: gold.gold_drug_safety
+# ------------------------------------------------------------
+dsas_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/drug_safety_analysis_silver.{FILE_FORMAT}/")
+)
+dsas_df.createOrReplaceTempView("drug_safety_analysis_silver")
+
+gold_drug_safety_df = spark.sql(
     """
     SELECT
-        pes.trial_id AS trial_id,
-        pes.country AS country,
-        COUNT(DISTINCT pes.patient_id) AS total_enrolled_patients,
-        CAST(
-            1.0 * COUNT(DISTINCT CASE WHEN pes.patient_status <> 'DROPPED' THEN pes.patient_id END)
-            / NULLIF(COUNT(DISTINCT pes.patient_id), 0)
-            AS decimal(6,4)
-        ) AS patient_retention_rate,
-        CAST(COUNT(DISTINCT pvs.visit_id) AS decimal(10,4)) AS site_performance_score,
-        COUNT(DISTINCT ss.site_id) AS underperforming_sites
-    FROM patient_enrollments_silver pes
-    LEFT JOIN patient_visits_silver pvs
-        ON pes.trial_id = pvs.trial_id
-       AND pes.country = pvs.country
-    LEFT JOIN sites_silver ss
-        ON pes.trial_id = ss.trial_id
-       AND pes.site_id = ss.site_id
-    GROUP BY
-        pes.trial_id,
-        pes.country
+        CAST(dsas.patient_id AS STRING) AS patient_id,
+        CAST(dsas.drug_id AS STRING) AS drug_id,
+        CAST(dsas.dosage_amount AS DOUBLE) AS dosage_amount,
+        CAST(dsas.adverse_event_id AS STRING) AS adverse_event_id,
+        CAST(dsas.event_severity AS STRING) AS event_severity,
+        CAST(dsas.hospitalization_indicator AS BOOLEAN) AS hospitalization_indicator,
+        CAST(dsas.sae_count AS INT) AS sae_count,
+        CAST(dsas.drug_event_correlation AS BOOLEAN) AS drug_event_correlation,
+        CAST(dsas.high_risk_patient_indicator AS BOOLEAN) AS high_risk_patient_indicator
+    FROM drug_safety_analysis_silver dsas
     """
 )
 
 (
-    gold_country_performance_df.coalesce(1)
+    gold_drug_safety_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_country_performance.csv")
-)
-
-# =========================================================
-# Target: gold.gold_site_performance (gsp)
-# =========================================================
-gold_site_performance_df = spark.sql(
-    """
-    SELECT
-        ss.site_id AS site_id,
-        ss.trial_id AS trial_id,
-        ss.country AS country,
-        COUNT(DISTINCT pes.patient_id) AS total_enrolled_patients,
-        CAST(
-            1.0 * COUNT(DISTINCT CASE WHEN pes.patient_status <> 'DROPPED' THEN pes.patient_id END)
-            / NULLIF(COUNT(DISTINCT pes.patient_id), 0)
-            AS decimal(6,4)
-        ) AS patient_retention_rate,
-        CAST(
-            1.0 * COUNT(DISTINCT pvs.visit_id) / NULLIF(COUNT(DISTINCT pvs.visit_id), 0)
-            AS decimal(6,4)
-        ) AS visit_adherence_rate
-    FROM sites_silver ss
-    LEFT JOIN patient_enrollments_silver pes
-        ON ss.trial_id = pes.trial_id
-       AND ss.site_id = pes.site_id
-    LEFT JOIN patient_visits_silver pvs
-        ON ss.trial_id = pvs.trial_id
-       AND ss.site_id = pvs.site_id
-    GROUP BY
-        ss.site_id,
-        ss.trial_id,
-        ss.country
-    """
-)
-
-(
-    gold_site_performance_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_site_performance.csv")
+    .save(f"{TARGET_PATH}/gold_drug_safety.csv")
 )
 
 job.commit()
