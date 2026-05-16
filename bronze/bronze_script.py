@@ -13,219 +13,199 @@ metadata = {
     'tables': [
         {
             'target_schema': 'bronze',
-            'target_table': 'patient_enrollments_bronze',
-            'target_alias': 'peb',
-            'mapping_details': 'patient_enrollment_raw_2000 per',
-            'description': 'Bronze ingestion of patient enrollment records at patient-trial-site grain. Columns mapped from patient_enrollment_raw_2000: patient_id, trial_id, site_id, patient_name, gender, date_of_birth, country, enrollment_date, consent_status, source_system. Excludes Unnamed: 10.'
+            'target_table': 'adverse_events_bronze',
+            'target_alias': 'aeb',
+            'mapping_details': 'adverse_events_raw_2000 ae',
+            'description': 'Bronze ingestion of adverse event records from adverse_events_raw_2000. Columns mapped: event_id, patient_id, event_type, severity, event_start_date, event_end_date, outcome, related_to_drug, hospitalization_required, reported_by.'
         },
         {
             'target_schema': 'bronze',
-            'target_table': 'visits_bronze',
-            'target_alias': 'vb',
-            'mapping_details': 'clinical_visit_raw_2000 cv',
-            'description': 'Bronze ingestion of clinical visit events at visit grain. Columns mapped from clinical_visit_raw_2000: visit_id, patient_id, trial_id, visit_date, visit_type, blood_pressure, heart_rate, weight_kg, physician_notes, source_system. Excludes Unnamed: 10.'
+            'target_table': 'drug_administration_bronze',
+            'target_alias': 'dab',
+            'mapping_details': 'drug_administration_raw_2000 da',
+            'description': 'Bronze ingestion of drug administration events from drug_administration_raw_2000. Columns mapped: administration_id, patient_id, drug_code, dosage_mg, administration_date, administration_route, administered_by, batch_number.'
         }
     ],
     'columns': [
         {
-            'source_column': "['per.patient_id']",
-            'source_type': 'varchar(20)',
-            'source_nullable': 'not_accepted',
-            'target_column': 'patient_id',
-            'target_type': 'varchar(20)',
-            'target_nullable': 'not_accepted',
-            'transformation': 'peb.patient_id = per.patient_id',
-            'target_table': 'peb'
-        },
-        {
-            'source_column': "['per.trial_id']",
-            'source_type': 'varchar(20)',
-            'source_nullable': 'not_accepted',
-            'target_column': 'trial_id',
-            'target_type': 'varchar(20)',
-            'target_nullable': 'not_accepted',
-            'transformation': 'peb.trial_id = per.trial_id',
-            'target_table': 'peb'
-        },
-        {
-            'source_column': "['per.site_id']",
-            'source_type': 'varchar(20)',
-            'source_nullable': 'not_accepted',
-            'target_column': 'site_id',
-            'target_type': 'varchar(20)',
-            'target_nullable': 'not_accepted',
-            'transformation': 'peb.site_id = per.site_id',
-            'target_table': 'peb'
-        },
-        {
-            'source_column': "['per.patient_name']",
-            'source_type': 'varchar(255)',
-            'source_nullable': 'accepted',
-            'target_column': 'patient_name',
-            'target_type': 'varchar(255)',
-            'target_nullable': 'accepted',
-            'transformation': 'peb.patient_name = per.patient_name',
-            'target_table': 'peb'
-        },
-        {
-            'source_column': "['per.gender']",
-            'source_type': 'varchar(10)',
-            'source_nullable': 'accepted',
-            'target_column': 'gender',
-            'target_type': 'varchar(10)',
-            'target_nullable': 'accepted',
-            'transformation': 'peb.gender = per.gender',
-            'target_table': 'peb'
-        },
-        {
-            'source_column': "['per.date_of_birth']",
-            'source_type': 'date',
-            'source_nullable': 'accepted',
-            'target_column': 'date_of_birth',
-            'target_type': 'date',
-            'target_nullable': 'accepted',
-            'transformation': 'peb.date_of_birth = per.date_of_birth',
-            'target_table': 'peb'
-        },
-        {
-            'source_column': "['per.country']",
-            'source_type': 'varchar(100)',
-            'source_nullable': 'accepted',
-            'target_column': 'country',
-            'target_type': 'varchar(100)',
-            'target_nullable': 'accepted',
-            'transformation': 'peb.country = per.country',
-            'target_table': 'peb'
-        },
-        {
-            'source_column': "['per.enrollment_date']",
-            'source_type': 'timestamp',
-            'source_nullable': 'accepted',
-            'target_column': 'enrollment_date',
-            'target_type': 'timestamp',
-            'target_nullable': 'accepted',
-            'transformation': 'peb.enrollment_date = per.enrollment_date',
-            'target_table': 'peb'
-        },
-        {
-            'source_column': "['per.consent_status']",
-            'source_type': 'varchar(20)',
-            'source_nullable': 'accepted',
-            'target_column': 'consent_status',
-            'target_type': 'varchar(20)',
-            'target_nullable': 'accepted',
-            'transformation': 'peb.consent_status = per.consent_status',
-            'target_table': 'peb'
-        },
-        {
-            'source_column': "['per.source_system']",
-            'source_type': 'varchar(50)',
-            'source_nullable': 'accepted',
-            'target_column': 'source_system',
-            'target_type': 'varchar(50)',
-            'target_nullable': 'accepted',
-            'transformation': 'peb.source_system = per.source_system',
-            'target_table': 'peb'
-        },
-        {
-            'source_column': "['cv.visit_id']",
+            'source_column': "['ae.event_id']",
             'source_type': 'varchar(255)',
             'source_nullable': 'not_accepted',
-            'target_column': 'visit_id',
+            'target_column': 'event_id',
             'target_type': 'varchar(255)',
             'target_nullable': 'not_accepted',
-            'transformation': 'vb.visit_id = cv.visit_id',
-            'target_table': 'vb'
+            'transformation': 'aeb.event_id = ae.event_id',
+            'target_table': 'aeb'
         },
         {
-            'source_column': "['cv.patient_id']",
+            'source_column': "['ae.patient_id']",
             'source_type': 'varchar(255)',
-            'source_nullable': 'not_accepted',
+            'source_nullable': 'accepted',
             'target_column': 'patient_id',
             'target_type': 'varchar(255)',
-            'target_nullable': 'not_accepted',
-            'transformation': 'vb.patient_id = cv.patient_id',
-            'target_table': 'vb'
+            'target_nullable': 'accepted',
+            'transformation': 'aeb.patient_id = ae.patient_id',
+            'target_table': 'aeb'
         },
         {
-            'source_column': "['cv.trial_id']",
+            'source_column': "['ae.event_type']",
             'source_type': 'varchar(255)',
-            'source_nullable': 'not_accepted',
-            'target_column': 'trial_id',
+            'source_nullable': 'accepted',
+            'target_column': 'event_type',
             'target_type': 'varchar(255)',
-            'target_nullable': 'not_accepted',
-            'transformation': 'vb.trial_id = cv.trial_id',
-            'target_table': 'vb'
+            'target_nullable': 'accepted',
+            'transformation': 'aeb.event_type = ae.event_type',
+            'target_table': 'aeb'
         },
         {
-            'source_column': "['cv.visit_date']",
+            'source_column': "['ae.severity']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'accepted',
+            'target_column': 'severity',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'accepted',
+            'transformation': 'aeb.severity = ae.severity',
+            'target_table': 'aeb'
+        },
+        {
+            'source_column': "['ae.event_start_date']",
             'source_type': 'timestamp',
             'source_nullable': 'accepted',
-            'target_column': 'visit_date',
+            'target_column': 'event_start_date',
             'target_type': 'timestamp',
             'target_nullable': 'accepted',
-            'transformation': 'vb.visit_date = cv.visit_date',
-            'target_table': 'vb'
+            'transformation': 'aeb.event_start_date = ae.event_start_date',
+            'target_table': 'aeb'
         },
         {
-            'source_column': "['cv.visit_type']",
+            'source_column': "['ae.event_end_date']",
+            'source_type': 'timestamp',
+            'source_nullable': 'accepted',
+            'target_column': 'event_end_date',
+            'target_type': 'timestamp',
+            'target_nullable': 'accepted',
+            'transformation': 'aeb.event_end_date = ae.event_end_date',
+            'target_table': 'aeb'
+        },
+        {
+            'source_column': "['ae.outcome']",
             'source_type': 'varchar(255)',
             'source_nullable': 'accepted',
-            'target_column': 'visit_type',
+            'target_column': 'outcome',
             'target_type': 'varchar(255)',
             'target_nullable': 'accepted',
-            'transformation': 'vb.visit_type = cv.visit_type',
-            'target_table': 'vb'
+            'transformation': 'aeb.outcome = ae.outcome',
+            'target_table': 'aeb'
         },
         {
-            'source_column': "['cv.blood_pressure']",
-            'source_type': 'float64',
+            'source_column': "['ae.related_to_drug']",
+            'source_type': 'boolean',
             'source_nullable': 'accepted',
-            'target_column': 'blood_pressure',
-            'target_type': 'float64',
+            'target_column': 'related_to_drug',
+            'target_type': 'boolean',
             'target_nullable': 'accepted',
-            'transformation': 'vb.blood_pressure = cv.blood_pressure',
-            'target_table': 'vb'
+            'transformation': 'aeb.related_to_drug = ae.related_to_drug',
+            'target_table': 'aeb'
         },
         {
-            'source_column': "['cv.heart_rate']",
-            'source_type': 'float64',
+            'source_column': "['ae.hospitalization_required']",
+            'source_type': 'boolean',
             'source_nullable': 'accepted',
-            'target_column': 'heart_rate',
-            'target_type': 'float64',
+            'target_column': 'hospitalization_required',
+            'target_type': 'boolean',
             'target_nullable': 'accepted',
-            'transformation': 'vb.heart_rate = cv.heart_rate',
-            'target_table': 'vb'
+            'transformation': 'aeb.hospitalization_required = ae.hospitalization_required',
+            'target_table': 'aeb'
         },
         {
-            'source_column': "['cv.weight_kg']",
-            'source_type': 'float64',
-            'source_nullable': 'accepted',
-            'target_column': 'weight_kg',
-            'target_type': 'float64',
-            'target_nullable': 'accepted',
-            'transformation': 'vb.weight_kg = cv.weight_kg',
-            'target_table': 'vb'
-        },
-        {
-            'source_column': "['cv.physician_notes']",
-            'source_type': 'text',
-            'source_nullable': 'accepted',
-            'target_column': 'physician_notes',
-            'target_type': 'text',
-            'target_nullable': 'accepted',
-            'transformation': 'vb.physician_notes = cv.physician_notes',
-            'target_table': 'vb'
-        },
-        {
-            'source_column': "['cv.source_system']",
+            'source_column': "['ae.reported_by']",
             'source_type': 'varchar(255)',
             'source_nullable': 'accepted',
-            'target_column': 'source_system',
+            'target_column': 'reported_by',
             'target_type': 'varchar(255)',
             'target_nullable': 'accepted',
-            'transformation': 'vb.source_system = cv.source_system',
-            'target_table': 'vb'
+            'transformation': 'aeb.reported_by = ae.reported_by',
+            'target_table': 'aeb'
+        },
+        {
+            'source_column': "['da.administration_id']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'not_accepted',
+            'target_column': 'administration_id',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'not_accepted',
+            'transformation': 'dab.administration_id = da.administration_id',
+            'target_table': 'dab'
+        },
+        {
+            'source_column': "['da.patient_id']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'accepted',
+            'target_column': 'patient_id',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'accepted',
+            'transformation': 'dab.patient_id = da.patient_id',
+            'target_table': 'dab'
+        },
+        {
+            'source_column': "['da.drug_code']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'accepted',
+            'target_column': 'drug_code',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'accepted',
+            'transformation': 'dab.drug_code = da.drug_code',
+            'target_table': 'dab'
+        },
+        {
+            'source_column': "['da.dosage_mg']",
+            'source_type': 'double',
+            'source_nullable': 'accepted',
+            'target_column': 'dosage_mg',
+            'target_type': 'double',
+            'target_nullable': 'accepted',
+            'transformation': 'dab.dosage_mg = da.dosage_mg',
+            'target_table': 'dab'
+        },
+        {
+            'source_column': "['da.administration_date']",
+            'source_type': 'timestamp',
+            'source_nullable': 'accepted',
+            'target_column': 'administration_date',
+            'target_type': 'timestamp',
+            'target_nullable': 'accepted',
+            'transformation': 'dab.administration_date = da.administration_date',
+            'target_table': 'dab'
+        },
+        {
+            'source_column': "['da.administration_route']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'accepted',
+            'target_column': 'administration_route',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'accepted',
+            'transformation': 'dab.administration_route = da.administration_route',
+            'target_table': 'dab'
+        },
+        {
+            'source_column': "['da.administered_by']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'accepted',
+            'target_column': 'administered_by',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'accepted',
+            'transformation': 'dab.administered_by = da.administered_by',
+            'target_table': 'dab'
+        },
+        {
+            'source_column': "['da.batch_number']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'accepted',
+            'target_column': 'batch_number',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'accepted',
+            'transformation': 'dab.batch_number = da.batch_number',
+            'target_table': 'dab'
         }
     ],
     'runtime_config': {
@@ -244,39 +224,50 @@ read_format = runtime_config.get('read_format')
 write_format = runtime_config.get('write_format')
 write_mode = runtime_config.get('write_mode')
 
+def _join_path(path, name):
+    if path is None:
+        return None
+    if path.endswith('/'):
+        return path + name
+    return path + '/' + name
+
 for table in metadata.get('tables', []):
     mapping_details = table.get('mapping_details', '')
-    mapping_parts = mapping_details.split()
-    source_table = mapping_parts[0] if len(mapping_parts) > 0 else None
-    source_alias = mapping_parts[1] if len(mapping_parts) > 1 else None
+    parts = mapping_details.split()
+    source_table = parts[0] if len(parts) > 0 else None
+    source_alias = parts[1] if len(parts) > 1 else None
 
     target_table = table.get('target_table')
     target_alias = table.get('target_alias')
 
+    input_path = _join_path(base_path, f"{source_table}.{read_format}")
+
     reader = spark.read.format(read_format)
     if read_format == 'csv':
-        reader = reader.option('header', 'true').option('inferSchema', 'true')
+        reader = reader.option("header", "true").option("inferSchema", "true")
 
-    df = reader.load(base_path + f"{source_table}.{read_format}")
+    df = reader.load(input_path)
     df = df.alias(source_alias)
 
     transformations = []
     for col_meta in metadata.get('columns', []):
-        if col_meta.get('target_table') == target_alias:
-            transformation = col_meta.get('transformation', '')
-            if '=' in transformation:
-                rhs = transformation.split('=', 1)[1].strip()
-            else:
-                rhs = transformation.strip()
-            target_column = col_meta.get('target_column')
-            transformations.append(f"{rhs} as {target_column}")
+        if col_meta.get('target_table') != target_alias:
+            continue
+        transformation = col_meta.get('transformation', '')
+        if '=' not in transformation:
+            continue
+        rhs = transformation.split('=', 1)[1].strip()
+        target_column = col_meta.get('target_column')
+        transformations.append(f"{rhs} as {target_column}")
 
     df = df.selectExpr(*transformations)
 
+    output_path = _join_path(target_path, f"{target_table}.{write_format}")
+
     writer = df.write.mode(write_mode).format(write_format)
     if write_format == 'csv':
-        writer = writer.option('header', 'true')
+        writer = writer.option("header", "true")
 
-    writer.save(target_path + f"{target_table}.{write_format}")
+    writer.save(output_path)
 
 job.commit()
