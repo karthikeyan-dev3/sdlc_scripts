@@ -42,7 +42,7 @@ metadata = {
             'target_type': 'varchar(10)',
             'target_nullable': 'not specified',
             'transformation': 'pr.product_id = pr.product_id',
-            'target_table': 'pr'
+            'target_table': 'pb'
         },
         {
             'source_column': "['pr.product_name']",
@@ -52,7 +52,7 @@ metadata = {
             'target_type': 'varchar(255)',
             'target_nullable': 'not specified',
             'transformation': 'pr.product_name = pr.product_name',
-            'target_table': 'pr'
+            'target_table': 'pb'
         },
         {
             'source_column': "['pr.category']",
@@ -62,7 +62,7 @@ metadata = {
             'target_type': 'varchar(100)',
             'target_nullable': 'not specified',
             'transformation': 'pr.category = pr.category',
-            'target_table': 'pr'
+            'target_table': 'pb'
         },
         {
             'source_column': "['pr.brand']",
@@ -72,7 +72,7 @@ metadata = {
             'target_type': 'varchar(100)',
             'target_nullable': 'not specified',
             'transformation': 'pr.brand = pr.brand',
-            'target_table': 'pr'
+            'target_table': 'pb'
         },
         {
             'source_column': "['pr.price']",
@@ -82,7 +82,7 @@ metadata = {
             'target_type': 'float',
             'target_nullable': 'not specified',
             'transformation': 'pr.price = pr.price',
-            'target_table': 'pr'
+            'target_table': 'pb'
         },
         {
             'source_column': "['pr.is_active']",
@@ -92,7 +92,7 @@ metadata = {
             'target_type': 'boolean',
             'target_nullable': 'not specified',
             'transformation': 'pr.is_active = pr.is_active',
-            'target_table': 'pr'
+            'target_table': 'pb'
         },
         {
             'source_column': "['sr.store_id']",
@@ -102,7 +102,7 @@ metadata = {
             'target_type': 'varchar(10)',
             'target_nullable': 'not specified',
             'transformation': 'sr.store_id = sr.store_id',
-            'target_table': 'sr'
+            'target_table': 'sb'
         },
         {
             'source_column': "['sr.store_name']",
@@ -112,7 +112,7 @@ metadata = {
             'target_type': 'varchar(255)',
             'target_nullable': 'not specified',
             'transformation': 'sr.store_name = sr.store_name',
-            'target_table': 'sr'
+            'target_table': 'sb'
         },
         {
             'source_column': "['sr.city']",
@@ -122,7 +122,7 @@ metadata = {
             'target_type': 'varchar(100)',
             'target_nullable': 'not specified',
             'transformation': 'sr.city = sr.city',
-            'target_table': 'sr'
+            'target_table': 'sb'
         },
         {
             'source_column': "['sr.state']",
@@ -132,7 +132,7 @@ metadata = {
             'target_type': 'varchar(100)',
             'target_nullable': 'not specified',
             'transformation': 'sr.state = sr.state',
-            'target_table': 'sr'
+            'target_table': 'sb'
         },
         {
             'source_column': "['sr.store_type']",
@@ -142,7 +142,7 @@ metadata = {
             'target_type': 'varchar(50)',
             'target_nullable': 'not specified',
             'transformation': 'sr.store_type = sr.store_type',
-            'target_table': 'sr'
+            'target_table': 'sb'
         },
         {
             'source_column': "['sr.open_date']",
@@ -152,7 +152,7 @@ metadata = {
             'target_type': 'date',
             'target_nullable': 'not specified',
             'transformation': 'sr.open_date = sr.open_date',
-            'target_table': 'sr'
+            'target_table': 'sb'
         },
         {
             'source_column': "['str.transaction_id']",
@@ -162,7 +162,7 @@ metadata = {
             'target_type': 'varchar(10)',
             'target_nullable': 'not specified',
             'transformation': 'str.transaction_id = str.transaction_id',
-            'target_table': 'str'
+            'target_table': 'stb'
         },
         {
             'source_column': "['str.store_id']",
@@ -172,7 +172,7 @@ metadata = {
             'target_type': 'varchar(10)',
             'target_nullable': 'not specified',
             'transformation': 'str.store_id = str.store_id',
-            'target_table': 'str'
+            'target_table': 'stb'
         },
         {
             'source_column': "['str.product_id']",
@@ -182,7 +182,7 @@ metadata = {
             'target_type': 'varchar(10)',
             'target_nullable': 'not specified',
             'transformation': 'str.product_id = str.product_id',
-            'target_table': 'str'
+            'target_table': 'stb'
         },
         {
             'source_column': "['str.quantity']",
@@ -192,7 +192,7 @@ metadata = {
             'target_type': 'int',
             'target_nullable': 'not specified',
             'transformation': 'str.quantity = str.quantity',
-            'target_table': 'str'
+            'target_table': 'stb'
         },
         {
             'source_column': "['str.sale_amount']",
@@ -202,7 +202,7 @@ metadata = {
             'target_type': 'double',
             'target_nullable': 'not specified',
             'transformation': 'str.sale_amount = str.sale_amount',
-            'target_table': 'str'
+            'target_table': 'stb'
         },
         {
             'source_column': "['str.transaction_time']",
@@ -212,7 +212,7 @@ metadata = {
             'target_type': 'timestamp',
             'target_nullable': 'not specified',
             'transformation': 'str.transaction_time = str.transaction_time',
-            'target_table': 'str'
+            'target_table': 'stb'
         }
     ],
     'runtime_config': {
