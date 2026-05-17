@@ -66,7 +66,8 @@ dsas_df.createOrReplaceTempView("daily_sales_agg_silver")
 # Target: gold_cleaned_sales
 # =========================
 
-gold_cleaned_sales_df = spark.sql("""
+gold_cleaned_sales_df = spark.sql(
+    """
 SELECT
   CAST(stcs.clean_transaction_id AS STRING) AS clean_transaction_id,
   CAST(stcs.clean_product_id AS STRING) AS clean_product_id,
@@ -76,11 +77,11 @@ SELECT
   CAST(stcs.clean_transaction_date AS DATE) AS clean_transaction_date,
   CAST(stcs.clean_customer_id AS STRING) AS clean_customer_id
 FROM sales_transactions_clean_silver stcs
-""")
+"""
+)
 
 (
-    gold_cleaned_sales_df
-    .coalesce(1)
+    gold_cleaned_sales_df.coalesce(1)
     .write
     .mode("overwrite")
     .format("csv")
@@ -92,7 +93,8 @@ FROM sales_transactions_clean_silver stcs
 # Target: gold_sales
 # =========================
 
-gold_sales_df = spark.sql("""
+gold_sales_df = spark.sql(
+    """
 SELECT
   CAST(sfs.transaction_id AS STRING) AS transaction_id,
   CAST(sfs.product_id AS STRING) AS product_id,
@@ -102,11 +104,11 @@ SELECT
   CAST(sfs.transaction_date AS DATE) AS transaction_date,
   CAST(sfs.customer_id AS STRING) AS customer_id
 FROM sales_fact_silver sfs
-""")
+"""
+)
 
 (
-    gold_sales_df
-    .coalesce(1)
+    gold_sales_df.coalesce(1)
     .write
     .mode("overwrite")
     .format("csv")
@@ -118,7 +120,8 @@ FROM sales_fact_silver sfs
 # Target: gold_product
 # =========================
 
-gold_product_df = spark.sql("""
+gold_product_df = spark.sql(
+    """
 SELECT
   CAST(ps.product_id AS STRING) AS product_id,
   CAST(ps.product_name AS STRING) AS product_name,
@@ -126,11 +129,11 @@ SELECT
   CAST(ps.brand AS STRING) AS brand,
   CAST(ps.price AS FLOAT) AS price
 FROM product_silver ps
-""")
+"""
+)
 
 (
-    gold_product_df
-    .coalesce(1)
+    gold_product_df.coalesce(1)
     .write
     .mode("overwrite")
     .format("csv")
@@ -142,18 +145,19 @@ FROM product_silver ps
 # Target: gold_store
 # =========================
 
-gold_store_df = spark.sql("""
+gold_store_df = spark.sql(
+    """
 SELECT
   CAST(ss.store_id AS STRING) AS store_id,
   CAST(ss.store_name AS STRING) AS store_name,
   CAST(ss.location AS STRING) AS location,
   CAST(ss.store_type AS STRING) AS store_type
 FROM store_silver ss
-""")
+"""
+)
 
 (
-    gold_store_df
-    .coalesce(1)
+    gold_store_df.coalesce(1)
     .write
     .mode("overwrite")
     .format("csv")
@@ -165,7 +169,8 @@ FROM store_silver ss
 # Target: gold_aggregated_sales
 # =========================
 
-gold_aggregated_sales_df = spark.sql("""
+gold_aggregated_sales_df = spark.sql(
+    """
 SELECT
   CAST(dsas.date AS DATE) AS date,
   CAST(dsas.store_id AS STRING) AS store_id,
@@ -173,11 +178,11 @@ SELECT
   CAST(dsas.total_quantity_sold AS INT) AS total_quantity_sold,
   CAST(dsas.total_sales_amount AS DOUBLE) AS total_sales_amount
 FROM daily_sales_agg_silver dsas
-""")
+"""
+)
 
 (
-    gold_aggregated_sales_df
-    .coalesce(1)
+    gold_aggregated_sales_df.coalesce(1)
     .write
     .mode("overwrite")
     .format("csv")
