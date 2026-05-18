@@ -1,4 +1,5 @@
-
+from awsglue.context import GlueContext
+from pyspark.context import SparkContext
 from awsglue.job import Job
 
 sc = SparkContext()
@@ -15,31 +16,31 @@ metadata = {
             'target_table': 'products_bronze',
             'target_alias': 'pb',
             'mapping_details': 'products_raw pr',
-            'description': 'Bronze ingestion of raw product master data from products_raw with no transformations, joins, or aggregations.'
+            'description': 'Bronze ingestion of raw product master data (product_id, product_name, category, brand, price, is_active) from products_raw without transformations.'
         },
         {
             'target_schema': 'bronze',
             'target_table': 'stores_bronze',
             'target_alias': 'sb',
             'mapping_details': 'stores_raw sr',
-            'description': 'Bronze ingestion of raw store master data from stores_raw with no transformations, joins, or aggregations.'
+            'description': 'Bronze ingestion of raw store master data (store_id, store_name, city, state, store_type, open_date) from stores_raw without transformations.'
         },
         {
             'target_schema': 'bronze',
             'target_table': 'sales_transactions_bronze',
             'target_alias': 'stb',
             'mapping_details': 'sales_transactions_raw str',
-            'description': 'Bronze ingestion of raw sales transaction data from sales_transactions_raw with no transformations, joins, or aggregations.'
+            'description': 'Bronze ingestion of raw sales transaction data (transaction_id, store_id, product_id, quantity, sale_amount, transaction_time) from sales_transactions_raw without transformations.'
         }
     ],
     'columns': [
         {
             'source_column': "['pr.product_id']",
             'source_type': 'varchar(10)',
-            'source_nullable': 'not_accepted',
+            'source_nullable': 'not accepted',
             'target_column': 'product_id',
             'target_type': 'varchar(10)',
-            'target_nullable': 'not_accepted',
+            'target_nullable': 'not accepted',
             'transformation': 'pb.product_id = pr.product_id',
             'target_table': 'pb'
         },
@@ -96,10 +97,10 @@ metadata = {
         {
             'source_column': "['sr.store_id']",
             'source_type': 'varchar(10)',
-            'source_nullable': 'not_accepted',
+            'source_nullable': 'not accepted',
             'target_column': 'store_id',
             'target_type': 'varchar(10)',
-            'target_nullable': 'not_accepted',
+            'target_nullable': 'not accepted',
             'transformation': 'sb.store_id = sr.store_id',
             'target_table': 'sb'
         },
@@ -156,30 +157,30 @@ metadata = {
         {
             'source_column': "['str.transaction_id']",
             'source_type': 'varchar(10)',
-            'source_nullable': 'not_accepted',
+            'source_nullable': 'not accepted',
             'target_column': 'transaction_id',
             'target_type': 'varchar(10)',
-            'target_nullable': 'not_accepted',
+            'target_nullable': 'not accepted',
             'transformation': 'stb.transaction_id = str.transaction_id',
             'target_table': 'stb'
         },
         {
             'source_column': "['str.store_id']",
             'source_type': 'varchar(10)',
-            'source_nullable': 'accepted',
+            'source_nullable': 'not accepted',
             'target_column': 'store_id',
             'target_type': 'varchar(10)',
-            'target_nullable': 'accepted',
+            'target_nullable': 'not accepted',
             'transformation': 'stb.store_id = str.store_id',
             'target_table': 'stb'
         },
         {
             'source_column': "['str.product_id']",
             'source_type': 'varchar(10)',
-            'source_nullable': 'accepted',
+            'source_nullable': 'not accepted',
             'target_column': 'product_id',
             'target_type': 'varchar(10)',
-            'target_nullable': 'accepted',
+            'target_nullable': 'not accepted',
             'transformation': 'stb.product_id = str.product_id',
             'target_table': 'stb'
         },
@@ -241,25 +242,27 @@ for table in metadata.get('tables', []):
 
     reader = spark.read.format(read_format)
     if read_format == 'csv':
-        reader = reader.option('header', 'true').option('inferSchema', 'true')
+        reader = reader.option("header", "true").option("inferSchema", "true")
 
-    df = reader.load(base_path + f"{source_table}.{read_format}")
+    df = reader.load(base_path + source_table + "." + read_format)
+
     df = df.alias(source_alias)
 
     transformations = []
     for col_meta in metadata.get('columns', []):
         if col_meta.get('target_table') == target_alias:
             transformation = col_meta.get('transformation', '')
-            rhs = transformation.split('=', 1)[1].strip() if '=' in transformation else transformation.strip()
-            target_column = col_meta.get('target_column')
-            transformations.append(f"{rhs} as {target_column}")
+            if '=' in transformation:
+                rhs = transformation.split('=', 1)[1].strip()
+                target_column = col_meta.get('target_column')
+                transformations.append(f"{rhs} as {target_column}")
 
     df = df.selectExpr(*transformations)
 
     writer = df.write.mode(write_mode).format(write_format)
     if write_format == 'csv':
-        writer = writer.option('header', 'true')
+        writer = writer.option("header", "true")
 
-    writer.save(target_path + f"{target_table}.{write_format}")
+    writer.save(target_path + target_table + "." + write_format)
 
 job.commit()
