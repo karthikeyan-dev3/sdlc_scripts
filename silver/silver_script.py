@@ -9,7 +9,7 @@ args = getResolvedOptions(sys.argv, ["JOB_NAME"])
 
 sc = SparkContext()
 glueContext = GlueContext(sc)
-spark = glueContext.spark_session
+spark: SparkSession = glueContext.spark_session
 job = Job(glueContext)
 job.init(args["JOB_NAME"], args)
 
@@ -17,203 +17,252 @@ SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 FILE_FORMAT = "csv"
 
-# ------------------------------------------------------------
-# Read Source Tables (CSV)
-# ------------------------------------------------------------
-customers_bronze_df = (
+# -----------------------------------------
+# 1) Read source tables from S3
+# -----------------------------------------
+sales_transactions_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/customers_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/sales_transactions_bronze.{FILE_FORMAT}/")
 )
 
-branches_bronze_df = (
+products_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/branches_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/products_bronze.{FILE_FORMAT}/")
 )
 
-loan_applications_bronze_df = (
+stores_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/loan_applications_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/stores_bronze.{FILE_FORMAT}/")
 )
 
-loan_risk_assessment_bronze_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/loan_risk_assessment_bronze.{FILE_FORMAT}/")
+# -----------------------------------------
+# 2) Create temp views
+# -----------------------------------------
+sales_transactions_bronze_df.createOrReplaceTempView("sales_transactions_bronze")
+products_bronze_df.createOrReplaceTempView("products_bronze")
+stores_bronze_df.createOrReplaceTempView("stores_bronze")
+
+# ============================================================
+# TARGET TABLE: sales_transactions_silver
+# ============================================================
+sales_transactions_silver_sql = """
+WITH base AS (
+  SELECT
+    stb.transaction_id,
+    CAST(stb.transaction_time AS timestamp) AS transaction_time_ts,
+    CAST(stb.transaction_time AS date) AS date,
+    stb.product_id,
+    stb.store_id,
+    CAST(stb.sale_amount AS double) AS sales_amount,
+    CAST(stb.quantity AS int) AS quantity_sold,
+    ROW_NUMBER() OVER (
+      PARTITION BY stb.transaction_id
+      ORDER BY CAST(stb.transaction_time AS timestamp) DESC
+    ) AS rn
+  FROM sales_transactions_bronze stb
+  WHERE
+    stb.transaction_id IS NOT NULL AND TRIM(stb.transaction_id) <> ''
+    AND stb.store_id IS NOT NULL AND TRIM(stb.store_id) <> ''
+    AND stb.product_id IS NOT NULL AND TRIM(stb.product_id) <> ''
+    AND CAST(stb.quantity AS int) >= 0
+    AND CAST(stb.sale_amount AS double) >= 0
 )
+SELECT
+  transaction_id,
+  date,
+  product_id,
+  store_id,
+  sales_amount,
+  quantity_sold
+FROM base
+WHERE rn = 1
+"""
 
-repayment_transactions_bronze_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/repayment_transactions_bronze.{FILE_FORMAT}/")
-)
+sales_transactions_silver_df = spark.sql(sales_transactions_silver_sql)
 
-# ------------------------------------------------------------
-# Temp Views
-# ------------------------------------------------------------
-customers_bronze_df.createOrReplaceTempView("customers_bronze")
-branches_bronze_df.createOrReplaceTempView("branches_bronze")
-loan_applications_bronze_df.createOrReplaceTempView("loan_applications_bronze")
-loan_risk_assessment_bronze_df.createOrReplaceTempView("loan_risk_assessment_bronze")
-repayment_transactions_bronze_df.createOrReplaceTempView("repayment_transactions_bronze")
-
-# ------------------------------------------------------------
-# customers_silver
-# ------------------------------------------------------------
-customers_silver_df = spark.sql(
-    """
-    WITH base AS (
-      SELECT
-        CAST(TRIM(cb.customer_id) AS STRING) AS customer_id,
-        CAST(TRIM(cb.customer_name) AS STRING) AS customer_name,
-        CAST(TRIM(cb.income_segment) AS STRING) AS customer_segment,
-        ROW_NUMBER() OVER (
-          PARTITION BY TRIM(cb.customer_id)
-          ORDER BY
-            CASE WHEN cb.customer_name IS NOT NULL THEN 1 ELSE 0 END DESC,
-            CASE WHEN cb.income_segment IS NOT NULL THEN 1 ELSE 0 END DESC
-        ) AS rn
-      FROM customers_bronze cb
-      WHERE cb.customer_id IS NOT NULL
-    )
-    SELECT
-      CAST(customer_id AS STRING) AS customer_id,
-      CAST(customer_name AS STRING) AS customer_name,
-      CAST(customer_segment AS STRING) AS customer_segment
-    FROM base
-    WHERE rn = 1
-    """
-)
-
+sales_transactions_silver_output = f"{TARGET_PATH}/sales_transactions_silver.csv"
 (
-    customers_silver_df.coalesce(1)
+    sales_transactions_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/customers_silver.csv")
+    .save(sales_transactions_silver_output)
 )
 
-# ------------------------------------------------------------
-# branches_silver
-# ------------------------------------------------------------
-branches_silver_df = spark.sql(
-    """
-    WITH base AS (
-      SELECT
-        CAST(TRIM(bb.branch_id) AS STRING) AS branch_id,
-        CAST(TRIM(bb.branch_name) AS STRING) AS branch_name,
-        CAST(TRIM(bb.branch_id) AS STRING) AS cost_center,
-        ROW_NUMBER() OVER (
-          PARTITION BY TRIM(bb.branch_id)
-          ORDER BY
-            CASE WHEN bb.branch_name IS NOT NULL THEN 1 ELSE 0 END DESC
-        ) AS rn
-      FROM branches_bronze bb
-      WHERE bb.branch_id IS NOT NULL
-    )
-    SELECT
-      CAST(branch_id AS STRING) AS branch_id,
-      CAST(branch_name AS STRING) AS branch_name,
-      CAST(cost_center AS STRING) AS cost_center
-    FROM base
-    WHERE rn = 1
-    """
-)
+sales_transactions_silver_df.createOrReplaceTempView("sales_transactions_silver")
 
+# ============================================================
+# TARGET TABLE: product_details_silver
+# ============================================================
+product_details_silver_sql = """
+WITH base AS (
+  SELECT
+    pb.product_id,
+    TRIM(pb.product_name) AS product_name,
+    TRIM(pb.category) AS product_category,
+    CAST(pb.price AS float) AS product_price,
+    ROW_NUMBER() OVER (
+      PARTITION BY pb.product_id
+      ORDER BY pb.product_id
+    ) AS rn
+  FROM products_bronze pb
+  WHERE
+    pb.product_id IS NOT NULL AND TRIM(pb.product_id) <> ''
+    AND CAST(pb.price AS float) >= 0
+    AND CAST(pb.is_active AS boolean) = true
+)
+SELECT
+  product_id,
+  product_name,
+  product_category,
+  product_price
+FROM base
+WHERE rn = 1
+"""
+
+product_details_silver_df = spark.sql(product_details_silver_sql)
+
+product_details_silver_output = f"{TARGET_PATH}/product_details_silver.csv"
 (
-    branches_silver_df.coalesce(1)
+    product_details_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/branches_silver.csv")
+    .save(product_details_silver_output)
 )
 
-# ------------------------------------------------------------
-# loans_silver
-# ------------------------------------------------------------
-loans_silver_df = spark.sql(
-    """
-    WITH lra_max AS (
-      SELECT
-        loan_id,
-        MAX(evaluation_date) AS latest_evaluation_date
-      FROM loan_risk_assessment_bronze
-      GROUP BY loan_id
-    ),
-    rta AS (
-      SELECT
-        loan_id,
-        SUM(CASE WHEN payment_status IN ('SUCCESS','COMPLETED','PAID') THEN CAST(payment_amount AS INT) ELSE 0 END) AS amount_repaid,
-        MAX(payment_date) AS last_payment_date,
-        MIN(CASE WHEN payment_status IN ('SUCCESS','COMPLETED','PAID') THEN payment_date END) AS first_success_payment_date
-      FROM repayment_transactions_bronze
-      GROUP BY loan_id
-    ),
-    joined AS (
-      SELECT
-        lab.loan_id,
-        lab.customer_id,
-        lab.branch_id,
-        CAST(lab.loan_amount AS INT) AS loan_amount,
-        CAST(lab.interest_rate AS FLOAT) AS interest_rate,
-        lab.loan_status,
-        lrab.loan_id AS lrab_loan_id,
-        lrab.evaluation_date AS lrab_evaluation_date,
-        CAST(rta.amount_repaid AS INT) AS amount_repaid,
-        rta.last_payment_date AS repayment_date
-      FROM loan_applications_bronze lab
-      LEFT JOIN lra_max
-        ON lab.loan_id = lra_max.loan_id
-      LEFT JOIN loan_risk_assessment_bronze lrab
-        ON lab.loan_id = lrab.loan_id
-       AND lrab.evaluation_date = lra_max.latest_evaluation_date
-      LEFT JOIN rta
-        ON lab.loan_id = rta.loan_id
-    ),
-    dedup AS (
-      SELECT
-        CAST(TRIM(loan_id) AS STRING) AS loan_id,
-        CAST(TRIM(customer_id) AS STRING) AS customer_id,
-        CAST(TRIM(branch_id) AS STRING) AS branch_id,
-        CAST(loan_amount AS INT) AS loan_amount,
-        CAST(interest_rate AS FLOAT) AS interest_rate,
-        CAST(TRIM(loan_status) AS STRING) AS loan_status,
-        CAST(COALESCE(amount_repaid, 0) AS INT) AS amount_repaid,
-        CAST((loan_amount - COALESCE(amount_repaid, 0)) AS INT) AS outstanding_balance,
-        CAST(repayment_date AS DATE) AS repayment_date,
-        ROW_NUMBER() OVER (
-          PARTITION BY TRIM(loan_id)
-          ORDER BY
-            CASE WHEN loan_amount IS NOT NULL THEN 1 ELSE 0 END DESC,
-            CASE WHEN interest_rate IS NOT NULL THEN 1 ELSE 0 END DESC,
-            CASE WHEN loan_status IS NOT NULL THEN 1 ELSE 0 END DESC
-        ) AS rn
-      FROM joined
-      WHERE loan_id IS NOT NULL
-    )
-    SELECT
-      CAST(loan_id AS STRING) AS loan_id,
-      CAST(customer_id AS STRING) AS customer_id,
-      CAST(branch_id AS STRING) AS branch_id,
-      CAST(loan_amount AS INT) AS loan_amount,
-      CAST(interest_rate AS FLOAT) AS interest_rate,
-      CAST(loan_status AS STRING) AS loan_status,
-      CAST(amount_repaid AS INT) AS amount_repaid,
-      CAST(outstanding_balance AS INT) AS outstanding_balance,
-      CAST(repayment_date AS DATE) AS repayment_date
-    FROM dedup
-    WHERE rn = 1
-    """
-)
+product_details_silver_df.createOrReplaceTempView("product_details_silver")
 
+# ============================================================
+# TARGET TABLE: store_information_silver
+# ============================================================
+store_information_silver_sql = """
+WITH base AS (
+  SELECT
+    sb.store_id,
+    TRIM(sb.store_name) AS store_name,
+    CONCAT(TRIM(sb.city), ', ', TRIM(sb.state)) AS store_location,
+    CASE
+      WHEN UPPER(TRIM(sb.state)) IN ('CT','ME','MA','NH','RI','VT','NJ','NY','PA') THEN 'Northeast'
+      WHEN UPPER(TRIM(sb.state)) IN ('IL','IN','IA','KS','MI','MN','MO','NE','ND','OH','SD','WI') THEN 'Midwest'
+      WHEN UPPER(TRIM(sb.state)) IN ('DE','FL','GA','MD','NC','SC','VA','DC','WV','AL','KY','MS','TN','AR','LA','OK','TX') THEN 'South'
+      WHEN UPPER(TRIM(sb.state)) IN ('AZ','CO','ID','MT','NV','NM','UT','WY','AK','CA','HI','OR','WA') THEN 'West'
+      ELSE NULL
+    END AS store_region,
+    ROW_NUMBER() OVER (
+      PARTITION BY sb.store_id
+      ORDER BY sb.store_id
+    ) AS rn
+  FROM stores_bronze sb
+  WHERE sb.store_id IS NOT NULL AND TRIM(sb.store_id) <> ''
+)
+SELECT
+  store_id,
+  store_name,
+  store_location,
+  store_region
+FROM base
+WHERE rn = 1
+"""
+
+store_information_silver_df = spark.sql(store_information_silver_sql)
+
+store_information_silver_output = f"{TARGET_PATH}/store_information_silver.csv"
 (
-    loans_silver_df.coalesce(1)
+    store_information_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/loans_silver.csv")
+    .save(store_information_silver_output)
+)
+
+store_information_silver_df.createOrReplaceTempView("store_information_silver")
+
+# ============================================================
+# TARGET TABLE: daily_sales_summary_silver
+# ============================================================
+daily_sales_summary_silver_sql = """
+SELECT
+  sts.date AS date,
+  sts.store_id AS store_id,
+  sts.product_id AS product_id,
+  SUM(sts.sales_amount) AS total_sales_amount,
+  SUM(sts.quantity_sold) AS total_quantity_sold
+FROM sales_transactions_silver sts
+GROUP BY
+  sts.date,
+  sts.store_id,
+  sts.product_id
+"""
+
+daily_sales_summary_silver_df = spark.sql(daily_sales_summary_silver_sql)
+
+daily_sales_summary_silver_output = f"{TARGET_PATH}/daily_sales_summary_silver.csv"
+(
+    daily_sales_summary_silver_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(daily_sales_summary_silver_output)
+)
+
+daily_sales_summary_silver_df.createOrReplaceTempView("daily_sales_summary_silver")
+
+# ============================================================
+# TARGET TABLE: data_quality_assurance_silver
+# ============================================================
+data_quality_assurance_silver_sql = """
+SELECT
+  CAST(stb.transaction_time AS date) AS data_date,
+  COUNT(stb.transaction_id) AS total_records,
+  COUNT(
+    CASE
+      WHEN stb.transaction_id IS NOT NULL AND TRIM(stb.transaction_id) <> ''
+       AND stb.store_id IS NOT NULL AND TRIM(stb.store_id) <> ''
+       AND stb.product_id IS NOT NULL AND TRIM(stb.product_id) <> ''
+       AND CAST(stb.quantity AS int) >= 0
+       AND CAST(stb.sale_amount AS double) >= 0
+      THEN 1
+    END
+  ) AS valid_records,
+  COUNT(stb.transaction_id) - COUNT(
+    CASE
+      WHEN stb.transaction_id IS NOT NULL AND TRIM(stb.transaction_id) <> ''
+       AND stb.store_id IS NOT NULL AND TRIM(stb.store_id) <> ''
+       AND stb.product_id IS NOT NULL AND TRIM(stb.product_id) <> ''
+       AND CAST(stb.quantity AS int) >= 0
+       AND CAST(stb.sale_amount AS double) >= 0
+      THEN 1
+    END
+  ) AS invalid_records,
+  COUNT(
+    CASE
+      WHEN stb.transaction_id IS NOT NULL AND TRIM(stb.transaction_id) <> ''
+       AND stb.store_id IS NOT NULL AND TRIM(stb.store_id) <> ''
+       AND stb.product_id IS NOT NULL AND TRIM(stb.product_id) <> ''
+       AND CAST(stb.quantity AS int) >= 0
+       AND CAST(stb.sale_amount AS double) >= 0
+      THEN 1
+    END
+  ) / NULLIF(COUNT(stb.transaction_id), 0) AS quality_score
+FROM sales_transactions_silver sts
+LEFT JOIN sales_transactions_bronze stb
+  ON sts.transaction_id = stb.transaction_id
+GROUP BY CAST(stb.transaction_time AS date)
+"""
+
+data_quality_assurance_silver_df = spark.sql(data_quality_assurance_silver_sql)
+
+data_quality_assurance_silver_output = f"{TARGET_PATH}/data_quality_assurance_silver.csv"
+(
+    data_quality_assurance_silver_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(data_quality_assurance_silver_output)
 )
 
 job.commit()
