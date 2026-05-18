@@ -1,144 +1,172 @@
-import sys
 from awsglue.context import GlueContext
 from awsglue.job import Job
 from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
-
+import sys
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
+
+sc = SparkContext.getOrCreate()
+glueContext = GlueContext(sc)
+spark: SparkSession = glueContext.spark_session
+job = Job(glueContext)
+job.init(args["JOB_NAME"], args)
 
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-sc = SparkContext()
-glueContext = GlueContext(sc)
-spark = glueContext.spark_session
-job = Job(glueContext)
-job.init(args["JOB_NAME"], args)
-
 # ----------------------------
-# 1) Read source tables from S3
+# Read source tables from S3
 # ----------------------------
-loans_silver_df = (
+sts_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/loans_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/sales_transactions_silver.{FILE_FORMAT}/")
 )
-
-customers_silver_df = (
+pds_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/customers_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/product_details_silver.{FILE_FORMAT}/")
 )
-
-branches_silver_df = (
+sis_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/branches_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/store_information_silver.{FILE_FORMAT}/")
+)
+dss_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/daily_sales_summary_silver.{FILE_FORMAT}/")
+)
+dqa_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/data_quality_assurance_silver.{FILE_FORMAT}/")
 )
 
 # ----------------------------
-# 2) Create temp views
+# Create temp views
 # ----------------------------
-loans_silver_df.createOrReplaceTempView("loans_silver")
-customers_silver_df.createOrReplaceTempView("customers_silver")
-branches_silver_df.createOrReplaceTempView("branches_silver")
+sts_df.createOrReplaceTempView("sales_transactions_silver")
+pds_df.createOrReplaceTempView("product_details_silver")
+sis_df.createOrReplaceTempView("store_information_silver")
+dss_df.createOrReplaceTempView("daily_sales_summary_silver")
+dqa_df.createOrReplaceTempView("data_quality_assurance_silver")
 
-# ============================================================
-# Target: gold.gold_loan_performance
-# Source: silver.loans_silver ls
-#         LEFT JOIN silver.customers_silver cs ON ls.customer_id = cs.customer_id
-#         LEFT JOIN silver.branches_silver bs ON ls.branch_id = bs.branch_id
-# ============================================================
-gold_loan_performance_df = spark.sql(
+# ----------------------------
+# Target: gold_sales
+# ----------------------------
+gold_sales_df = spark.sql(
     """
     SELECT
-        CAST(ls.loan_id AS STRING)                 AS loan_id,
-        CAST(ls.customer_id AS STRING)             AS customer_id,
-        CAST(ls.branch_id AS STRING)               AS branch_id,
-        CAST(ls.loan_amount AS INT)                AS loan_amount,
-        CAST(ls.interest_rate AS FLOAT)            AS interest_rate,
-        CAST(ls.loan_status AS STRING)             AS loan_status,
-        DATE(CAST(ls.repayment_date AS STRING))    AS repayment_date,
-        CAST(ls.amount_repaid AS INT)              AS amount_repaid,
-        CAST(ls.outstanding_balance AS INT)        AS outstanding_balance
-    FROM loans_silver ls
-    LEFT JOIN customers_silver cs
-        ON ls.customer_id = cs.customer_id
-    LEFT JOIN branches_silver bs
-        ON ls.branch_id = bs.branch_id
+        sts.transaction_id AS transaction_id,
+        DATE(sts.date) AS date,
+        sts.product_id AS product_id,
+        sts.store_id AS store_id,
+        CAST(sts.sales_amount AS DOUBLE) AS sales_amount,
+        CAST(sts.quantity_sold AS INT) AS quantity_sold
+    FROM sales_transactions_silver sts
     """
 )
 
 (
-    gold_loan_performance_df.coalesce(1)
+    gold_sales_df.coalesce(1)
     .write.mode("overwrite")
-    .format("csv")
+    .format(FILE_FORMAT)
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_loan_performance.csv")
+    .save(f"{TARGET_PATH}/gold_sales.csv")
 )
 
-# ============================================================
-# Target: gold.gold_customer_data
-# Source: silver.customers_silver cs
-#         LEFT JOIN silver.loans_silver ls ON cs.customer_id = ls.customer_id
-# ============================================================
-gold_customer_data_df = spark.sql(
+# ----------------------------
+# Target: gold_product
+# ----------------------------
+gold_product_df = spark.sql(
     """
     SELECT
-        CAST(cs.customer_id AS STRING)             AS customer_id,
-        CAST(cs.customer_name AS STRING)           AS customer_name,
-        CAST(cs.customer_segment AS STRING)        AS customer_segment,
-        CAST(COUNT(ls.loan_id) AS INT)             AS total_loans,
-        CAST(AVG(CAST(ls.loan_amount AS INT)) AS FLOAT) AS average_loan_amount
-    FROM customers_silver cs
-    LEFT JOIN loans_silver ls
-        ON cs.customer_id = ls.customer_id
-    GROUP BY
-        cs.customer_id,
-        cs.customer_name,
-        cs.customer_segment
+        pds.product_id AS product_id,
+        pds.product_name AS product_name,
+        pds.product_category AS product_category,
+        CAST(pds.product_price AS FLOAT) AS product_price
+    FROM product_details_silver pds
     """
 )
 
 (
-    gold_customer_data_df.coalesce(1)
+    gold_product_df.coalesce(1)
     .write.mode("overwrite")
-    .format("csv")
+    .format(FILE_FORMAT)
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_customer_data.csv")
+    .save(f"{TARGET_PATH}/gold_product.csv")
 )
 
-# ============================================================
-# Target: gold.gold_branch_financials
-# Source: silver.branches_silver bs
-#         LEFT JOIN silver.loans_silver ls ON bs.branch_id = ls.branch_id
-# ============================================================
-gold_branch_financials_df = spark.sql(
+# ----------------------------
+# Target: gold_store
+# ----------------------------
+gold_store_df = spark.sql(
     """
     SELECT
-        CAST(bs.branch_id AS STRING)               AS branch_id,
-        CAST(bs.branch_name AS STRING)             AS branch_name,
-        CAST(bs.cost_center AS STRING)             AS cost_center,
-        CAST(COUNT(ls.loan_id) AS INT)             AS total_loans_issued,
-        CAST(SUM(CAST(ls.amount_repaid AS INT)) AS INT) AS total_repayments_received
-    FROM branches_silver bs
-    LEFT JOIN loans_silver ls
-        ON bs.branch_id = ls.branch_id
-    GROUP BY
-        bs.branch_id,
-        bs.branch_name,
-        bs.cost_center
+        sis.store_id AS store_id,
+        sis.store_name AS store_name,
+        sis.store_location AS store_location,
+        sis.store_region AS store_region
+    FROM store_information_silver sis
     """
 )
 
 (
-    gold_branch_financials_df.coalesce(1)
+    gold_store_df.coalesce(1)
     .write.mode("overwrite")
-    .format("csv")
+    .format(FILE_FORMAT)
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_branch_financials.csv")
+    .save(f"{TARGET_PATH}/gold_store.csv")
+)
+
+# ----------------------------
+# Target: gold_aggregated_sales
+# ----------------------------
+gold_aggregated_sales_df = spark.sql(
+    """
+    SELECT
+        DATE(dss.date) AS date,
+        dss.store_id AS store_id,
+        dss.product_id AS product_id,
+        CAST(dss.total_sales_amount AS DOUBLE) AS total_sales_amount,
+        CAST(dss.total_quantity_sold AS INT) AS total_quantity_sold
+    FROM daily_sales_summary_silver dss
+    """
+)
+
+(
+    gold_aggregated_sales_df.coalesce(1)
+    .write.mode("overwrite")
+    .format(FILE_FORMAT)
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/gold_aggregated_sales.csv")
+)
+
+# ----------------------------
+# Target: gold_data_quality
+# ----------------------------
+gold_data_quality_df = spark.sql(
+    """
+    SELECT
+        DATE(dqa.data_date) AS data_date,
+        CAST(dqa.total_records AS BIGINT) AS total_records,
+        CAST(dqa.valid_records AS BIGINT) AS valid_records,
+        CAST(dqa.invalid_records AS BIGINT) AS invalid_records,
+        CAST(dqa.quality_score AS DOUBLE) AS quality_score
+    FROM data_quality_assurance_silver dqa
+    """
+)
+
+(
+    gold_data_quality_df.coalesce(1)
+    .write.mode("overwrite")
+    .format(FILE_FORMAT)
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/gold_data_quality.csv")
 )
 
 job.commit()
+ 
