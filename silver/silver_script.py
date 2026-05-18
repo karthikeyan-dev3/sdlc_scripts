@@ -1,514 +1,317 @@
 import sys
 from awsglue.context import GlueContext
-from awsglue.utils import getResolvedOptions
-from pyspark.context import SparkContext
+from pyspark.sql import SparkSession
 
-args = getResolvedOptions(sys.argv, [])
+args = getResolvedOptions(sys.argv, ["JOB_NAME"])
+
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 FILE_FORMAT = "csv"
 
-sc = SparkContext.getOrCreate()
-glueContext = GlueContext(sc)
-spark = glueContext.spark_session
+# =========================
+# 1) READ SOURCE TABLES
+# =========================
+products_bronze_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/products_bronze.{FILE_FORMAT}/")
+)
 
-spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
-spark.conf.set("spark.sql.session.timeZone", "UTC")
+stores_bronze_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/stores_bronze.{FILE_FORMAT}/")
+)
+
+sales_transactions_bronze_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/sales_transactions_bronze.{FILE_FORMAT}/")
+)
 
 # =========================
-# READ BRONZE SOURCES (S3)
+# 2) CREATE TEMP VIEWS
 # =========================
-peb_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/patient_enrollment_bronze.{FILE_FORMAT}/")
-)
-peb_df.createOrReplaceTempView("patient_enrollment_bronze")
+products_bronze_df.createOrReplaceTempView("products_bronze")
+stores_bronze_df.createOrReplaceTempView("stores_bronze")
+sales_transactions_bronze_df.createOrReplaceTempView("sales_transactions_bronze")
 
-lrb_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/lab_results_bronze.{FILE_FORMAT}/")
+# =========================
+# 3) TRANSFORM + WRITE: product_master_silver
+# =========================
+product_master_silver_df = spark.sql(
+    """
+    WITH base AS (
+      SELECT
+        TRIM(pb.product_id) AS product_id,
+        TRIM(pb.product_name) AS product_name,
+        TRIM(pb.category) AS product_category,
+        CAST(TRIM(pb.price) AS FLOAT) AS product_price
+      FROM products_bronze pb
+      WHERE TRIM(pb.product_id) IS NOT NULL
+        AND TRIM(pb.product_id) <> ''
+    ),
+    dedup AS (
+      SELECT
+        product_id,
+        product_name,
+        product_category,
+        product_price,
+        ROW_NUMBER() OVER (
+          PARTITION BY product_id
+          ORDER BY
+            CASE WHEN product_name IS NOT NULL AND TRIM(product_name) <> '' THEN 0 ELSE 1 END,
+            CASE WHEN product_category IS NOT NULL AND TRIM(product_category) <> '' THEN 0 ELSE 1 END,
+            CASE WHEN product_price IS NOT NULL THEN 0 ELSE 1 END
+        ) AS rn
+      FROM base
+    )
+    SELECT
+      product_id,
+      product_name,
+      product_category,
+      product_price
+    FROM dedup
+    WHERE rn = 1
+    """
 )
-lrb_df.createOrReplaceTempView("lab_results_bronze")
-
-wmb_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/wearable_monitoring_bronze.{FILE_FORMAT}/")
-)
-wmb_df.createOrReplaceTempView("wearable_monitoring_bronze")
-
-dab_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/drug_administration_bronze.{FILE_FORMAT}/")
-)
-dab_df.createOrReplaceTempView("drug_administration_bronze")
-
-# ==========================================
-# TABLE: patient_demographics_silver (pds)
-# ==========================================
-pds_sql = """
-WITH base AS (
-  SELECT
-    TRIM(peb.patient_id) AS patient_id,
-    peb.trial_id AS trial_id,
-    peb.site_id AS site_id,
-    peb.patient_name AS patient_name,
-    peb.gender AS gender,
-    CAST(peb.date_of_birth AS DATE) AS date_of_birth,
-    peb.country AS country,
-    CAST(peb.enrollment_date AS TIMESTAMP) AS enrollment_date,
-    peb.consent_status AS consent_status,
-    peb.source_system AS source_system
-  FROM patient_enrollment_bronze peb
-  WHERE peb.patient_id IS NOT NULL
-),
-dedup AS (
-  SELECT
-    patient_id,
-    trial_id,
-    site_id,
-    patient_name,
-    gender,
-    date_of_birth,
-    country,
-    enrollment_date,
-    consent_status,
-    source_system,
-    ROW_NUMBER() OVER (
-      PARTITION BY patient_id
-      ORDER BY enrollment_date DESC, source_system DESC
-    ) AS rn
-  FROM base
-)
-SELECT
-  patient_id,
-  trial_id,
-  site_id,
-  patient_name,
-  gender,
-  date_of_birth,
-  country,
-  enrollment_date,
-  consent_status,
-  source_system
-FROM dedup
-WHERE rn = 1
-"""
-pds_df = spark.sql(pds_sql)
-pds_df.createOrReplaceTempView("patient_demographics_silver")
 
 (
-    pds_df.coalesce(1)
+    product_master_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/patient_demographics_silver.csv")
+    .save(f"{TARGET_PATH}/product_master_silver.csv")
 )
 
-# =================================
-# TABLE: lab_results_silver (lrs)
-# =================================
-lrs_sql = """
-WITH joined AS (
-  SELECT
-    lrb.patient_id AS patient_id,
-    lrb.lab_result_id AS lab_result_id,
-    CAST(lrb.test_date AS TIMESTAMP) AS test_date,
-    UPPER(TRIM(lrb.test_name)) AS test_type,
-    CAST(lrb.test_result AS DOUBLE) AS test_result_value,
-    NULLIF(TRIM(lrb.test_unit), '') AS result_unit,
-    lrb.abnormal_flag AS abnormal_flag
-  FROM lab_results_bronze lrb
-  INNER JOIN patient_enrollment_bronze peb
-    ON lrb.patient_id = peb.patient_id
-  WHERE lrb.patient_id IS NOT NULL
-    AND lrb.lab_result_id IS NOT NULL
-),
-dedup AS (
-  SELECT
-    patient_id,
-    lab_result_id,
-    test_date,
-    test_type,
-    test_result_value,
-    result_unit,
-    abnormal_flag,
-    ROW_NUMBER() OVER (
-      PARTITION BY lab_result_id
-      ORDER BY test_date DESC
-    ) AS rn
-  FROM joined
+product_master_silver_df.createOrReplaceTempView("product_master_silver")
+
+# =========================
+# 4) TRANSFORM + WRITE: store_master_silver
+# =========================
+store_master_silver_df = spark.sql(
+    """
+    WITH base AS (
+      SELECT
+        TRIM(sb.store_id) AS store_id,
+        TRIM(sb.store_name) AS store_name,
+        CONCAT(TRIM(sb.city), ', ', TRIM(sb.state)) AS store_location,
+        TRIM(sb.state) AS store_region
+      FROM stores_bronze sb
+      WHERE TRIM(sb.store_id) IS NOT NULL
+        AND TRIM(sb.store_id) <> ''
+    ),
+    dedup AS (
+      SELECT
+        store_id,
+        store_name,
+        store_location,
+        store_region,
+        ROW_NUMBER() OVER (
+          PARTITION BY store_id
+          ORDER BY
+            CASE WHEN store_name IS NOT NULL AND TRIM(store_name) <> '' THEN 0 ELSE 1 END,
+            CASE WHEN store_location IS NOT NULL AND TRIM(store_location) <> '' THEN 0 ELSE 1 END,
+            CASE WHEN store_region IS NOT NULL AND TRIM(store_region) <> '' THEN 0 ELSE 1 END
+        ) AS rn
+      FROM base
+    )
+    SELECT
+      store_id,
+      store_name,
+      store_location,
+      store_region
+    FROM dedup
+    WHERE rn = 1
+    """
 )
-SELECT
-  patient_id,
-  lab_result_id,
-  test_date,
-  test_type,
-  test_result_value,
-  result_unit,
-  abnormal_flag
-FROM dedup
-WHERE rn = 1
-"""
-lrs_df = spark.sql(lrs_sql)
-lrs_df.createOrReplaceTempView("lab_results_silver")
 
 (
-    lrs_df.coalesce(1)
+    store_master_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/lab_results_silver.csv")
+    .save(f"{TARGET_PATH}/store_master_silver.csv")
 )
 
-# ==========================================
-# TABLE: wearable_daily_summary_silver (wdss)
-# ==========================================
-wdss_sql = """
-WITH dedup AS (
-  SELECT
-    wmb.patient_id AS patient_id,
-    CAST(wmb.recorded_timestamp AS TIMESTAMP) AS recorded_timestamp,
-    DATE(CAST(wmb.recorded_timestamp AS TIMESTAMP)) AS wearable_date,
-    CAST(wmb.glucose_level AS DOUBLE) AS glucose_level,
-    CAST(wmb.step_count AS BIGINT) AS step_count,
-    CAST(wmb.sleep_hours AS DOUBLE) AS sleep_hours,
-    CAST(wmb.heart_rate AS DOUBLE) AS heart_rate,
-    ROW_NUMBER() OVER (
-      PARTITION BY wmb.patient_id, wmb.device_record_id
-      ORDER BY CAST(wmb.recorded_timestamp AS TIMESTAMP) DESC
-    ) AS rn
-  FROM wearable_monitoring_bronze wmb
-  WHERE wmb.patient_id IS NOT NULL
-),
-filtered AS (
-  SELECT
-    patient_id,
-    wearable_date,
-    glucose_level,
-    step_count,
-    sleep_hours,
-    heart_rate
-  FROM dedup
-  WHERE rn = 1
-    AND (glucose_level IS NULL OR glucose_level >= 0)
-    AND (step_count IS NULL OR step_count >= 0)
-    AND (sleep_hours IS NULL OR sleep_hours >= 0)
-    AND (heart_rate IS NULL OR heart_rate >= 0)
+store_master_silver_df.createOrReplaceTempView("store_master_silver")
+
+# =========================
+# 5) TRANSFORM + WRITE: sales_transactions_silver
+# =========================
+sales_transactions_silver_df = spark.sql(
+    """
+    WITH base AS (
+      SELECT
+        UPPER(TRIM(stb.transaction_id)) AS transaction_id,
+        UPPER(TRIM(stb.product_id)) AS product_id,
+        UPPER(TRIM(stb.store_id)) AS store_id,
+        CAST(TRIM(stb.sale_amount) AS DOUBLE) AS sale_amount,
+        CAST(TRIM(stb.quantity) AS INT) AS quantity,
+        DATE(CAST(stb.transaction_time AS TIMESTAMP)) AS sale_date,
+        CAST(stb.transaction_time AS TIMESTAMP) AS transaction_time
+      FROM sales_transactions_bronze stb
+      WHERE TRIM(stb.transaction_id) IS NOT NULL
+        AND TRIM(stb.transaction_id) <> ''
+    ),
+    validated AS (
+      SELECT
+        transaction_id,
+        product_id,
+        store_id,
+        CASE WHEN sale_amount < 0 THEN NULL ELSE sale_amount END AS sale_amount,
+        CASE WHEN quantity < 0 THEN NULL ELSE quantity END AS quantity,
+        sale_date,
+        transaction_time
+      FROM base
+    ),
+    dedup AS (
+      SELECT
+        transaction_id,
+        product_id,
+        store_id,
+        sale_amount,
+        quantity,
+        sale_date,
+        ROW_NUMBER() OVER (
+          PARTITION BY transaction_id
+          ORDER BY transaction_time DESC
+        ) AS rn
+      FROM validated
+    )
+    SELECT
+      transaction_id,
+      product_id,
+      store_id,
+      sale_amount,
+      quantity,
+      sale_date
+    FROM dedup
+    WHERE rn = 1
+    """
 )
-SELECT
-  patient_id,
-  wearable_date,
-  AVG(glucose_level) AS glucose_avg,
-  MIN(glucose_level) AS glucose_min,
-  MAX(glucose_level) AS glucose_max,
-  CAST(SUM(step_count) AS INT) AS steps_total,
-  SUM(sleep_hours) AS sleep_hours_total,
-  AVG(heart_rate) AS heart_rate_avg
-FROM filtered
-GROUP BY patient_id, wearable_date
-"""
-wdss_df = spark.sql(wdss_sql)
-wdss_df.createOrReplaceTempView("wearable_daily_summary_silver")
 
 (
-    wdss_df.coalesce(1)
+    sales_transactions_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/wearable_daily_summary_silver.csv")
+    .save(f"{TARGET_PATH}/sales_transactions_silver.csv")
 )
 
-# ==============================================
-# TABLE: medication_administration_silver (mas)
-# ==============================================
-mas_sql = """
-WITH joined AS (
-  SELECT
-    dab.patient_id AS patient_id,
-    dab.administration_id AS administration_id,
-    dab.drug_code AS medication_name,
-    dab.drug_code AS drug_code,
-    CAST(dab.dosage_mg AS DOUBLE) AS dosage_mg,
-    CAST(dab.administration_date AS TIMESTAMP) AS administration_date,
-    dab.administration_route AS administration_route
-  FROM drug_administration_bronze dab
-  INNER JOIN patient_enrollment_bronze peb
-    ON dab.patient_id = peb.patient_id
-  WHERE dab.patient_id IS NOT NULL
-    AND dab.administration_id IS NOT NULL
-),
-dedup AS (
-  SELECT
-    patient_id,
-    administration_id,
-    medication_name,
-    drug_code,
-    dosage_mg,
-    administration_date,
-    administration_route,
-    ROW_NUMBER() OVER (
-      PARTITION BY administration_id
-      ORDER BY administration_date DESC
-    ) AS rn
-  FROM joined
+sales_transactions_silver_df.createOrReplaceTempView("sales_transactions_silver")
+
+# =========================
+# 6) TRANSFORM + WRITE: sales_enriched_silver
+# =========================
+sales_enriched_silver_df = spark.sql(
+    """
+    SELECT
+      sts.transaction_id AS transaction_id,
+      sts.product_id AS product_id,
+      sts.store_id AS store_id,
+      sts.sale_date AS sale_date,
+      sts.sale_amount AS sale_amount,
+      sts.quantity AS quantity_sold,
+      pms.product_name AS product_name,
+      pms.product_category AS product_category,
+      sms.store_name AS store_name,
+      sms.store_location AS store_location
+    FROM sales_transactions_silver sts
+    INNER JOIN product_master_silver pms
+      ON sts.product_id = pms.product_id
+    INNER JOIN store_master_silver sms
+      ON sts.store_id = sms.store_id
+    """
 )
-SELECT
-  patient_id,
-  administration_id,
-  medication_name,
-  drug_code,
-  dosage_mg,
-  administration_date,
-  administration_route
-FROM dedup
-WHERE rn = 1
-"""
-mas_df = spark.sql(mas_sql)
-mas_df.createOrReplaceTempView("medication_administration_silver")
 
 (
-    mas_df.coalesce(1)
+    sales_enriched_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/medication_administration_silver.csv")
+    .save(f"{TARGET_PATH}/sales_enriched_silver.csv")
 )
 
-# ================================================
-# TABLE: patient_therapy_episodes_silver (ptes)
-# ================================================
-ptes_sql = """
-WITH ordered AS (
-  SELECT
-    mas.patient_id AS patient_id,
-    mas.medication_name AS medication_name,
-    mas.administration_date AS administration_date,
-    LAG(mas.administration_date) OVER (
-      PARTITION BY mas.patient_id, mas.medication_name
-      ORDER BY mas.administration_date
-    ) AS prev_administration_date
-  FROM medication_administration_silver mas
-),
-marked AS (
-  SELECT
-    patient_id,
-    medication_name,
-    administration_date,
-    CASE
-      WHEN prev_administration_date IS NULL THEN 1
-      WHEN DATEDIFF(administration_date, prev_administration_date) > 30 THEN 1
-      ELSE 0
-    END AS new_episode_flag
-  FROM ordered
-),
-episode_ids AS (
-  SELECT
-    patient_id,
-    medication_name,
-    administration_date,
-    SUM(new_episode_flag) OVER (
-      PARTITION BY patient_id, medication_name
-      ORDER BY administration_date
-      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-    ) AS episode_id
-  FROM marked
+sales_enriched_silver_df.createOrReplaceTempView("sales_enriched_silver")
+
+# =========================
+# 7) TRANSFORM + WRITE: daily_sales_agg_silver
+# =========================
+daily_sales_agg_silver_df = spark.sql(
+    """
+    WITH daily_product AS (
+      SELECT
+        sts.sale_date AS reporting_date,
+        sts.product_id AS top_selling_product,
+        SUM(sts.sale_amount) AS product_sales_amount,
+        SUM(sts.quantity) AS product_quantity_sold
+      FROM sales_transactions_silver sts
+      GROUP BY sts.sale_date, sts.product_id
+    ),
+    daily_store AS (
+      SELECT
+        sts.sale_date AS reporting_date,
+        sts.store_id AS top_selling_store,
+        SUM(sts.sale_amount) AS store_sales_amount,
+        SUM(sts.quantity) AS store_quantity_sold
+      FROM sales_transactions_silver sts
+      GROUP BY sts.sale_date, sts.store_id
+    ),
+    product_ranked AS (
+      SELECT
+        reporting_date,
+        top_selling_product,
+        product_sales_amount,
+        product_quantity_sold,
+        ROW_NUMBER() OVER (
+          PARTITION BY reporting_date
+          ORDER BY product_sales_amount DESC, product_quantity_sold DESC, top_selling_product ASC
+        ) AS rn
+      FROM daily_product
+    ),
+    store_ranked AS (
+      SELECT
+        reporting_date,
+        top_selling_store,
+        store_sales_amount,
+        store_quantity_sold,
+        ROW_NUMBER() OVER (
+          PARTITION BY reporting_date
+          ORDER BY store_sales_amount DESC, store_quantity_sold DESC, top_selling_store ASC
+        ) AS rn
+      FROM daily_store
+    ),
+    totals AS (
+      SELECT
+        sts.sale_date AS reporting_date,
+        SUM(sts.sale_amount) AS total_sales_amount,
+        SUM(sts.quantity) AS total_quantity_sold
+      FROM sales_transactions_silver sts
+      GROUP BY sts.sale_date
+    )
+    SELECT
+      t.reporting_date AS reporting_date,
+      t.total_sales_amount AS total_sales_amount,
+      CAST(t.total_quantity_sold AS INT) AS total_quantity_sold,
+      pr.top_selling_product AS top_selling_product,
+      sr.top_selling_store AS top_selling_store
+    FROM totals t
+    LEFT JOIN product_ranked pr
+      ON t.reporting_date = pr.reporting_date AND pr.rn = 1
+    LEFT JOIN store_ranked sr
+      ON t.reporting_date = sr.reporting_date AND sr.rn = 1
+    """
 )
-SELECT
-  patient_id,
-  medication_name,
-  MIN(administration_date) AS treatment_start_date,
-  MAX(administration_date) AS treatment_end_date
-FROM episode_ids
-GROUP BY patient_id, medication_name, episode_id
-"""
-ptes_df = spark.sql(ptes_sql)
-ptes_df.createOrReplaceTempView("patient_therapy_episodes_silver")
 
 (
-    ptes_df.coalesce(1)
+    daily_sales_agg_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/patient_therapy_episodes_silver.csv")
-)
-
-# =================================================
-# TABLE: patient_lab_trend_inputs_silver (pltis)
-# =================================================
-pltis_sql = """
-WITH filtered AS (
-  SELECT
-    lrs.patient_id AS patient_id,
-    lrs.test_date AS test_date,
-    lrs.test_type AS test_type,
-    lrs.test_result_value AS test_result_value,
-    lrs.result_unit AS result_unit,
-    lrs.abnormal_flag AS abnormal_flag
-  FROM lab_results_silver lrs
-  WHERE lrs.test_type IN ('HBA1C', 'GLUCOSE')
-    AND lrs.test_result_value IS NOT NULL
-),
-dedup AS (
-  SELECT
-    patient_id,
-    test_date,
-    test_type,
-    test_result_value,
-    result_unit,
-    abnormal_flag,
-    ROW_NUMBER() OVER (
-      PARTITION BY patient_id, test_type, test_date
-      ORDER BY CASE WHEN result_unit IS NULL THEN 1 ELSE 0 END ASC
-    ) AS rn
-  FROM filtered
-)
-SELECT
-  patient_id,
-  test_date,
-  test_type,
-  test_result_value,
-  result_unit,
-  abnormal_flag
-FROM dedup
-WHERE rn = 1
-"""
-pltis_df = spark.sql(pltis_sql)
-pltis_df.createOrReplaceTempView("patient_lab_trend_inputs_silver")
-
-(
-    pltis_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/patient_lab_trend_inputs_silver.csv")
-)
-
-# =========================================
-# TABLE: patient_risk_features_silver (prfs)
-# =========================================
-prfs_sql = """
-SELECT
-  pds.patient_id AS patient_id,
-  MAX(DATE(pltis.test_date)) AS feature_as_of_date,
-  CAST(FLOOR(DATEDIFF(CURRENT_DATE, pds.date_of_birth)/365.25) AS INT) AS age_years,
-  pds.country AS country,
-  MAX_BY(pltis.test_result_value, pltis.test_date) FILTER (WHERE pltis.test_type = 'GLUCOSE') AS latest_glucose_value,
-  MAX_BY(pltis.test_result_value, pltis.test_date) FILTER (WHERE pltis.test_type = 'HBA1C') AS latest_hba1c_value,
-  SUM(
-    CASE
-      WHEN pltis.test_type = 'GLUCOSE'
-       AND pltis.abnormal_flag = 'Y'
-       AND pltis.test_date >= DATEADD(day, -90, CURRENT_DATE)
-      THEN 1 ELSE 0
-    END
-  ) AS abnormal_glucose_count_90d,
-  SUM(
-    CASE
-      WHEN pltis.test_type = 'HBA1C'
-       AND pltis.abnormal_flag = 'Y'
-       AND pltis.test_date >= DATEADD(day, -90, CURRENT_DATE)
-      THEN 1 ELSE 0
-    END
-  ) AS abnormal_hba1c_count_90d,
-  AVG(wdss.glucose_avg) FILTER (WHERE wdss.wearable_date >= DATEADD(day, -7, CURRENT_DATE)) AS wearable_glucose_avg_7d,
-  SUM(wdss.steps_total) FILTER (WHERE wdss.wearable_date >= DATEADD(day, -7, CURRENT_DATE)) AS steps_total_7d,
-  SUM(wdss.sleep_hours_total) FILTER (WHERE wdss.wearable_date >= DATEADD(day, -7, CURRENT_DATE)) AS sleep_hours_total_7d,
-  AVG(wdss.heart_rate_avg) FILTER (WHERE wdss.wearable_date >= DATEADD(day, -7, CURRENT_DATE)) AS heart_rate_avg_7d
-FROM patient_demographics_silver pds
-LEFT JOIN wearable_daily_summary_silver wdss
-  ON pds.patient_id = wdss.patient_id
-LEFT JOIN patient_lab_trend_inputs_silver pltis
-  ON pds.patient_id = pltis.patient_id
-GROUP BY
-  pds.patient_id,
-  pds.date_of_birth,
-  pds.country
-"""
-prfs_df = spark.sql(prfs_sql)
-prfs_df.createOrReplaceTempView("patient_risk_features_silver")
-
-(
-    prfs_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/patient_risk_features_silver.csv")
-)
-
-# ==================================================
-# TABLE: integrated_patient_snapshot_silver (ipss)
-# ==================================================
-ipss_sql = """
-WITH base AS (
-  SELECT
-    pds.patient_id AS patient_id,
-    JSON_OBJECT(
-      'patient_id', pds.patient_id,
-      'trial_id', pds.trial_id,
-      'site_id', pds.site_id,
-      'patient_name', pds.patient_name,
-      'gender', pds.gender,
-      'date_of_birth', pds.date_of_birth,
-      'country', pds.country,
-      'enrollment_date', pds.enrollment_date,
-      'consent_status', pds.consent_status,
-      'source_system', pds.source_system
-    ) AS demographics,
-    JSON_OBJECT(
-      'trial_id', pds.trial_id,
-      'site_id', pds.site_id
-    ) AS health_history,
-    JSON_OBJECT(
-      'wearable_glucose_avg_7d', prfs.wearable_glucose_avg_7d,
-      'steps_total_7d', prfs.steps_total_7d,
-      'sleep_hours_total_7d', prfs.sleep_hours_total_7d,
-      'heart_rate_avg_7d', prfs.heart_rate_avg_7d
-    ) AS wearable_data_summary,
-    JSON_OBJECT(
-      'latest_glucose_value', prfs.latest_glucose_value,
-      'latest_hba1c_value', prfs.latest_hba1c_value,
-      'abnormal_glucose_count_90d', prfs.abnormal_glucose_count_90d,
-      'abnormal_hba1c_count_90d', prfs.abnormal_hba1c_count_90d
-    ) AS combined_lab_results,
-    prfs.feature_as_of_date AS snapshot_as_of_date
-  FROM patient_demographics_silver pds
-  LEFT JOIN patient_risk_features_silver prfs
-    ON pds.patient_id = prfs.patient_id
-),
-dedup AS (
-  SELECT
-    patient_id,
-    demographics,
-    health_history,
-    wearable_data_summary,
-    combined_lab_results,
-    snapshot_as_of_date,
-    ROW_NUMBER() OVER (
-      PARTITION BY patient_id
-      ORDER BY snapshot_as_of_date DESC
-    ) AS rn
-  FROM base
-)
-SELECT
-  patient_id,
-  demographics,
-  health_history,
-  wearable_data_summary,
-  combined_lab_results,
-  snapshot_as_of_date
-FROM dedup
-WHERE rn = 1
-"""
-ipss_df = spark.sql(ipss_sql)
-
-(
-    ipss_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/integrated_patient_snapshot_silver.csv")
+    .save(f"{TARGET_PATH}/daily_sales_agg_silver.csv")
 )
