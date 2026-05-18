@@ -255,8 +255,8 @@ for table in metadata.get('tables', []):
                 rhs = transformation.split('=', 1)[1].strip()
             else:
                 rhs = transformation.strip()
-            if source_alias:
-                rhs = rhs.replace(f"{source_alias}.", "")
+            if '.' in rhs:
+                rhs = rhs.split('.', 1)[1].strip()
             target_column = col_meta.get('target_column')
             transformations.append(f"{rhs} as {target_column}")
 
