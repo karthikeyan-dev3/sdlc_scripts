@@ -75,7 +75,7 @@ product_master_silver_df = spark.sql(
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/product_master_silver.csv")
+    .save(f"{TARGET_PATH}/product_master_silver/")
 )
 
 product_master_silver_df.createOrReplaceTempView("product_master_silver")
@@ -113,7 +113,7 @@ store_master_silver_df = spark.sql(
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/store_master_silver.csv")
+    .save(f"{TARGET_PATH}/store_master_silver/")
 )
 
 store_master_silver_df.createOrReplaceTempView("store_master_silver")
@@ -161,7 +161,7 @@ sales_transactions_silver_df = spark.sql(
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/sales_transactions_silver.csv")
+    .save(f"{TARGET_PATH}/sales_transactions_silver/")
 )
 
 job.commit()
