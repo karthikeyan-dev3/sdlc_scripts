@@ -12,8 +12,8 @@ spark = glueContext.spark_session
 job = Job(glueContext)
 job.init(args["JOB_NAME"], args)
 
-SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
-TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
+SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze"
+TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver"
 FILE_FORMAT = "csv"
 
 # ------------------------------------------------------------
@@ -22,21 +22,21 @@ FILE_FORMAT = "csv"
 products_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/products_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/products_bronze.{FILE_FORMAT}")
 )
 products_bronze_df.createOrReplaceTempView("products_bronze")
 
 stores_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/stores_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/stores_bronze.{FILE_FORMAT}")
 )
 stores_bronze_df.createOrReplaceTempView("stores_bronze")
 
 sales_transactions_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/sales_transactions_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/sales_transactions_bronze.{FILE_FORMAT}")
 )
 sales_transactions_bronze_df.createOrReplaceTempView("sales_transactions_bronze")
 
@@ -75,7 +75,7 @@ product_master_silver_df = spark.sql(
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/product_master_silver.csv/")
+    .save(f"{TARGET_PATH}/product_master_silver")
 )
 
 product_master_silver_df.createOrReplaceTempView("product_master_silver")
@@ -113,7 +113,7 @@ store_master_silver_df = spark.sql(
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/store_master_silver.csv/")
+    .save(f"{TARGET_PATH}/store_master_silver")
 )
 
 store_master_silver_df.createOrReplaceTempView("store_master_silver")
@@ -161,7 +161,7 @@ sales_transactions_silver_df = spark.sql(
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/sales_transactions_silver.csv/")
+    .save(f"{TARGET_PATH}/sales_transactions_silver")
 )
 
 job.commit()
