@@ -9,7 +9,220 @@ spark = glueContext.spark_session
 job = Job(glueContext)
 job.init("bronze_job", {})
 
-metadata = {'tables': [{'target_schema': 'bronze', 'target_table': 'patient_enrollment_bronze', 'target_alias': 'peb', 'mapping_details': 'patient_enrollment_raw_2000 per', 'description': 'Bronze ingestion of patient enrollment records from patient_enrollment_raw_2000. Columns mapped: patient_id, trial_id, site_id, patient_name, gender, date_of_birth, country, enrollment_date, consent_status, source_system.'}, {'target_schema': 'bronze', 'target_table': 'lab_results_bronze', 'target_alias': 'lrb', 'mapping_details': 'lab_results_raw_2000 lrr', 'description': 'Bronze ingestion of lab results from lab_results_raw_2000. Columns mapped: lab_result_id, patient_id, sample_id, test_name, test_result, test_unit, reference_range, abnormal_flag, test_date, lab_name.'}, {'target_schema': 'bronze', 'target_table': 'wearable_monitoring_bronze', 'target_alias': 'wmb', 'mapping_details': 'wearable_monitoring_raw_2000 wmr', 'description': 'Bronze ingestion of wearable monitoring measurements from wearable_monitoring_raw_2000. Columns mapped: device_record_id, patient_id, device_type, recorded_timestamp, glucose_level, step_count, sleep_hours, heart_rate, battery_status.'}, {'target_schema': 'bronze', 'target_table': 'drug_administration_bronze', 'target_alias': 'dab', 'mapping_details': 'drug_administration_raw_2000 dar', 'description': 'Bronze ingestion of drug administration events from drug_administration_raw_2000. Columns mapped: administration_id, patient_id, drug_code, dosage_mg, administration_date, administration_route, administered_by, batch_number.'}, {'target_schema': 'bronze', 'target_table': 'clinical_visit_bronze', 'target_alias': 'cvb', 'mapping_details': 'clinical_visit_raw_2000 cvr', 'description': 'Bronze ingestion of clinical visit records from clinical_visit_raw_2000. Columns mapped: visit_id, patient_id, trial_id, visit_date, visit_type, blood_pressure, heart_rate, weight_kg, physician_notes, source_system.'}, {'target_schema': 'bronze', 'target_table': 'adverse_events_bronze', 'target_alias': 'aeb', 'mapping_details': 'adverse_events_raw_2000 aer', 'description': 'Bronze ingestion of adverse event reports from adverse_events_raw_2000. Columns mapped: event_id, patient_id, event_type, severity, event_start_date, event_end_date, outcome, related_to_drug, hospitalization_required, reported_by.'}], 'columns': [{'source_column': "['per.patient_id']", 'source_type': 'varchar(20)', 'source_nullable': 'not_accepted', 'target_column': 'patient_id', 'target_type': 'varchar(20)', 'target_nullable': 'not_accepted', 'transformation': 'peb.patient_id = per.patient_id', 'target_table': 'peb'}, {'source_column': "['per.trial_id']", 'source_type': 'varchar(20)', 'source_nullable': 'not_accepted', 'target_column': 'trial_id', 'target_type': 'varchar(20)', 'target_nullable': 'not_accepted', 'transformation': 'peb.trial_id = per.trial_id', 'target_table': 'peb'}, {'source_column': "['per.site_id']", 'source_type': 'varchar(20)', 'source_nullable': 'accepted', 'target_column': 'site_id', 'target_type': 'varchar(20)', 'target_nullable': 'accepted', 'transformation': 'peb.site_id = per.site_id', 'target_table': 'peb'}, {'source_column': "['per.patient_name']", 'source_type': 'varchar(255)', 'source_nullable': 'accepted', 'target_column': 'patient_name', 'target_type': 'varchar(255)', 'target_nullable': 'accepted', 'transformation': 'peb.patient_name = per.patient_name', 'target_table': 'peb'}, {'source_column': "['per.gender']", 'source_type': 'varchar(10)', 'source_nullable': 'accepted', 'target_column': 'gender', 'target_type': 'varchar(10)', 'target_nullable': 'accepted', 'transformation': 'peb.gender = per.gender', 'target_table': 'peb'}, {'source_column': "['per.date_of_birth']", 'source_type': 'date', 'source_nullable': 'accepted', 'target_column': 'date_of_birth', 'target_type': 'date', 'target_nullable': 'accepted', 'transformation': 'peb.date_of_birth = per.date_of_birth', 'target_table': 'peb'}, {'source_column': "['per.country']", 'source_type': 'varchar(100)', 'source_nullable': 'accepted', 'target_column': 'country', 'target_type': 'varchar(100)', 'target_nullable': 'accepted', 'transformation': 'peb.country = per.country', 'target_table': 'peb'}, {'source_column': "['per.enrollment_date']", 'source_type': 'timestamp', 'source_nullable': 'accepted', 'target_column': 'enrollment_date', 'target_type': 'timestamp', 'target_nullable': 'accepted', 'transformation': 'peb.enrollment_date = per.enrollment_date', 'target_table': 'peb'}, {'source_column': "['per.consent_status']", 'source_type': 'varchar(20)', 'source_nullable': 'accepted', 'target_column': 'consent_status', 'target_type': 'varchar(20)', 'target_nullable': 'accepted', 'transformation': 'peb.consent_status = per.consent_status', 'target_table': 'peb'}, {'source_column': "['per.source_system']", 'source_type': 'varchar(50)', 'source_nullable': 'accepted', 'target_column': 'source_system', 'target_type': 'varchar(50)', 'target_nullable': 'accepted', 'transformation': 'peb.source_system = per.source_system', 'target_table': 'peb'}, {'source_column': "['lrr.lab_result_id']", 'source_type': 'varchar(255)', 'source_nullable': 'not_accepted', 'target_column': 'lab_result_id', 'target_type': 'varchar(255)', 'target_nullable': 'not_accepted', 'transformation': 'lrb.lab_result_id = lrr.lab_result_id', 'target_table': 'lrb'}, {'source_column': "['lrr.patient_id']", 'source_type': 'varchar(255)', 'source_nullable': 'not_accepted', 'target_column': 'patient_id', 'target_type': 'varchar(255)', 'target_nullable': 'not_accepted', 'transformation': 'lrb.patient_id = lrr.patient_id', 'target_table': 'lrb'}, {'source_column': "['lrr.sample_id']", 'source_type': 'varchar(255)', 'source_nullable': 'accepted', 'target_column': 'sample_id', 'target_type': 'varchar(255)', 'target_nullable': 'accepted', 'transformation': 'lrb.sample_id = lrr.sample_id', 'target_table': 'lrb'}, {'source_column': "['lrr.test_name']", 'source_type': 'varchar(255)', 'source_nullable': 'accepted', 'target_column': 'test_name', 'target_type': 'varchar(255)', 'target_nullable': 'accepted', 'transformation': 'lrb.test_name = lrr.test_name', 'target_table': 'lrb'}, {'source_column': "['lrr.test_result']", 'source_type': 'double', 'source_nullable': 'accepted', 'target_column': 'test_result', 'target_type': 'double', 'target_nullable': 'accepted', 'transformation': 'lrb.test_result = lrr.test_result', 'target_table': 'lrb'}, {'source_column': "['lrr.test_unit']", 'source_type': 'varchar(255)', 'source_nullable': 'accepted', 'target_column': 'test_unit', 'target_type': 'varchar(255)', 'target_nullable': 'accepted', 'transformation': 'lrb.test_unit = lrr.test_unit', 'target_table': 'lrb'}, {'source_column': "['lrr.reference_range']", 'source_type': 'varchar(255)', 'source_nullable': 'accepted', 'target_column': 'reference_range', 'target_type': 'varchar(255)', 'target_nullable': 'accepted', 'transformation': 'lrb.reference_range = lrr.reference_range', 'target_table': 'lrb'}, {'source_column': "['lrr.abnormal_flag']", 'source_type': 'varchar(255)', 'source_nullable': 'accepted', 'target_column': 'abnormal_flag', 'target_type': 'varchar(255)', 'target_nullable': 'accepted', 'transformation': 'lrb.abnormal_flag = lrr.abnormal_flag', 'target_table': 'lrb'}, {'source_column': "['lrr.test_date']", 'source_type': 'timestamp', 'source_nullable': 'accepted', 'target_column': 'test_date', 'target_type': 'timestamp', 'target_nullable': 'accepted', 'transformation': 'lrb.test_date = lrr.test_date', 'target_table': 'lrb'}, {'source_column': "['lrr.lab_name']", 'source_type': 'varchar(255)', 'source_nullable': 'accepted', 'target_column': 'lab_name', 'target_type': 'varchar(255)', 'target_nullable': 'accepted', 'transformation': 'lrb.lab_name = lrr.lab_name', 'target_table': 'lrb'}, {'source_column': "['wmr.device_record_id']", 'source_type': 'varchar(255)', 'source_nullable': 'not_accepted', 'target_column': 'device_record_id', 'target_type': 'varchar(255)', 'target_nullable': 'not_accepted', 'transformation': 'wmb.device_record_id = wmr.device_record_id', 'target_table': 'wmb'}, {'source_column': "['wmr.patient_id']", 'source_type': 'varchar(255)', 'source_nullable': 'not_accepted', 'target_column': 'patient_id', 'target_type': 'varchar(255)', 'target_nullable': 'not_accepted', 'transformation': 'wmb.patient_id = wmr.patient_id', 'target_table': 'wmb'}, {'source_column': "['wmr.device_type']", 'source_type': 'varchar(255)', 'source_nullable': 'accepted', 'target_column': 'device_type', 'target_type': 'varchar(255)', 'target_nullable': 'accepted', 'transformation': 'wmb.device_type = wmr.device_type', 'target_table': 'wmb'}, {'source_column': "['wmr.recorded_timestamp']", 'source_type': 'timestamp', 'source_nullable': 'accepted', 'target_column': 'recorded_timestamp', 'target_type': 'timestamp', 'target_nullable': 'accepted', 'transformation': 'wmb.recorded_timestamp = wmr.recorded_timestamp', 'target_table': 'wmb'}, {'source_column': "['wmr.glucose_level']", 'source_type': 'float64', 'source_nullable': 'accepted', 'target_column': 'glucose_level', 'target_type': 'float64', 'target_nullable': 'accepted', 'transformation': 'wmb.glucose_level = wmr.glucose_level', 'target_table': 'wmb'}, {'source_column': "['wmr.step_count']", 'source_type': 'int', 'source_nullable': 'accepted', 'target_column': 'step_count', 'target_type': 'int', 'target_nullable': 'accepted', 'transformation': 'wmb.step_count = wmr.step_count', 'target_table': 'wmb'}, {'source_column': "['wmr.sleep_hours']", 'source_type': 'float64', 'source_nullable': 'accepted', 'target_column': 'sleep_hours', 'target_type': 'float64', 'target_nullable': 'accepted', 'transformation': 'wmb.sleep_hours = wmr.sleep_hours', 'target_table': 'wmb'}, {'source_column': "['wmr.heart_rate']", 'source_type': 'float64', 'source_nullable': 'accepted', 'target_column': 'heart_rate', 'target_type': 'float64', 'target_nullable': 'accepted', 'transformation': 'wmb.heart_rate = wmr.heart_rate', 'target_table': 'wmb'}, {'source_column': "['wmr.battery_status']", 'source_type': 'varchar(255)', 'source_nullable': 'accepted', 'target_column': 'battery_status', 'target_type': 'varchar(255)', 'target_nullable': 'accepted', 'transformation': 'wmb.battery_status = wmr.battery_status', 'target_table': 'wmb'}, {'source_column': "['dar.administration_id']", 'source_type': 'varchar(255)', 'source_nullable': 'not_accepted', 'target_column': 'administration_id', 'target_type': 'varchar(255)', 'target_nullable': 'not_accepted', 'transformation': 'dab.administration_id = dar.administration_id', 'target_table': 'dab'}, {'source_column': "['dar.patient_id']", 'source_type': 'varchar(255)', 'source_nullable': 'not_accepted', 'target_column': 'patient_id', 'target_type': 'varchar(255)', 'target_nullable': 'not_accepted', 'transformation': 'dab.patient_id = dar.patient_id', 'target_table': 'dab'}, {'source_column': "['dar.drug_code']", 'source_type': 'varchar(255)', 'source_nullable': 'accepted', 'target_column': 'drug_code', 'target_type': 'varchar(255)', 'target_nullable': 'accepted', 'transformation': 'dab.drug_code = dar.drug_code', 'target_table': 'dab'}, {'source_column': "['dar.dosage_mg']", 'source_type': 'double', 'source_nullable': 'accepted', 'target_column': 'dosage_mg', 'target_type': 'double', 'target_nullable': 'accepted', 'transformation': 'dab.dosage_mg = dar.dosage_mg', 'target_table': 'dab'}, {'source_column': "['dar.administration_date']", 'source_type': 'timestamp', 'source_nullable': 'accepted', 'target_column': 'administration_date', 'target_type': 'timestamp', 'target_nullable': 'accepted', 'transformation': 'dab.administration_date = dar.administration_date', 'target_table': 'dab'}, {'source_column': "['dar.administration_route']", 'source_type': 'varchar(255)', 'source_nullable': 'accepted', 'target_column': 'administration_route', 'target_type': 'varchar(255)', 'target_nullable': 'accepted', 'transformation': 'dab.administration_route = dar.administration_route', 'target_table': 'dab'}, {'source_column': "['dar.administered_by']", 'source_type': 'varchar(255)', 'source_nullable': 'accepted', 'target_column': 'administered_by', 'target_type': 'varchar(255)', 'target_nullable': 'accepted', 'transformation': 'dab.administered_by = dar.administered_by', 'target_table': 'dab'}, {'source_column': "['dar.batch_number']", 'source_type': 'varchar(255)', 'source_nullable': 'accepted', 'target_column': 'batch_number', 'target_type': 'varchar(255)', 'target_nullable': 'accepted', 'transformation': 'dab.batch_number = dar.batch_number', 'target_table': 'dab'}, {'source_column': "['cvr.visit_id']", 'source_type': 'varchar(255)', 'source_nullable': 'not_accepted', 'target_column': 'visit_id', 'target_type': 'varchar(255)', 'target_nullable': 'not_accepted', 'transformation': 'cvb.visit_id = cvr.visit_id', 'target_table': 'cvb'}, {'source_column': "['cvr.patient_id']", 'source_type': 'varchar(255)', 'source_nullable': 'not_accepted', 'target_column': 'patient_id', 'target_type': 'varchar(255)', 'target_nullable': 'not_accepted', 'transformation': 'cvb.patient_id = cvr.patient_id', 'target_table': 'cvb'}, {'source_column': "['cvr.trial_id']", 'source_type': 'varchar(255)', 'source_nullable': 'accepted', 'target_column': 'trial_id', 'target_type': 'varchar(255)', 'target_nullable': 'accepted', 'transformation': 'cvb.trial_id = cvr.trial_id', 'target_table': 'cvb'}, {'source_column': "['cvr.visit_date']", 'source_type': 'timestamp', 'source_nullable': 'accepted', 'target_column': 'visit_date', 'target_type': 'timestamp', 'target_nullable': 'accepted', 'transformation': 'cvb.visit_date = cvr.visit_date', 'target_table': 'cvb'}, {'source_column': "['cvr.visit_type']", 'source_type': 'varchar(255)', 'source_nullable': 'accepted', 'target_column': 'visit_type', 'target_type': 'varchar(255)', 'target_nullable': 'accepted', 'transformation': 'cvb.visit_type = cvr.visit_type', 'target_table': 'cvb'}, {'source_column': "['cvr.blood_pressure']", 'source_type': 'double', 'source_nullable': 'accepted', 'target_column': 'blood_pressure', 'target_type': 'double', 'target_nullable': 'accepted', 'transformation': 'cvb.blood_pressure = cvr.blood_pressure', 'target_table': 'cvb'}, {'source_column': "['cvr.heart_rate']", 'source_type': 'double', 'source_nullable': 'accepted', 'target_column': 'heart_rate', 'target_type': 'double', 'target_nullable': 'accepted', 'transformation': 'cvb.heart_rate = cvr.heart_rate', 'target_table': 'cvb'}, {'source_column': "['cvr.weight_kg']", 'source_type': 'double', 'source_nullable': 'accepted', 'target_column': 'weight_kg', 'target_type': 'double', 'target_nullable': 'accepted', 'transformation': 'cvb.weight_kg = cvr.weight_kg', 'target_table': 'cvb'}, {'source_column': "['cvr.physician_notes']", 'source_type': 'text', 'source_nullable': 'accepted', 'target_column': 'physician_notes', 'target_type': 'text', 'target_nullable': 'accepted', 'transformation': 'cvb.physician_notes = cvr.physician_notes', 'target_table': 'cvb'}, {'source_column': "['cvr.source_system']", 'source_type': 'varchar(255)', 'source_nullable': 'accepted', 'target_column': 'source_system', 'target_type': 'varchar(255)', 'target_nullable': 'accepted', 'transformation': 'cvb.source_system = cvr.source_system', 'target_table': 'cvb'}, {'source_column': "['aer.event_id']", 'source_type': 'varchar(255)', 'source_nullable': 'not_accepted', 'target_column': 'event_id', 'target_type': 'varchar(255)', 'target_nullable': 'not_accepted', 'transformation': 'aeb.event_id = aer.event_id', 'target_table': 'aeb'}, {'source_column': "['aer.patient_id']", 'source_type': 'varchar(255)', 'source_nullable': 'not_accepted', 'target_column': 'patient_id', 'target_type': 'varchar(255)', 'target_nullable': 'not_accepted', 'transformation': 'aeb.patient_id = aer.patient_id', 'target_table': 'aeb'}, {'source_column': "['aer.event_type']", 'source_type': 'varchar(255)', 'source_nullable': 'accepted', 'target_column': 'event_type', 'target_type': 'varchar(255)', 'target_nullable': 'accepted', 'transformation': 'aeb.event_type = aer.event_type', 'target_table': 'aeb'}, {'source_column': "['aer.severity']", 'source_type': 'varchar(255)', 'source_nullable': 'accepted', 'target_column': 'severity', 'target_type': 'varchar(255)', 'target_nullable': 'accepted', 'transformation': 'aeb.severity = aer.severity', 'target_table': 'aeb'}, {'source_column': "['aer.event_start_date']", 'source_type': 'timestamp', 'source_nullable': 'accepted', 'target_column': 'event_start_date', 'target_type': 'timestamp', 'target_nullable': 'accepted', 'transformation': 'aeb.event_start_date = aer.event_start_date', 'target_table': 'aeb'}, {'source_column': "['aer.event_end_date']", 'source_type': 'timestamp', 'source_nullable': 'accepted', 'target_column': 'event_end_date', 'target_type': 'timestamp', 'target_nullable': 'accepted', 'transformation': 'aeb.event_end_date = aer.event_end_date', 'target_table': 'aeb'}, {'source_column': "['aer.outcome']", 'source_type': 'varchar(255)', 'source_nullable': 'accepted', 'target_column': 'outcome', 'target_type': 'varchar(255)', 'target_nullable': 'accepted', 'transformation': 'aeb.outcome = aer.outcome', 'target_table': 'aeb'}, {'source_column': "['aer.related_to_drug']", 'source_type': 'boolean', 'source_nullable': 'accepted', 'target_column': 'related_to_drug', 'target_type': 'boolean', 'target_nullable': 'accepted', 'transformation': 'aeb.related_to_drug = aer.related_to_drug', 'target_table': 'aeb'}, {'source_column': "['aer.hospitalization_required']", 'source_type': 'boolean', 'source_nullable': 'accepted', 'target_column': 'hospitalization_required', 'target_type': 'boolean', 'target_nullable': 'accepted', 'transformation': 'aeb.hospitalization_required = aer.hospitalization_required', 'target_table': 'aeb'}, {'source_column': "['aer.reported_by']", 'source_type': 'varchar(255)', 'source_nullable': 'accepted', 'target_column': 'reported_by', 'target_type': 'varchar(255)', 'target_nullable': 'accepted', 'transformation': 'aeb.reported_by = aer.reported_by', 'target_table': 'aeb'}], 'runtime_config': {'base_path': 's3://sdlc-agent-bucket/engineering-agent/clinical_trail/', 'target_path': 's3://sdlc-agent-bucket/engineering-agent/bronze/', 'read_format': 'csv', 'write_format': 'csv', 'write_mode': 'overwrite'}}
+metadata = {
+    'tables': [
+        {
+            'target_schema': 'bronze',
+            'target_table': 'products_bronze',
+            'target_alias': 'pb',
+            'mapping_details': 'products_raw pr',
+            'description': 'Bronze ingestion of raw product master data from products_raw with no transformations, joins, or aggregations.'
+        },
+        {
+            'target_schema': 'bronze',
+            'target_table': 'stores_bronze',
+            'target_alias': 'sb',
+            'mapping_details': 'stores_raw sr',
+            'description': 'Bronze ingestion of raw store reference data from stores_raw with no transformations, joins, or aggregations.'
+        },
+        {
+            'target_schema': 'bronze',
+            'target_table': 'sales_transactions_bronze',
+            'target_alias': 'stb',
+            'mapping_details': 'sales_transactions_raw str',
+            'description': 'Bronze ingestion of raw sales transaction data from sales_transactions_raw with no transformations, joins, or aggregations.'
+        }
+    ],
+    'columns': [
+        {
+            'source_column': "['pr.product_id']",
+            'source_type': 'varchar(10)',
+            'source_nullable': 'null_accepted',
+            'target_column': 'product_id',
+            'target_type': 'varchar(10)',
+            'target_nullable': 'null_accepted',
+            'transformation': 'pb.product_id = pr.product_id',
+            'target_table': 'pb'
+        },
+        {
+            'source_column': "['pr.product_name']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'null_accepted',
+            'target_column': 'product_name',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'null_accepted',
+            'transformation': 'pb.product_name = pr.product_name',
+            'target_table': 'pb'
+        },
+        {
+            'source_column': "['pr.category']",
+            'source_type': 'varchar(100)',
+            'source_nullable': 'null_accepted',
+            'target_column': 'category',
+            'target_type': 'varchar(100)',
+            'target_nullable': 'null_accepted',
+            'transformation': 'pb.category = pr.category',
+            'target_table': 'pb'
+        },
+        {
+            'source_column': "['pr.brand']",
+            'source_type': 'varchar(100)',
+            'source_nullable': 'null_accepted',
+            'target_column': 'brand',
+            'target_type': 'varchar(100)',
+            'target_nullable': 'null_accepted',
+            'transformation': 'pb.brand = pr.brand',
+            'target_table': 'pb'
+        },
+        {
+            'source_column': "['pr.price']",
+            'source_type': 'float',
+            'source_nullable': 'null_accepted',
+            'target_column': 'price',
+            'target_type': 'float',
+            'target_nullable': 'null_accepted',
+            'transformation': 'pb.price = pr.price',
+            'target_table': 'pb'
+        },
+        {
+            'source_column': "['pr.is_active']",
+            'source_type': 'boolean',
+            'source_nullable': 'null_accepted',
+            'target_column': 'is_active',
+            'target_type': 'boolean',
+            'target_nullable': 'null_accepted',
+            'transformation': 'pb.is_active = pr.is_active',
+            'target_table': 'pb'
+        },
+        {
+            'source_column': "['sr.store_id']",
+            'source_type': 'varchar(10)',
+            'source_nullable': 'null_accepted',
+            'target_column': 'store_id',
+            'target_type': 'varchar(10)',
+            'target_nullable': 'null_accepted',
+            'transformation': 'sb.store_id = sr.store_id',
+            'target_table': 'sb'
+        },
+        {
+            'source_column': "['sr.store_name']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'null_accepted',
+            'target_column': 'store_name',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'null_accepted',
+            'transformation': 'sb.store_name = sr.store_name',
+            'target_table': 'sb'
+        },
+        {
+            'source_column': "['sr.city']",
+            'source_type': 'varchar(100)',
+            'source_nullable': 'null_accepted',
+            'target_column': 'city',
+            'target_type': 'varchar(100)',
+            'target_nullable': 'null_accepted',
+            'transformation': 'sb.city = sr.city',
+            'target_table': 'sb'
+        },
+        {
+            'source_column': "['sr.state']",
+            'source_type': 'varchar(100)',
+            'source_nullable': 'null_accepted',
+            'target_column': 'state',
+            'target_type': 'varchar(100)',
+            'target_nullable': 'null_accepted',
+            'transformation': 'sb.state = sr.state',
+            'target_table': 'sb'
+        },
+        {
+            'source_column': "['sr.store_type']",
+            'source_type': 'varchar(50)',
+            'source_nullable': 'null_accepted',
+            'target_column': 'store_type',
+            'target_type': 'varchar(50)',
+            'target_nullable': 'null_accepted',
+            'transformation': 'sb.store_type = sr.store_type',
+            'target_table': 'sb'
+        },
+        {
+            'source_column': "['sr.open_date']",
+            'source_type': 'date',
+            'source_nullable': 'null_accepted',
+            'target_column': 'open_date',
+            'target_type': 'date',
+            'target_nullable': 'null_accepted',
+            'transformation': 'sb.open_date = sr.open_date',
+            'target_table': 'sb'
+        },
+        {
+            'source_column': "['str.transaction_id']",
+            'source_type': 'varchar(10)',
+            'source_nullable': 'null_accepted',
+            'target_column': 'transaction_id',
+            'target_type': 'varchar(10)',
+            'target_nullable': 'null_accepted',
+            'transformation': 'stb.transaction_id = str.transaction_id',
+            'target_table': 'stb'
+        },
+        {
+            'source_column': "['str.store_id']",
+            'source_type': 'varchar(10)',
+            'source_nullable': 'null_accepted',
+            'target_column': 'store_id',
+            'target_type': 'varchar(10)',
+            'target_nullable': 'null_accepted',
+            'transformation': 'stb.store_id = str.store_id',
+            'target_table': 'stb'
+        },
+        {
+            'source_column': "['str.product_id']",
+            'source_type': 'varchar(10)',
+            'source_nullable': 'null_accepted',
+            'target_column': 'product_id',
+            'target_type': 'varchar(10)',
+            'target_nullable': 'null_accepted',
+            'transformation': 'stb.product_id = str.product_id',
+            'target_table': 'stb'
+        },
+        {
+            'source_column': "['str.quantity']",
+            'source_type': 'int',
+            'source_nullable': 'null_accepted',
+            'target_column': 'quantity',
+            'target_type': 'int',
+            'target_nullable': 'null_accepted',
+            'transformation': 'stb.quantity = str.quantity',
+            'target_table': 'stb'
+        },
+        {
+            'source_column': "['str.sale_amount']",
+            'source_type': 'double',
+            'source_nullable': 'null_accepted',
+            'target_column': 'sale_amount',
+            'target_type': 'double',
+            'target_nullable': 'null_accepted',
+            'transformation': 'stb.sale_amount = str.sale_amount',
+            'target_table': 'stb'
+        },
+        {
+            'source_column': "['str.transaction_time']",
+            'source_type': 'timestamp',
+            'source_nullable': 'null_accepted',
+            'target_column': 'transaction_time',
+            'target_type': 'timestamp',
+            'target_nullable': 'null_accepted',
+            'transformation': 'stb.transaction_time = str.transaction_time',
+            'target_table': 'stb'
+        }
+    ],
+    'runtime_config': {
+        'base_path': 's3://sdlc-agent-bucket/engineering-agent/src/',
+        'target_path': 's3://sdlc-agent-bucket/engineering-agent/bronze/',
+        'read_format': 'csv',
+        'write_format': 'csv',
+        'write_mode': 'overwrite'
+    }
+}
 
 runtime_config = metadata.get('runtime_config', {})
 base_path = runtime_config.get('base_path')
@@ -19,7 +232,7 @@ write_format = runtime_config.get('write_format')
 write_mode = runtime_config.get('write_mode')
 
 for table in metadata.get('tables', []):
-    mapping_details = table.get('mapping_details', '')
+    mapping_details = table.get('mapping_details', '').strip()
     mapping_parts = mapping_details.split()
     source_table = mapping_parts[0] if len(mapping_parts) > 0 else None
     source_alias = mapping_parts[1] if len(mapping_parts) > 1 else None
@@ -28,16 +241,20 @@ for table in metadata.get('tables', []):
 
     reader = spark.read.format(read_format)
     if read_format == 'csv':
-        reader = reader.option('header', 'true').option('inferSchema', 'true')
+        reader = reader.option("header", "true").option("inferSchema", "true")
 
-    df = reader.load(base_path + source_table + '.' + read_format)
+    df = reader.load(base_path + source_table + "." + read_format)
+
     df = df.alias(source_alias)
 
     transformations = []
     for col_meta in metadata.get('columns', []):
         if col_meta.get('target_table') == target_alias:
             transformation = col_meta.get('transformation', '')
-            rhs = transformation.split('=', 1)[1].strip() if '=' in transformation else transformation.strip()
+            if '=' in transformation:
+                rhs = transformation.split('=', 1)[1].strip()
+            else:
+                rhs = transformation.strip()
             target_column = col_meta.get('target_column')
             transformations.append(f"{rhs} as {target_column}")
 
@@ -45,8 +262,8 @@ for table in metadata.get('tables', []):
 
     writer = df.write.mode(write_mode).format(write_format)
     if write_format == 'csv':
-        writer = writer.option('header', 'true')
+        writer = writer.option("header", "true")
 
-    writer.save(target_path + target_table + '.' + write_format)
+    writer.save(target_path + target_table + "." + write_format)
 
 job.commit()
