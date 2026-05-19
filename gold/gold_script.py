@@ -1,97 +1,154 @@
-<GLUE_SCRIPT>
 import sys
-import os
-import logging
-import json
-import datetime
-
-from pyspark.sql import functions as F
-from pyspark.sql import types
-from pyspark.context import SparkContext
+from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
 from awsglue.job import Job
-from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from pyspark.sql import SparkSession
 
-logging.basicConfig(level=logging.INFO,
-                    format="%(asctime)s | %(levelname)s | %(message)s")
-logger = logging.getLogger(__name__)
+args = getResolvedOptions(sys.argv, ["JOB_NAME"])
 
-args = getResolvedOptions(sys.argv, ['JOB_NAME', 'METADATA'])
-meta = json.loads(args['METADATA'])
+SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
+TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
+FILE_FORMAT = "csv"
+
 sc = SparkContext()
-gc = GlueContext(sc)
-spark = gc.spark_session
-job = Job(gc)
-job.init(args['JOB_NAME'], args)
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args["JOB_NAME"], args)
 
+# -------------------------------------------------------------------
+# Read source tables from S3 + create temp views
+# -------------------------------------------------------------------
 
-def add_audit_columns(df, batch_id, source_system, layer, partition_columns):
-    df_out = (df
-              .withColumn("_ingestion_timestamp", F.current_timestamp())
-              .withColumn("_batch_id", F.lit(batch_id))
-              .withColumn("_source_system", F.lit(source_system))
-              .withColumn("_layer", F.lit(layer)))
+clinical_trials_silver_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/clinical_trials_silver.{FILE_FORMAT}/")
+)
+clinical_trials_silver_df.createOrReplaceTempView("clinical_trials_silver")
 
-    if "_ingestion_date" in (partition_columns or []):
-        df_out = df_out.withColumn("_ingestion_date", F.to_date(F.current_timestamp()).cast("string"))
+audit_trail_silver_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/audit_trail_silver.{FILE_FORMAT}/")
+)
+audit_trail_silver_df.createOrReplaceTempView("audit_trail_silver")
 
-    return df_out
+data_lineage_silver_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/data_lineage_silver.{FILE_FORMAT}/")
+)
+data_lineage_silver_df.createOrReplaceTempView("data_lineage_silver")
 
+historical_versions_silver_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/historical_versions_silver.{FILE_FORMAT}/")
+)
+historical_versions_silver_df.createOrReplaceTempView("historical_versions_silver")
 
-for table in meta['tables']:
-    target_table = None
-    try:
-        target_table = table['target_table']
-        source_tables = table['source_tables']
-        sql_query = table['sql_query']
-        partition_cols = table['partition_columns']
-        dedup_conf = table.get('dedup', None)
+# -------------------------------------------------------------------
+# Target: gold_clinical_trials
+# -------------------------------------------------------------------
 
-        for entry in source_tables:
-            src_path = meta['runtime_config']['source_path'] + "/" + entry['table_name']
-            df_src = (spark.read
-                      .format(meta['runtime_config']['read_format'])
-                      .options(**meta['runtime_config']['read_options'])
-                      .load(src_path))
-            logger.info(f"READ  | table={entry['table_name']} | path={src_path}")
-            df_src.createOrReplaceTempView(entry['alias'])
+gold_clinical_trials_df = spark.sql(
+    """
+    SELECT
+        cts.trial_id AS trial_id,
+        CAST(cts.start_date AS DATE) AS start_date,
+        cts.trial_name AS trial_name,
+        cts.study_phase AS study_phase,
+        cts.end_date AS end_date,
+        cts.principal_investigator AS principal_investigator,
+        cts.sponsor AS sponsor,
+        cts.compliance_status AS compliance_status
+    FROM clinical_trials_silver cts
+    """
+)
 
-        df = spark.sql(sql_query)
+(
+    gold_clinical_trials_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/gold_clinical_trials.csv")
+)
 
-        if dedup_conf is not None and dedup_conf['enabled'] is True:
-            from pyspark.sql import Window  # imported only when needed for dedup; per spec
+# -------------------------------------------------------------------
+# Target: gold_audit_trail
+# -------------------------------------------------------------------
 
-            window_spec = (Window
-                           .partitionBy(*dedup_conf['partition_by'])
-                           .orderBy(F.expr(dedup_conf['order_by'])))
+gold_audit_trail_df = spark.sql(
+    """
+    SELECT
+        ats.record_id AS record_id,
+        CAST(ats.change_timestamp AS TIMESTAMP) AS change_timestamp,
+        ats.changed_by AS changed_by,
+        ats.field_name AS field_name,
+        ats.old_value AS old_value,
+        ats.new_value AS new_value,
+        ats.change_reason AS change_reason
+    FROM audit_trail_silver ats
+    """
+)
 
-            df = df.withColumn(dedup_conf['row_number_col'], F.row_number().over(window_spec))
-            df = df.filter(F.col(dedup_conf['row_number_col']) == 1).drop(dedup_conf['row_number_col'])
+(
+    gold_audit_trail_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/gold_audit_trail.csv")
+)
 
-        df = add_audit_columns(
-            df,
-            batch_id=meta['job']['batch_id'],
-            source_system=meta['job']['source_system'],
-            layer=meta['layer'],
-            partition_columns=partition_cols
-        )
+# -------------------------------------------------------------------
+# Target: gold_data_lineage
+# -------------------------------------------------------------------
 
-        target_out_path = meta['runtime_config']['target_path'] + "/" + target_table
+gold_data_lineage_df = spark.sql(
+    """
+    SELECT
+        dls.lineage_id AS lineage_id,
+        dls.source_system AS source_system,
+        dls.transformation_description AS transformation_description,
+        dls.target_table AS target_table,
+        dls.load_timestamp AS load_timestamp
+    FROM data_lineage_silver dls
+    """
+)
 
-        writer = (df.write
-                  .mode(meta['runtime_config']['write_mode'])
-                  .format(meta['runtime_config']['write_format'])
-                  .options(**meta['runtime_config']['write_options']))
+(
+    gold_data_lineage_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/gold_data_lineage.csv")
+)
 
-        if partition_cols:
-            writer = writer.partitionBy(*partition_cols)
+# -------------------------------------------------------------------
+# Target: gold_historical_versions
+# -------------------------------------------------------------------
 
-        writer.save(target_out_path)
-        logger.info(f"WRITE | table={target_table} | path={target_out_path}")
+gold_historical_versions_df = spark.sql(
+    """
+    SELECT
+        hvs.version_id AS version_id,
+        hvs.record_id AS record_id,
+        hvs.version_number AS version_number,
+        CAST(hvs.version_start_date AS DATE) AS version_start_date,
+        hvs.version_end_date AS version_end_date,
+        hvs.data_snapshot AS data_snapshot
+    FROM historical_versions_silver hvs
+    """
+)
 
-    except Exception as e:
-        logger.error(f"FAILED | table={target_table} | error={e}")
-        raise
+(
+    gold_historical_versions_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/gold_historical_versions.csv")
+)
 
 job.commit()
-</GLUE_SCRIPT>
