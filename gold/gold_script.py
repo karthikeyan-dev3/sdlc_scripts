@@ -1,169 +1,97 @@
+<GLUE_SCRIPT>
 import sys
+import os
+import logging
+import json
+import datetime
+
+from pyspark.sql import functions as F
+from pyspark.sql import types
+from pyspark.context import SparkContext
 from awsglue.context import GlueContext
 from awsglue.job import Job
-from pyspark.context import SparkContext
-from pyspark.sql import SparkSession
+from awsglue.utils import getResolvedOptions
 
-SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
-TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
-FILE_FORMAT = "csv"
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s | %(levelname)s | %(message)s")
+logger = logging.getLogger(__name__)
 
-sc = SparkContext.getOrCreate()
-glueContext = GlueContext(sc)
-spark = glueContext.spark_session
-job = Job(glueContext)
-job.init("glue_gold_layer_job", {})
+args = getResolvedOptions(sys.argv, ['JOB_NAME', 'METADATA'])
+meta = json.loads(args['METADATA'])
+sc = SparkContext()
+gc = GlueContext(sc)
+spark = gc.spark_session
+job = Job(gc)
+job.init(args['JOB_NAME'], args)
 
-# -------------------------------------------------------------------
-# Read Source Tables (Silver) and Create Temp Views
-# -------------------------------------------------------------------
-products_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/products_silver.{FILE_FORMAT}/")
-)
-products_silver_df.createOrReplaceTempView("products_silver")
 
-stores_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/stores_silver.{FILE_FORMAT}/")
-)
-stores_silver_df.createOrReplaceTempView("stores_silver")
+def add_audit_columns(df, batch_id, source_system, layer, partition_columns):
+    df_out = (df
+              .withColumn("_ingestion_timestamp", F.current_timestamp())
+              .withColumn("_batch_id", F.lit(batch_id))
+              .withColumn("_source_system", F.lit(source_system))
+              .withColumn("_layer", F.lit(layer)))
 
-sales_transactions_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/sales_transactions_silver.{FILE_FORMAT}/")
-)
-sales_transactions_silver_df.createOrReplaceTempView("sales_transactions_silver")
+    if "_ingestion_date" in (partition_columns or []):
+        df_out = df_out.withColumn("_ingestion_date", F.to_date(F.current_timestamp()).cast("string"))
 
-aggregated_sales_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/aggregated_sales_silver.{FILE_FORMAT}/")
-)
-aggregated_sales_silver_df.createOrReplaceTempView("aggregated_sales_silver")
+    return df_out
 
-sales_analysis_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/sales_analysis_silver.{FILE_FORMAT}/")
-)
-sales_analysis_silver_df.createOrReplaceTempView("sales_analysis_silver")
 
-# -------------------------------------------------------------------
-# Target: gold_product_master
-# -------------------------------------------------------------------
-gold_product_master_df = spark.sql(
-    """
-    SELECT
-        CAST(ps.product_id AS STRING)   AS product_id,
-        CAST(ps.product_name AS STRING) AS product_name,
-        CAST(ps.category AS STRING)     AS category,
-        CAST(ps.brand AS STRING)        AS brand
-    FROM products_silver ps
-    """
-)
+for table in meta['tables']:
+    target_table = None
+    try:
+        target_table = table['target_table']
+        source_tables = table['source_tables']
+        sql_query = table['sql_query']
+        partition_cols = table['partition_columns']
+        dedup_conf = table.get('dedup', None)
 
-(
-    gold_product_master_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_product_master.csv")
-)
+        for entry in source_tables:
+            src_path = meta['runtime_config']['source_path'] + "/" + entry['table_name']
+            df_src = (spark.read
+                      .format(meta['runtime_config']['read_format'])
+                      .options(**meta['runtime_config']['read_options'])
+                      .load(src_path))
+            logger.info(f"READ  | table={entry['table_name']} | path={src_path}")
+            df_src.createOrReplaceTempView(entry['alias'])
 
-# -------------------------------------------------------------------
-# Target: gold_store_master
-# -------------------------------------------------------------------
-gold_store_master_df = spark.sql(
-    """
-    SELECT
-        CAST(ss.store_id AS STRING)     AS store_id,
-        CAST(ss.store_name AS STRING)   AS store_name,
-        CAST(ss.region AS STRING)       AS region,
-        CAST(ss.store_type AS STRING)   AS store_type
-    FROM stores_silver ss
-    """
-)
+        df = spark.sql(sql_query)
 
-(
-    gold_store_master_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_store_master.csv")
-)
+        if dedup_conf is not None and dedup_conf['enabled'] is True:
+            from pyspark.sql import Window  # imported only when needed for dedup; per spec
 
-# -------------------------------------------------------------------
-# Target: gold_sales_transactions
-# -------------------------------------------------------------------
-gold_sales_transactions_df = spark.sql(
-    """
-    SELECT
-        CAST(sts.transaction_id AS STRING) AS transaction_id,
-        CAST(sts.product_id AS STRING)     AS product_id,
-        CAST(sts.store_id AS STRING)       AS store_id,
-        DATE(sts.transaction_date)         AS transaction_date,
-        CAST(sts.quantity_sold AS INT)     AS quantity_sold,
-        CAST(sts.total_amount AS DOUBLE)   AS total_amount
-    FROM sales_transactions_silver sts
-    """
-)
+            window_spec = (Window
+                           .partitionBy(*dedup_conf['partition_by'])
+                           .orderBy(F.expr(dedup_conf['order_by'])))
 
-(
-    gold_sales_transactions_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_sales_transactions.csv")
-)
+            df = df.withColumn(dedup_conf['row_number_col'], F.row_number().over(window_spec))
+            df = df.filter(F.col(dedup_conf['row_number_col']) == 1).drop(dedup_conf['row_number_col'])
 
-# -------------------------------------------------------------------
-# Target: gold_aggregated_sales
-# -------------------------------------------------------------------
-gold_aggregated_sales_df = spark.sql(
-    """
-    SELECT
-        DATE(sas.date)                     AS date,
-        CAST(sas.product_id AS STRING)     AS product_id,
-        CAST(sas.store_id AS STRING)       AS store_id,
-        CAST(sas.total_quantity_sold AS INT)   AS total_quantity_sold,
-        CAST(sas.total_sales_amount AS DOUBLE) AS total_sales_amount
-    FROM aggregated_sales_silver sas
-    """
-)
+        df = add_audit_columns(
+            df,
+            batch_id=meta['job']['batch_id'],
+            source_system=meta['job']['source_system'],
+            layer=meta['layer'],
+            partition_columns=partition_cols
+        )
 
-(
-    gold_aggregated_sales_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_aggregated_sales.csv")
-)
+        target_out_path = meta['runtime_config']['target_path'] + "/" + target_table
 
-# -------------------------------------------------------------------
-# Target: gold_sales_analysis
-# -------------------------------------------------------------------
-gold_sales_analysis_df = spark.sql(
-    """
-    SELECT
-        DATE(sai.analysis_date)               AS analysis_date,
-        CAST(sai.total_store_sales AS DOUBLE) AS total_store_sales,
-        CAST(sai.average_product_sales AS DOUBLE) AS average_product_sales,
-        CAST(sai.top_selling_product_id AS STRING) AS top_selling_product_id,
-        CAST(sai.top_selling_store_id AS STRING)   AS top_selling_store_id
-    FROM sales_analysis_silver sai
-    """
-)
+        writer = (df.write
+                  .mode(meta['runtime_config']['write_mode'])
+                  .format(meta['runtime_config']['write_format'])
+                  .options(**meta['runtime_config']['write_options']))
 
-(
-    gold_sales_analysis_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_sales_analysis.csv")
-)
+        if partition_cols:
+            writer = writer.partitionBy(*partition_cols)
+
+        writer.save(target_out_path)
+        logger.info(f"WRITE | table={target_table} | path={target_out_path}")
+
+    except Exception as e:
+        logger.error(f"FAILED | table={target_table} | error={e}")
+        raise
 
 job.commit()
+</GLUE_SCRIPT>
