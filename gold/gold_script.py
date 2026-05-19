@@ -1,6 +1,7 @@
 import sys
-from awsglue.context import GlueContext
 from awsglue.utils import getResolvedOptions
+from awsglue.context import GlueContext
+from awsglue.job import Job
 from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 
@@ -9,133 +10,165 @@ args = getResolvedOptions(sys.argv, ["JOB_NAME"])
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args["JOB_NAME"], args)
 
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-# -----------------------------------------------------------------------------------
-# 1) Read source tables from S3
-# -----------------------------------------------------------------------------------
-products_silver_df = (
+# -------------------------------------------------------------------
+# Read Source Tables from S3 (CSV) and Create Temp Views
+# -------------------------------------------------------------------
+
+patient_daily_health_indicators_silver_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/products_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/patient_daily_health_indicators_silver.{FILE_FORMAT}/")
 )
+patient_daily_health_indicators_silver_df.createOrReplaceTempView("patient_daily_health_indicators_silver")
 
-stores_silver_df = (
+patient_response_features_silver_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/stores_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/patient_response_features_silver.{FILE_FORMAT}/")
 )
+patient_response_features_silver_df.createOrReplaceTempView("patient_response_features_silver")
 
-sales_transactions_silver_df = (
+abnormal_results_silver_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/sales_transactions_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/abnormal_results_silver.{FILE_FORMAT}/")
 )
+abnormal_results_silver_df.createOrReplaceTempView("abnormal_results_silver")
 
-# -----------------------------------------------------------------------------------
-# 2) Create temp views
-# -----------------------------------------------------------------------------------
-products_silver_df.createOrReplaceTempView("products_silver")
-stores_silver_df.createOrReplaceTempView("stores_silver")
-sales_transactions_silver_df.createOrReplaceTempView("sales_transactions_silver")
+integrated_health_data_silver_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/integrated_health_data_silver.{FILE_FORMAT}/")
+)
+integrated_health_data_silver_df.createOrReplaceTempView("integrated_health_data_silver")
 
-# -----------------------------------------------------------------------------------
-# Target: gold_product_master
-# Mapping: silver.products_silver ps
-# -----------------------------------------------------------------------------------
-gold_product_master_df = spark.sql(
+# -------------------------------------------------------------------
+# Target: gold_patient_health_indicators
+# -------------------------------------------------------------------
+
+gold_patient_health_indicators_df = spark.sql(
     """
     SELECT
-        CAST(ps.product_id AS STRING)   AS product_id,
-        CAST(ps.product_name AS STRING) AS product_name,
-        CAST(ps.category AS STRING)     AS category,
-        CAST(ps.price AS FLOAT)         AS price
-    FROM products_silver ps
+        CAST(pdhis.patient_id AS STRING) AS patient_id,
+        DATE(pdhis.date) AS date,
+        CAST(pdhis.hbA1c_level AS DOUBLE) AS hbA1c_level,
+        CAST(pdhis.glucose_level AS DOUBLE) AS glucose_level
+    FROM patient_daily_health_indicators_silver pdhis
     """
 )
 
 (
-    gold_product_master_df.coalesce(1)
+    gold_patient_health_indicators_df.coalesce(1)
     .write.mode("overwrite")
-    .format(FILE_FORMAT)
+    .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_product_master.csv")
+    .save(f"{TARGET_PATH}/gold_patient_health_indicators.csv")
 )
 
-# -----------------------------------------------------------------------------------
-# Target: gold_store_master
-# Mapping: silver.stores_silver ss
-# -----------------------------------------------------------------------------------
-gold_store_master_df = spark.sql(
+# -------------------------------------------------------------------
+# Target: gold_patient_response_analysis
+# -------------------------------------------------------------------
+
+gold_patient_response_analysis_df = spark.sql(
     """
     SELECT
-        CAST(ss.store_id AS STRING)    AS store_id,
-        CAST(ss.store_name AS STRING)  AS store_name,
-        CAST(ss.region AS STRING)      AS region,
-        CAST(ss.store_type AS STRING)  AS store_type
-    FROM stores_silver ss
+        CAST(prfs.patient_id AS STRING) AS patient_id,
+        DATE(prfs.date) AS date,
+        CAST(prfs.response_pattern AS STRING) AS response_pattern,
+        CAST(prfs.health_condition_change AS STRING) AS health_condition_change
+    FROM patient_response_features_silver prfs
     """
 )
 
 (
-    gold_store_master_df.coalesce(1)
+    gold_patient_response_analysis_df.coalesce(1)
     .write.mode("overwrite")
-    .format(FILE_FORMAT)
+    .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_store_master.csv")
+    .save(f"{TARGET_PATH}/gold_patient_response_analysis.csv")
 )
 
-# -----------------------------------------------------------------------------------
-# Target: gold_sales
-# Mapping: silver.sales_transactions_silver sts
-# -----------------------------------------------------------------------------------
-gold_sales_df = spark.sql(
+# -------------------------------------------------------------------
+# Target: gold_abnormal_result_analysis
+# -------------------------------------------------------------------
+
+gold_abnormal_result_analysis_df = spark.sql(
     """
     SELECT
-        CAST(sts.transaction_id AS STRING) AS transaction_id,
-        CAST(sts.transaction_date AS DATE) AS transaction_date,
-        CAST(sts.store_id AS STRING)       AS store_id,
-        CAST(sts.product_id AS STRING)     AS product_id,
-        CAST(sts.quantity_sold AS INT)     AS quantity_sold,
-        CAST(sts.sales_amount AS DOUBLE)   AS sales_amount
-    FROM sales_transactions_silver sts
+        CAST(ars.patient_id AS STRING) AS patient_id,
+        CAST(ars.abnormal_result_type AS STRING) AS abnormal_result_type,
+        CAST(COUNT(ars.patient_id) AS INT) AS occurrence_count
+    FROM abnormal_results_silver ars
+    GROUP BY
+        ars.patient_id,
+        ars.abnormal_result_type
     """
 )
 
 (
-    gold_sales_df.coalesce(1)
+    gold_abnormal_result_analysis_df.coalesce(1)
     .write.mode("overwrite")
-    .format(FILE_FORMAT)
+    .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_sales.csv")
+    .save(f"{TARGET_PATH}/gold_abnormal_result_analysis.csv")
 )
 
-# -----------------------------------------------------------------------------------
-# Target: gold_aggregated_sales
-# Mapping: silver.sales_transactions_silver sts
-# Transformations (provided in UDT columns):
-#   aggregation_date = sts.transaction_date
-#   total_revenue    = SUM(sts.sales_amount)
-#   total_transactions = COUNT(DISTINCT sts.transaction_id)
-# -----------------------------------------------------------------------------------
-gold_aggregated_sales_df = spark.sql(
+# -------------------------------------------------------------------
+# Target: gold_patient_risk_categorization
+# -------------------------------------------------------------------
+
+gold_patient_risk_categorization_df = spark.sql(
     """
     SELECT
-        CAST(sts.transaction_date AS DATE)            AS aggregation_date,
-        CAST(SUM(sts.sales_amount) AS DOUBLE)         AS total_revenue,
-        CAST(COUNT(DISTINCT sts.transaction_id) AS INT) AS total_transactions
-    FROM sales_transactions_silver sts
-    GROUP BY CAST(sts.transaction_date AS DATE)
+        CAST(prfs.patient_id AS STRING) AS patient_id,
+        CAST(prfs.trend_analysis AS STRING) AS trend_analysis,
+        CAST(
+            CASE
+                WHEN prfs.trend_analysis = 'INDICATOR_TREND' THEN 'ELEVATED_RISK'
+                ELSE 'UNKNOWN'
+            END AS STRING
+        ) AS risk_category
+    FROM patient_response_features_silver prfs
     """
 )
 
 (
-    gold_aggregated_sales_df.coalesce(1)
+    gold_patient_risk_categorization_df.coalesce(1)
     .write.mode("overwrite")
-    .format(FILE_FORMAT)
+    .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_aggregated_sales.csv")
+    .save(f"{TARGET_PATH}/gold_patient_risk_categorization.csv")
 )
+
+# -------------------------------------------------------------------
+# Target: gold_integrated_health_data
+# -------------------------------------------------------------------
+
+gold_integrated_health_data_df = spark.sql(
+    """
+    SELECT
+        CAST(ihds.patient_id AS STRING) AS patient_id,
+        DATE(ihds.date) AS date,
+        ihds.laboratory_data AS laboratory_data,
+        ihds.wearable_data AS wearable_data,
+        ihds.patient_related_data AS patient_related_data
+    FROM integrated_health_data_silver ihds
+    """
+)
+
+(
+    gold_integrated_health_data_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/gold_integrated_health_data.csv")
+)
+
+job.commit()
