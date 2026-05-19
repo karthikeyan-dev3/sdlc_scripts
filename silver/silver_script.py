@@ -1,15 +1,11 @@
 import sys
+from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
 from awsglue.job import Job
-from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
-
-SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
-TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
-FILE_FORMAT = "csv"
 
 sc = SparkContext()
 glueContext = GlueContext(sc)
@@ -17,245 +13,174 @@ spark: SparkSession = glueContext.spark_session
 job = Job(glueContext)
 job.init(args["JOB_NAME"], args)
 
-# -------------------------------------------------------------------
-# 1) Read source tables from S3 (Bronze)
-# -------------------------------------------------------------------
-products_bronze_df = (
+SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
+TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
+FILE_FORMAT = "csv"
+
+# =========================
+# Source Reads (Bronze)
+# =========================
+patients_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/products_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/patients_bronze.{FILE_FORMAT}/")
 )
-products_bronze_df.createOrReplaceTempView("products_bronze")
+patients_bronze_df.createOrReplaceTempView("patients_bronze")
 
-stores_bronze_df = (
+health_metrics_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/stores_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/health_metrics_bronze.{FILE_FORMAT}/")
 )
-stores_bronze_df.createOrReplaceTempView("stores_bronze")
+health_metrics_bronze_df.createOrReplaceTempView("health_metrics_bronze")
 
-sales_transactions_bronze_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/sales_transactions_bronze.{FILE_FORMAT}/")
+# =========================
+# Target: silver.patients_silver
+# =========================
+patients_silver_sql = """
+WITH base AS (
+  SELECT
+    CAST(TRIM(pb.patient_id) AS STRING) AS patient_id,
+    pb.trial_id AS trial_id,
+    pb.site_id AS site_id,
+    pb.gender AS gender,
+    pb.date_of_birth AS date_of_birth,
+    pb.country AS country,
+    pb.enrollment_date AS enrollment_date,
+    pb.consent_status AS consent_status,
+    pb.source_system AS source_system,
+    ROW_NUMBER() OVER (
+      PARTITION BY CAST(TRIM(pb.patient_id) AS STRING)
+      ORDER BY pb.enrollment_date DESC
+    ) AS rn
+  FROM patients_bronze pb
+),
+dedup AS (
+  SELECT
+    patient_id,
+    trial_id,
+    site_id,
+    gender,
+    date_of_birth,
+    country,
+    enrollment_date,
+    consent_status,
+    source_system
+  FROM base
+  WHERE rn = 1
 )
-sales_transactions_bronze_df.createOrReplaceTempView("sales_transactions_bronze")
+SELECT
+  patient_id,
+  trial_id,
+  site_id,
+  gender,
+  date_of_birth,
+  country,
+  enrollment_date,
+  consent_status,
+  source_system
+FROM dedup
+"""
+patients_silver_df = spark.sql(patients_silver_sql)
+patients_silver_df.createOrReplaceTempView("patients_silver")
 
-# -------------------------------------------------------------------
-# Target: silver.product_details_silver
-# -------------------------------------------------------------------
-product_details_silver_df = spark.sql(
-    """
-    WITH base AS (
-      SELECT
-        TRIM(pb.product_id) AS product_id,
-        TRIM(pb.product_name) AS product_name,
-        TRIM(pb.category) AS category,
-        TRIM(pb.brand) AS brand,
-        CASE
-          WHEN CAST(pb.price AS DOUBLE) >= 0 THEN CAST(CAST(pb.price AS DOUBLE) AS DECIMAL(12,2))
-          ELSE NULL
-        END AS price
-      FROM products_bronze pb
-    ),
-    dedup AS (
-      SELECT
-        product_id,
-        product_name,
-        category,
-        brand,
-        price,
-        ROW_NUMBER() OVER (
-          PARTITION BY product_id
-          ORDER BY product_id
-        ) AS rn
-      FROM base
-    )
-    SELECT
-      product_id,
-      product_name,
-      category,
-      brand,
-      price
-    FROM dedup
-    WHERE rn = 1
-    """
-)
-product_details_silver_df.createOrReplaceTempView("product_details_silver")
-
-(
-    product_details_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(TARGET_PATH + "/product_details_silver.csv")
+patients_silver_df.coalesce(1).write.mode("overwrite").format("csv").option("header", "true").save(
+    f"{TARGET_PATH}/patients_silver.csv"
 )
 
-# -------------------------------------------------------------------
-# Target: silver.store_details_silver
-# -------------------------------------------------------------------
-store_details_silver_df = spark.sql(
-    """
-    WITH base AS (
-      SELECT
-        TRIM(sb.store_id) AS store_id,
-        TRIM(sb.store_name) AS store_name,
-        CONCAT(TRIM(sb.city), ', ', TRIM(sb.state)) AS location,
-        CASE
-          WHEN LOWER(TRIM(sb.store_type)) IN ('franchise','franchised') THEN 'franchise'
-          WHEN LOWER(TRIM(sb.store_type)) IN ('company-owned','company owned','corporate') THEN 'company-owned'
-          ELSE 'unknown'
-        END AS store_type
-      FROM stores_bronze sb
-    ),
-    dedup AS (
-      SELECT
-        store_id,
-        store_name,
-        location,
-        store_type,
-        ROW_NUMBER() OVER (
-          PARTITION BY store_id
-          ORDER BY store_id
-        ) AS rn
-      FROM base
-    )
-    SELECT
-      store_id,
-      store_name,
-      location,
-      store_type
-    FROM dedup
-    WHERE rn = 1
-    """
+# =========================
+# Target: silver.wearable_health_metrics_silver
+# =========================
+wearable_health_metrics_silver_sql = """
+WITH joined AS (
+  SELECT
+    CAST(TRIM(hmb.patient_id) AS STRING) AS patient_id,
+    hmb.recorded_timestamp AS timestamp,
+    CAST(hmb.glucose_level AS DOUBLE) AS glucose_level,
+    CAST(hmb.heart_rate AS DOUBLE) AS heart_rate,
+    CAST(hmb.sleep_hours AS DOUBLE) AS sleep_duration,
+    CAST(hmb.step_count AS DOUBLE) AS physical_activity,
+    hmb.device_type AS device_type,
+    hmb.device_record_id AS device_record_id,
+    hmb.battery_status AS battery_status
+  FROM health_metrics_bronze hmb
+  INNER JOIN patients_silver ps
+    ON ps.patient_id = CAST(TRIM(hmb.patient_id) AS STRING)
+),
+ranked AS (
+  SELECT
+    patient_id,
+    timestamp,
+    glucose_level,
+    heart_rate,
+    sleep_duration,
+    physical_activity,
+    device_type,
+    device_record_id,
+    battery_status,
+    ROW_NUMBER() OVER (
+      PARTITION BY patient_id, timestamp
+      ORDER BY device_record_id DESC
+    ) AS rn
+  FROM joined
 )
-store_details_silver_df.createOrReplaceTempView("store_details_silver")
+SELECT
+  patient_id,
+  timestamp,
+  glucose_level,
+  heart_rate,
+  sleep_duration,
+  physical_activity,
+  device_type,
+  device_record_id,
+  battery_status
+FROM ranked
+WHERE rn = 1
+"""
+wearable_health_metrics_silver_df = spark.sql(wearable_health_metrics_silver_sql)
+wearable_health_metrics_silver_df.createOrReplaceTempView("wearable_health_metrics_silver")
 
-(
-    store_details_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(TARGET_PATH + "/store_details_silver.csv")
-)
-
-# -------------------------------------------------------------------
-# Target: silver.sales_details_silver
-# -------------------------------------------------------------------
-sales_details_silver_df = spark.sql(
-    """
-    WITH base AS (
-      SELECT
-        TRIM(stb.transaction_id) AS transaction_id,
-        TRIM(stb.store_id) AS store_id,
-        TRIM(stb.product_id) AS product_id,
-        CAST(stb.transaction_time AS DATE) AS transaction_date,
-        CASE
-          WHEN CAST(stb.quantity AS INT) > 0 THEN CAST(stb.quantity AS INT)
-          ELSE NULL
-        END AS quantity_sold,
-        CASE
-          WHEN CAST(stb.sale_amount AS DOUBLE) >= 0 THEN CAST(CAST(stb.sale_amount AS DOUBLE) AS DECIMAL(14,2))
-          ELSE NULL
-        END AS total_revenue
-      FROM sales_transactions_bronze stb
-      INNER JOIN store_details_silver sds
-        ON TRIM(stb.store_id) = sds.store_id
-      INNER JOIN product_details_silver pds
-        ON TRIM(stb.product_id) = pds.product_id
-    ),
-    dedup AS (
-      SELECT
-        transaction_id,
-        store_id,
-        product_id,
-        transaction_date,
-        quantity_sold,
-        total_revenue,
-        ROW_NUMBER() OVER (
-          PARTITION BY transaction_id
-          ORDER BY transaction_id
-        ) AS rn
-      FROM base
-    )
-    SELECT
-      transaction_id,
-      store_id,
-      product_id,
-      transaction_date,
-      quantity_sold,
-      total_revenue
-    FROM dedup
-    WHERE rn = 1
-    """
-)
-sales_details_silver_df.createOrReplaceTempView("sales_details_silver")
-
-(
-    sales_details_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(TARGET_PATH + "/sales_details_silver.csv")
+wearable_health_metrics_silver_df.coalesce(1).write.mode("overwrite").format("csv").option("header", "true").save(
+    f"{TARGET_PATH}/wearable_health_metrics_silver.csv"
 )
 
-# -------------------------------------------------------------------
-# Target: silver.sales_aggregations_silver
-# -------------------------------------------------------------------
-sales_aggregations_silver_df = spark.sql(
-    """
-    WITH product_day AS (
-      SELECT
-        sls.store_id AS store_id,
-        sls.product_id AS product_id,
-        sls.transaction_date AS reporting_date,
-        SUM(sls.quantity_sold) AS total_quantity_sold,
-        SUM(sls.total_revenue) OVER (PARTITION BY sls.store_id, sls.transaction_date) AS total_store_revenue,
-        ROW_NUMBER() OVER (
-          PARTITION BY sls.store_id, sls.transaction_date
-          ORDER BY
-            SUM(sls.quantity_sold) DESC,
-            SUM(sls.total_revenue) DESC,
-            sls.product_id ASC
-        ) AS top_rank
-      FROM sales_details_silver sls
-      INNER JOIN product_details_silver pds
-        ON sls.product_id = pds.product_id
-      GROUP BY
-        sls.store_id,
-        sls.product_id,
-        sls.transaction_date
-    ),
-    ranked AS (
-      SELECT
-        store_id,
-        product_id,
-        reporting_date,
-        total_quantity_sold,
-        total_store_revenue,
-        FIRST_VALUE(product_id) OVER (
-          PARTITION BY store_id, reporting_date
-          ORDER BY top_rank ASC
-        ) AS top_selling_product
-      FROM product_day
-    )
-    SELECT
-      store_id,
-      product_id,
-      reporting_date,
-      total_quantity_sold,
-      total_store_revenue,
-      top_selling_product
-    FROM ranked
-    """
+# =========================
+# Target: silver.health_risk_events_silver
+# (Apply EXACT UDT column mappings provided)
+# =========================
+health_risk_events_silver_sql = """
+SELECT
+  whms.patient_id AS patient_id,
+  CAST(whms.glucose_level AS STRING) AS health_risk_type,
+  whms.timestamp AS risk_identified_at,
+  CAST(whms.heart_rate AS STRING) AS risk_level
+FROM wearable_health_metrics_silver whms
+"""
+health_risk_events_silver_df = spark.sql(health_risk_events_silver_sql)
+health_risk_events_silver_df.createOrReplaceTempView("health_risk_events_silver")
+
+health_risk_events_silver_df.coalesce(1).write.mode("overwrite").format("csv").option("header", "true").save(
+    f"{TARGET_PATH}/health_risk_events_silver.csv"
 )
 
-(
-    sales_aggregations_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(TARGET_PATH + "/sales_aggregations_silver.csv")
+# =========================
+# Target: silver.clinical_intervention_insights_silver
+# (Apply EXACT UDT column mappings provided)
+# =========================
+clinical_intervention_insights_silver_sql = """
+SELECT
+  hres.patient_id AS patient_id,
+  hres.health_risk_type AS insight_type,
+  hres.risk_identified_at AS generated_at
+FROM health_risk_events_silver hres
+INNER JOIN wearable_health_metrics_silver whms
+  ON whms.patient_id = hres.patient_id
+ AND whms.timestamp = hres.risk_identified_at
+"""
+clinical_intervention_insights_silver_df = spark.sql(clinical_intervention_insights_silver_sql)
+
+clinical_intervention_insights_silver_df.coalesce(1).write.mode("overwrite").format("csv").option("header", "true").save(
+    f"{TARGET_PATH}/clinical_intervention_insights_silver.csv"
 )
 
 job.commit()
