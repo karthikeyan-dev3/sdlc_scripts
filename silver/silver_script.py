@@ -1,268 +1,224 @@
 import sys
-from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
-from awsglue.job import Job
+from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 
-args = getResolvedOptions(sys.argv, ["JOB_NAME"])
-
-sc = SparkContext()
+args = getResolvedOptions(sys.argv, [])
+sc = SparkContext.getOrCreate()
 glueContext = GlueContext(sc)
-spark: SparkSession = glueContext.spark_session
-job = Job(glueContext)
-job.init(args["JOB_NAME"], args)
+spark = glueContext.spark_session
 
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 FILE_FORMAT = "csv"
 
-# =============================================================================
-# 1) Read source tables (Bronze)
-# =============================================================================
+# -----------------------------------------------------------------------------------
+# Read Source Tables (S3) + Create Temp Views
+# -----------------------------------------------------------------------------------
+sqs_messages_raw_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/sqs_messages_raw.{FILE_FORMAT}/")
+)
+sqs_messages_raw_df.createOrReplaceTempView("sqs_messages_raw")
+
 sales_transactions_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .load(f"{SOURCE_PATH}/sales_transactions_bronze.{FILE_FORMAT}/")
 )
-
-product_master_bronze_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/product_master_bronze.{FILE_FORMAT}/")
-)
-
-store_master_bronze_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/store_master_bronze.{FILE_FORMAT}/")
-)
-
-# =============================================================================
-# 2) Create temp views
-# =============================================================================
 sales_transactions_bronze_df.createOrReplaceTempView("sales_transactions_bronze")
-product_master_bronze_df.createOrReplaceTempView("product_master_bronze")
-store_master_bronze_df.createOrReplaceTempView("store_master_bronze")
 
-# =============================================================================
-# 3) Transform + Write: silver.sales_transactions_silver
-# =============================================================================
-sales_transactions_silver_sql = """
-WITH base AS (
-  SELECT
-    stb.transaction_id AS transaction_id,
-    CAST(stb.transaction_time AS DATE) AS transaction_date,
-    stb.store_id AS store_id,
-    stb.product_id AS product_id,
-    CAST(stb.quantity AS INT) AS quantity,
-    CAST(stb.sale_amount AS DOUBLE) AS total_amount,
-    ROW_NUMBER() OVER (
-      PARTITION BY stb.transaction_id
-      ORDER BY stb.transaction_time DESC
-    ) AS rn
-  FROM sales_transactions_bronze stb
-),
-dedup AS (
-  SELECT
-    transaction_id,
-    transaction_date,
-    store_id,
-    product_id,
-    quantity,
-    total_amount
-  FROM base
-  WHERE rn = 1
-)
-SELECT
-  transaction_id,
-  transaction_date,
-  store_id,
-  product_id,
-  quantity,
-  total_amount
-FROM dedup
-"""
-
-sales_transactions_silver_df = spark.sql(sales_transactions_silver_sql)
-sales_transactions_silver_df.createOrReplaceTempView("sales_transactions_silver")
-
-(
-    sales_transactions_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .format(FILE_FORMAT)
+products_bronze_df = (
+    spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .save(f"{TARGET_PATH}/sales_transactions_silver.csv")
+    .load(f"{SOURCE_PATH}/products_bronze.{FILE_FORMAT}/")
 )
+products_bronze_df.createOrReplaceTempView("products_bronze")
 
-# =============================================================================
-# 4) Transform + Write: silver.product_master_silver
-# =============================================================================
-product_master_silver_sql = """
-WITH base AS (
-  SELECT
-    pmb.product_id AS product_id,
-    TRIM(pmb.product_name) AS product_name,
-    TRIM(pmb.category) AS category,
-    CAST(pmb.price AS FLOAT) AS price,
-    TRIM(pmb.brand) AS brand,
-    ROW_NUMBER() OVER (
-      PARTITION BY pmb.product_id
-      ORDER BY pmb.product_id
-    ) AS rn
-  FROM product_master_bronze pmb
-),
-dedup AS (
-  SELECT
-    product_id,
-    product_name,
-    category,
-    price,
-    brand
-  FROM base
-  WHERE rn = 1
-)
-SELECT
-  product_id,
-  product_name,
-  category,
-  price,
-  brand
-FROM dedup
-"""
-
-product_master_silver_df = spark.sql(product_master_silver_sql)
-product_master_silver_df.createOrReplaceTempView("product_master_silver")
-
-(
-    product_master_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .format(FILE_FORMAT)
+stores_bronze_df = (
+    spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .save(f"{TARGET_PATH}/product_master_silver.csv")
+    .load(f"{SOURCE_PATH}/stores_bronze.{FILE_FORMAT}/")
 )
+stores_bronze_df.createOrReplaceTempView("stores_bronze")
 
-# =============================================================================
-# 5) Transform + Write: silver.store_master_silver
-# =============================================================================
-store_master_silver_sql = """
-WITH base AS (
-  SELECT
-    smb.store_id AS store_id,
-    TRIM(smb.store_name) AS store_name,
-    CONCAT(TRIM(smb.city), ', ', TRIM(smb.state)) AS location,
-    TRIM(smb.store_type) AS store_type,
-    CAST(smb.open_date AS DATE) AS opening_date,
-    ROW_NUMBER() OVER (
-      PARTITION BY smb.store_id
-      ORDER BY smb.store_id
-    ) AS rn
-  FROM store_master_bronze smb
-),
-dedup AS (
-  SELECT
-    store_id,
-    store_name,
-    location,
-    store_type,
-    opening_date
-  FROM base
-  WHERE rn = 1
-)
-SELECT
-  store_id,
-  store_name,
-  location,
-  store_type,
-  opening_date
-FROM dedup
-"""
-
-store_master_silver_df = spark.sql(store_master_silver_sql)
-store_master_silver_df.createOrReplaceTempView("store_master_silver")
-
-(
-    store_master_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .format(FILE_FORMAT)
+sqs_event_log_raw_df = (
+    spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .save(f"{TARGET_PATH}/store_master_silver.csv")
+    .load(f"{SOURCE_PATH}/sqs_event_log_raw.{FILE_FORMAT}/")
 )
+sqs_event_log_raw_df.createOrReplaceTempView("sqs_event_log_raw")
 
-# =============================================================================
-# 6) Transform + Write: silver.daily_sales_summary_silver
-# =============================================================================
-daily_sales_summary_silver_sql = """
-WITH daily_agg AS (
-  SELECT
-    sts.transaction_date AS date,
-    SUM(sts.total_amount) AS total_sales_amount,
-    SUM(sts.quantity) AS total_units_sold,
-    AVG(sts.total_amount) AS average_transaction_value
-  FROM sales_transactions_silver sts
-  GROUP BY sts.transaction_date
-),
-top_product AS (
-  SELECT
-    x.date,
-    x.product_id AS top_selling_product_id
-  FROM (
+sqs_error_log_raw_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/sqs_error_log_raw.{FILE_FORMAT}/")
+)
+sqs_error_log_raw_df.createOrReplaceTempView("sqs_error_log_raw")
+
+data_governance_policies_raw_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/data_governance_policies_raw.{FILE_FORMAT}/")
+)
+data_governance_policies_raw_df.createOrReplaceTempView("data_governance_policies_raw")
+
+# -----------------------------------------------------------------------------------
+# Target: silver.sqs_messages_silver
+# mapping_details: sqs_messages_raw smr
+#   LEFT JOIN bronze.sales_transactions_bronze stb ON smr.transaction_id = stb.transaction_id
+#   LEFT JOIN bronze.products_bronze pb ON smr.product_id = pb.product_id
+#   LEFT JOIN bronze.stores_bronze sb ON smr.store_id = sb.store_id
+# -----------------------------------------------------------------------------------
+sqs_messages_silver_df = spark.sql(
+    """
+    WITH base AS (
+        SELECT
+            smr.message_id AS message_id,
+            CAST(smr.timestamp AS TIMESTAMP) AS timestamp,
+            smr.payload AS payload,
+            smr.validation_status AS validation_status,
+            ROW_NUMBER() OVER (
+                PARTITION BY smr.message_id
+                ORDER BY CAST(smr.timestamp AS TIMESTAMP) DESC
+            ) AS rn
+        FROM sqs_messages_raw smr
+        LEFT JOIN sales_transactions_bronze stb
+            ON smr.transaction_id = stb.transaction_id
+        LEFT JOIN products_bronze pb
+            ON smr.product_id = pb.product_id
+        LEFT JOIN stores_bronze sb
+            ON smr.store_id = sb.store_id
+    )
     SELECT
-      sts.transaction_date AS date,
-      sts.product_id AS product_id,
-      SUM(sts.quantity) AS qty_sum,
-      SUM(sts.total_amount) AS amt_sum,
-      ROW_NUMBER() OVER (
-        PARTITION BY sts.transaction_date
-        ORDER BY SUM(sts.quantity) DESC, SUM(sts.total_amount) DESC, sts.product_id ASC
-      ) AS rn
-    FROM sales_transactions_silver sts
-    GROUP BY sts.transaction_date, sts.product_id
-  ) x
-  WHERE x.rn = 1
-),
-top_store AS (
-  SELECT
-    y.date,
-    y.store_id AS top_selling_store_id
-  FROM (
-    SELECT
-      sts.transaction_date AS date,
-      sts.store_id AS store_id,
-      SUM(sts.total_amount) AS amt_sum,
-      SUM(sts.quantity) AS qty_sum,
-      ROW_NUMBER() OVER (
-        PARTITION BY sts.transaction_date
-        ORDER BY SUM(sts.total_amount) DESC, SUM(sts.quantity) DESC, sts.store_id ASC
-      ) AS rn
-    FROM sales_transactions_silver sts
-    GROUP BY sts.transaction_date, sts.store_id
-  ) y
-  WHERE y.rn = 1
+        message_id,
+        timestamp,
+        payload,
+        validation_status
+    FROM base
+    WHERE rn = 1
+    """
 )
-SELECT
-  a.date AS date,
-  a.total_sales_amount AS total_sales_amount,
-  a.total_units_sold AS total_units_sold,
-  a.average_transaction_value AS average_transaction_value,
-  p.top_selling_product_id AS top_selling_product_id,
-  s.top_selling_store_id AS top_selling_store_id
-FROM daily_agg a
-LEFT JOIN top_product p
-  ON a.date = p.date
-LEFT JOIN top_store s
-  ON a.date = s.date
-"""
-
-daily_sales_summary_silver_df = spark.sql(daily_sales_summary_silver_sql)
-daily_sales_summary_silver_df.createOrReplaceTempView("daily_sales_summary_silver")
+sqs_messages_silver_df.createOrReplaceTempView("sqs_messages_silver")
 
 (
-    daily_sales_summary_silver_df.coalesce(1)
+    sqs_messages_silver_df.coalesce(1)
     .write.mode("overwrite")
-    .format(FILE_FORMAT)
+    .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/daily_sales_summary_silver.csv")
+    .save(f"{TARGET_PATH}/sqs_messages_silver.csv")
 )
 
-job.commit()
+# -----------------------------------------------------------------------------------
+# Target: silver.sqs_events_silver
+# mapping_details: sqs_event_log_raw sel INNER JOIN silver.sqs_messages_silver sms ON sel.message_id = sms.message_id
+# -----------------------------------------------------------------------------------
+sqs_events_silver_df = spark.sql(
+    """
+    WITH base AS (
+        SELECT
+            sel.event_id AS event_id,
+            sel.message_id AS message_id,
+            sel.event_type AS event_type,
+            CAST(sel.timestamp AS TIMESTAMP) AS timestamp,
+            ROW_NUMBER() OVER (
+                PARTITION BY sel.event_id
+                ORDER BY CAST(sel.timestamp AS TIMESTAMP) DESC
+            ) AS rn
+        FROM sqs_event_log_raw sel
+        INNER JOIN sqs_messages_silver sms
+            ON sel.message_id = sms.message_id
+    )
+    SELECT
+        event_id,
+        message_id,
+        event_type,
+        timestamp
+    FROM base
+    WHERE rn = 1
+    """
+)
+
+(
+    sqs_events_silver_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/sqs_events_silver.csv")
+)
+
+# -----------------------------------------------------------------------------------
+# Target: silver.sqs_errors_silver
+# mapping_details: sqs_error_log_raw erl LEFT JOIN silver.sqs_messages_silver sms ON erl.message_id = sms.message_id
+# -----------------------------------------------------------------------------------
+sqs_errors_silver_df = spark.sql(
+    """
+    WITH base AS (
+        SELECT
+            erl.error_id AS error_id,
+            erl.message_id AS message_id,
+            erl.error_description AS error_description,
+            CAST(erl.resolution_time AS TIMESTAMP) AS resolution_time,
+            ROW_NUMBER() OVER (
+                PARTITION BY erl.error_id
+                ORDER BY CAST(erl.resolution_time AS TIMESTAMP) DESC
+            ) AS rn
+        FROM sqs_error_log_raw erl
+        LEFT JOIN sqs_messages_silver sms
+            ON erl.message_id = sms.message_id
+    )
+    SELECT
+        error_id,
+        message_id,
+        error_description,
+        resolution_time
+    FROM base
+    WHERE rn = 1
+    """
+)
+
+(
+    sqs_errors_silver_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/sqs_errors_silver.csv")
+)
+
+# -----------------------------------------------------------------------------------
+# Target: silver.data_governance_policies_silver
+# mapping_details: data_governance_policies_raw dgpr
+# -----------------------------------------------------------------------------------
+data_governance_policies_silver_df = spark.sql(
+    """
+    WITH base AS (
+        SELECT
+            dgpr.policy_id AS policy_id,
+            dgpr.policy_name AS policy_name,
+            dgpr.description AS description,
+            dgpr.status AS status,
+            ROW_NUMBER() OVER (
+                PARTITION BY dgpr.policy_id
+                ORDER BY dgpr.policy_id
+            ) AS rn
+        FROM data_governance_policies_raw dgpr
+    )
+    SELECT
+        policy_id,
+        policy_name,
+        description,
+        status
+    FROM base
+    WHERE rn = 1
+    """
+)
+
+(
+    data_governance_policies_silver_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/data_governance_policies_silver.csv")
+)
