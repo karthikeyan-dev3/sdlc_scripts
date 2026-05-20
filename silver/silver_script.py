@@ -1,385 +1,268 @@
 import sys
-from awsglue.context import GlueContext
 from awsglue.utils import getResolvedOptions
+from awsglue.context import GlueContext
+from awsglue.job import Job
 from pyspark.context import SparkContext
-from pyspark.sql import SparkSession
 
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
-sc = SparkContext()
-glueContext = GlueContext(sc)
-spark = glueContext.spark_session
 
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 FILE_FORMAT = "csv"
 
-# ----------------------------
-# 1) READ SOURCE TABLES (S3)
-# ----------------------------
+sc = SparkContext.getOrCreate()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args["JOB_NAME"], args)
+
+spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
+
+# ============================================================
+# Read Source Tables (Bronze)
+# ============================================================
+
 clinical_trials_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .load(f"{SOURCE_PATH}/clinical_trials_bronze.{FILE_FORMAT}/")
 )
-sites_bronze_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/sites_bronze.{FILE_FORMAT}/")
-)
-countries_bronze_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/countries_bronze.{FILE_FORMAT}/")
-)
-data_management_bronze_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/data_management_bronze.{FILE_FORMAT}/")
-)
-metrics_bronze_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/metrics_bronze.{FILE_FORMAT}/")
-)
-
-# ----------------------------
-# 2) CREATE TEMP VIEWS
-# ----------------------------
 clinical_trials_bronze_df.createOrReplaceTempView("clinical_trials_bronze")
-sites_bronze_df.createOrReplaceTempView("sites_bronze")
-countries_bronze_df.createOrReplaceTempView("countries_bronze")
-data_management_bronze_df.createOrReplaceTempView("data_management_bronze")
-metrics_bronze_df.createOrReplaceTempView("metrics_bronze")
+
+trial_sites_bronze_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/trial_sites_bronze.{FILE_FORMAT}/")
+)
+trial_sites_bronze_df.createOrReplaceTempView("trial_sites_bronze")
+
+patient_enrollments_bronze_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/patient_enrollments_bronze.{FILE_FORMAT}/")
+)
+patient_enrollments_bronze_df.createOrReplaceTempView("patient_enrollments_bronze")
+
+patient_activities_bronze_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/patient_activities_bronze.{FILE_FORMAT}/")
+)
+patient_activities_bronze_df.createOrReplaceTempView("patient_activities_bronze")
+
+patient_visits_bronze_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/patient_visits_bronze.{FILE_FORMAT}/")
+)
+patient_visits_bronze_df.createOrReplaceTempView("patient_visits_bronze")
 
 # ============================================================
-# TARGET 1: silver.trial_site_patient_enrollment_silver
+# Table: silver.clinical_trials_silver
+# From: bronze.clinical_trials_bronze ctb
 # ============================================================
-trial_site_patient_enrollment_silver_df = spark.sql(
+
+clinical_trials_silver_df = spark.sql(
     """
-    WITH joined AS (
+    SELECT
+      *
+    FROM (
       SELECT
-        ctb.trial_id AS trial_id,
-        ctb.site_id AS site_id,
-        ctb.patient_id AS patient_id,
-        ctb.enrollment_date AS enrollment_date,
-        ctb.consent_status AS consent_status,
-        ctb.source_system AS source_system,
-        ctb.country AS country
+        ctb.*,
+        ROW_NUMBER() OVER (
+          PARTITION BY ctb.trial_id
+          ORDER BY ctb.trial_id
+        ) AS rn
       FROM clinical_trials_bronze ctb
-      LEFT JOIN sites_bronze sb
-        ON ctb.trial_id = sb.trial_id
-       AND ctb.site_id = sb.site_id
-       AND ctb.patient_id = sb.patient_id
-      LEFT JOIN countries_bronze cob
-        ON ctb.trial_id = cob.trial_id
-       AND ctb.site_id = cob.site_id
-       AND ctb.patient_id = cob.patient_id
-    ),
-    dedup AS (
+    ) x
+    WHERE x.rn = 1
+    """
+).drop("rn")
+
+clinical_trials_silver_df.createOrReplaceTempView("clinical_trials_silver")
+
+(
+    clinical_trials_silver_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/clinical_trials_silver.csv")
+)
+
+# ============================================================
+# Table: silver.trial_sites_silver
+# From: bronze.trial_sites_bronze tsb INNER JOIN silver.clinical_trials_silver cts
+# ============================================================
+
+trial_sites_silver_df = spark.sql(
+    """
+    SELECT
+      *
+    FROM (
       SELECT
-        trial_id,
-        site_id,
-        patient_id,
-        enrollment_date,
-        consent_status,
-        source_system,
-        country,
-        UPPER(TRIM(country)) AS country_norm,
-        CAST(enrollment_date AS timestamp) AS enrollment_date_ts,
-        (consent_status IN ('CONSENTED','Y','YES','TRUE','1')) AS is_consented,
+        tsb.*,
         ROW_NUMBER() OVER (
-          PARTITION BY trial_id, site_id, patient_id, source_system
-          ORDER BY CAST(enrollment_date AS timestamp) DESC
+          PARTITION BY tsb.trial_id, tsb.site_id
+          ORDER BY tsb.trial_id, tsb.site_id
         ) AS rn
-      FROM joined
-    )
-    SELECT
-      trial_id,
-      site_id,
-      patient_id,
-      enrollment_date,
-      consent_status,
-      source_system,
-      country,
-      country_norm,
-      enrollment_date_ts,
-      is_consented
-    FROM dedup
-    WHERE rn = 1
+      FROM trial_sites_bronze tsb
+      INNER JOIN clinical_trials_silver cts
+        ON tsb.trial_id = cts.trial_id
+    ) x
+    WHERE x.rn = 1
     """
-)
-trial_site_patient_enrollment_silver_df.createOrReplaceTempView("trial_site_patient_enrollment_silver")
+).drop("rn")
+
+trial_sites_silver_df.createOrReplaceTempView("trial_sites_silver")
 
 (
-    trial_site_patient_enrollment_silver_df.coalesce(1)
+    trial_sites_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/trial_site_patient_enrollment_silver.csv")
+    .save(f"{TARGET_PATH}/trial_sites_silver.csv")
 )
 
 # ============================================================
-# TARGET 2: silver.trial_site_patient_status_silver
+# Table: silver.patient_enrollments_silver
+# From: bronze.patient_enrollments_bronze peb INNER JOIN silver.trial_sites_silver tss
 # ============================================================
-dmb_dedup_df = spark.sql(
+
+patient_enrollments_silver_df = spark.sql(
     """
-    WITH d AS (
+    SELECT
+      *
+    FROM (
       SELECT
-        dmb.trial_id,
-        dmb.patient_id,
-        dmb.visit_id,
-        dmb.visit_date,
+        peb.*,
         ROW_NUMBER() OVER (
-          PARTITION BY dmb.visit_id
-          ORDER BY CAST(dmb.visit_date AS timestamp) DESC
+          PARTITION BY peb.patient_id, peb.trial_id, peb.site_id, peb.enrollment_date
+          ORDER BY peb.patient_id, peb.trial_id, peb.site_id, peb.enrollment_date
         ) AS rn
-      FROM data_management_bronze dmb
-    )
-    SELECT
-      trial_id,
-      patient_id,
-      visit_id,
-      visit_date
-    FROM d
-    WHERE rn = 1
+      FROM patient_enrollments_bronze peb
+      INNER JOIN trial_sites_silver tss
+        ON peb.trial_id = tss.trial_id
+       AND peb.site_id = tss.site_id
+    ) x
+    WHERE x.rn = 1
     """
-)
-dmb_dedup_df.createOrReplaceTempView("dmb_dedup")
+).drop("rn")
 
-trial_site_patient_status_silver_df = spark.sql(
-    """
-    SELECT
-      tspe.trial_id AS trial_id,
-      tspe.site_id AS site_id,
-      tspe.patient_id AS patient_id,
-      MAX(dmb.visit_date) AS last_visit_date,
-      CAST(COUNT(DISTINCT dmb.visit_id) AS int) AS visit_count,
-      ((MAX(dmb.visit_date) >= (CURRENT_DATE - INTERVAL 90 DAYS)) AND (tspe.is_consented = true)) AS is_active
-    FROM trial_site_patient_enrollment_silver tspe
-    LEFT JOIN dmb_dedup dmb
-      ON tspe.trial_id = dmb.trial_id
-     AND tspe.patient_id = dmb.patient_id
-    GROUP BY
-      tspe.trial_id,
-      tspe.site_id,
-      tspe.patient_id,
-      tspe.is_consented
-    """
-)
-trial_site_patient_status_silver_df.createOrReplaceTempView("trial_site_patient_status_silver")
+patient_enrollments_silver_df.createOrReplaceTempView("patient_enrollments_silver")
 
 (
-    trial_site_patient_status_silver_df.coalesce(1)
+    patient_enrollments_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/trial_site_patient_status_silver.csv")
+    .save(f"{TARGET_PATH}/patient_enrollments_silver.csv")
 )
 
 # ============================================================
-# TARGET 3: silver.trial_site_visit_expected_silver
+# Table: silver.patient_status_silver
+# From: bronze.patient_activities_bronze pab INNER JOIN silver.trial_sites_silver tss
 # ============================================================
-trial_site_visit_expected_silver_df = spark.sql(
+
+patient_status_silver_df = spark.sql(
     """
     SELECT
-      tspe.trial_id AS trial_id,
-      tspe.site_id AS site_id,
-      tspe.patient_id AS patient_id,
-      CAST(GREATEST(FLOOR(DATEDIFF(CURRENT_DATE, CAST(tspe.enrollment_date_ts AS date)) / 30) + 1, 0) AS int) AS expected_visits_to_date
-    FROM trial_site_patient_enrollment_silver tspe
-    """
-)
-trial_site_visit_expected_silver_df.createOrReplaceTempView("trial_site_visit_expected_silver")
-
-(
-    trial_site_visit_expected_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/trial_site_visit_expected_silver.csv")
-)
-
-# ============================================================
-# TARGET 4: silver.trial_site_daily_kpis_silver
-# ============================================================
-trial_site_daily_kpis_silver_df = spark.sql(
-    """
-    SELECT
-      tspe.trial_id AS trial_id,
-      tspe.country_norm AS country,
-      tspe.site_id AS site_id,
-      CAST(COUNT(DISTINCT CASE WHEN tspe.is_consented = true THEN tspe.patient_id END) AS int) AS total_enrolled_patients,
-      CAST(COUNT(DISTINCT CASE WHEN tsps.is_active = true THEN tsps.patient_id END) AS int) AS active_patients,
-      CAST(SUM(tsps.visit_count) AS int) AS actual_visits,
-      CAST(SUM(tsve.expected_visits_to_date) AS int) AS expected_visits_to_date,
-      CASE
-        WHEN SUM(tsve.expected_visits_to_date) > 0
-          THEN (SUM(tsps.visit_count) / SUM(tsve.expected_visits_to_date)) * 100
-      END AS visit_completion_percentage
-    FROM trial_site_patient_enrollment_silver tspe
-    LEFT JOIN trial_site_patient_status_silver tsps
-      ON tspe.trial_id = tsps.trial_id
-     AND tspe.site_id = tsps.site_id
-     AND tspe.patient_id = tsps.patient_id
-    LEFT JOIN trial_site_visit_expected_silver tsve
-      ON tspe.trial_id = tsve.trial_id
-     AND tspe.site_id = tsve.site_id
-     AND tspe.patient_id = tsve.patient_id
-    GROUP BY
-      tspe.trial_id,
-      tspe.country_norm,
-      tspe.site_id
-    """
-)
-trial_site_daily_kpis_silver_df.createOrReplaceTempView("trial_site_daily_kpis_silver")
-
-(
-    trial_site_daily_kpis_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/trial_site_daily_kpis_silver.csv")
-)
-
-# ============================================================
-# TARGET 5: silver.trial_site_performance_flags_silver
-# ============================================================
-trial_site_performance_flags_silver_df = spark.sql(
-    """
-    WITH min_enroll AS (
+      *
+    FROM (
       SELECT
-        trial_id,
-        site_id,
-        MIN(enrollment_date_ts) AS min_enrollment_date_ts
-      FROM trial_site_patient_enrollment_silver
-      GROUP BY trial_id, site_id
-    )
-    SELECT
-      tsdk.trial_id AS trial_id,
-      tsdk.site_id AS site_id,
-      tsdk.country AS country,
-      (
-        (tsdk.active_patients / NULLIF(tsdk.total_enrolled_patients, 0) < 0.5)
-        OR (tsdk.visit_completion_percentage < 70)
-      ) AS underperforming_site_flag,
-      (
-        tsdk.total_enrolled_patients = 0
-        AND DATEDIFF(CURRENT_DATE, CAST(me.min_enrollment_date_ts AS date)) > 30
-      ) AS enrollment_delay_flag
-    FROM trial_site_daily_kpis_silver tsdk
-    LEFT JOIN min_enroll me
-      ON tsdk.trial_id = me.trial_id
-     AND tsdk.site_id = me.site_id
-    """
-)
-trial_site_performance_flags_silver_df.createOrReplaceTempView("trial_site_performance_flags_silver")
-
-(
-    trial_site_performance_flags_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/trial_site_performance_flags_silver.csv")
-)
-
-# ============================================================
-# TARGET 6: silver.trial_site_metric_trends_silver
-# Note: Only columns explicitly provided in UDT columns list are produced.
-# ============================================================
-trial_site_metric_trends_silver_df = spark.sql(
-    """
-    WITH joined AS (
-      SELECT
-        mb.patient_id AS patient_id,
-        tspe.trial_id AS trial_id,
-        tspe.site_id AS site_id,
-        tspe.country_norm AS country,
-        mb.recorded_timestamp AS metric_timestamp,
-        CAST(mb.recorded_timestamp AS date) AS metric_date,
+        pab.*,
         ROW_NUMBER() OVER (
-          PARTITION BY mb.patient_id
-          ORDER BY CAST(mb.recorded_timestamp AS timestamp) DESC
+          PARTITION BY pab.trial_id, pab.site_id, pab.patient_id
+          ORDER BY pab.trial_id, pab.site_id, pab.patient_id
         ) AS rn
-      FROM metrics_bronze mb
-      INNER JOIN trial_site_patient_enrollment_silver tspe
-        ON mb.patient_id = tspe.patient_id
-    )
-    SELECT
-      patient_id,
-      trial_id,
-      site_id,
-      country,
-      metric_timestamp,
-      metric_date
-    FROM joined
-    WHERE rn = 1
+      FROM patient_activities_bronze pab
+      INNER JOIN trial_sites_silver tss
+        ON pab.trial_id = tss.trial_id
+       AND pab.site_id = tss.site_id
+    ) x
+    WHERE x.rn = 1
     """
-)
-trial_site_metric_trends_silver_df.createOrReplaceTempView("trial_site_metric_trends_silver")
+).drop("rn")
+
+patient_status_silver_df.createOrReplaceTempView("patient_status_silver")
 
 (
-    trial_site_metric_trends_silver_df.coalesce(1)
+    patient_status_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/trial_site_metric_trends_silver.csv")
+    .save(f"{TARGET_PATH}/patient_status_silver.csv")
 )
 
 # ============================================================
-# TARGET 7: silver.data_freshness_quality_silver
+# Table: silver.patient_visits_silver
+# From: bronze.patient_visits_bronze pvb INNER JOIN silver.trial_sites_silver tss
 # ============================================================
-data_freshness_quality_silver_df = spark.sql(
+
+patient_visits_silver_df = spark.sql(
     """
-    WITH d AS (
+    SELECT
+      *
+    FROM (
       SELECT
-        dmb.visit_id,
-        dmb.patient_id,
-        dmb.trial_id,
-        dmb.visit_date,
+        pvb.*,
         ROW_NUMBER() OVER (
-          PARTITION BY dmb.visit_id
-          ORDER BY CAST(dmb.visit_date AS timestamp) DESC
+          PARTITION BY pvb.trial_id, pvb.site_id, pvb.patient_id, pvb.visit_id, pvb.visit_date
+          ORDER BY pvb.trial_id, pvb.site_id, pvb.patient_id, pvb.visit_id, pvb.visit_date
         ) AS rn
-      FROM data_management_bronze dmb
-    ),
-    d_dedup AS (
-      SELECT
-        visit_id,
-        patient_id,
-        trial_id,
-        visit_date
-      FROM d
-      WHERE rn = 1
-    )
-    SELECT
-      MAX(visit_date) AS data_update_time,
-      CAST((unix_timestamp(current_timestamp()) - unix_timestamp(MAX(visit_date))) / 60 AS int) AS reporting_latency,
-      ROUND(
-        100 * (
-          0.7 * AVG(
-            CASE
-              WHEN visit_id IS NOT NULL
-               AND patient_id IS NOT NULL
-               AND trial_id IS NOT NULL
-               AND visit_date IS NOT NULL
-              THEN 1 ELSE 0
-            END
-          )
-          + 0.3 * (
-            1 - ((COUNT(*) - COUNT(DISTINCT visit_id)) / NULLIF(COUNT(*), 0))
-          )
-        ),
-        2
-      ) AS data_quality_score
-    FROM d_dedup
+      FROM patient_visits_bronze pvb
+      INNER JOIN trial_sites_silver tss
+        ON pvb.trial_id = tss.trial_id
+       AND pvb.site_id = tss.site_id
+    ) x
+    WHERE x.rn = 1
     """
-)
-data_freshness_quality_silver_df.createOrReplaceTempView("data_freshness_quality_silver")
+).drop("rn")
+
+patient_visits_silver_df.createOrReplaceTempView("patient_visits_silver")
 
 (
-    data_freshness_quality_silver_df.coalesce(1)
+    patient_visits_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/data_freshness_quality_silver.csv")
+    .save(f"{TARGET_PATH}/patient_visits_silver.csv")
 )
+
+# ============================================================
+# Table: silver.trial_site_daily_metrics_silver
+# From: silver.trial_sites_silver tss
+#   LEFT JOIN silver.patient_enrollments_silver pes
+#   LEFT JOIN silver.patient_status_silver pss
+#   LEFT JOIN silver.patient_visits_silver pvs
+# ============================================================
+
+trial_site_daily_metrics_silver_df = spark.sql(
+    """
+    SELECT
+      *
+    FROM trial_sites_silver tss
+    LEFT JOIN patient_enrollments_silver pes
+      ON tss.trial_id = pes.trial_id
+     AND tss.site_id = pes.site_id
+    LEFT JOIN patient_status_silver pss
+      ON tss.trial_id = pss.trial_id
+     AND tss.site_id = pss.site_id
+    LEFT JOIN patient_visits_silver pvs
+      ON tss.trial_id = pvs.trial_id
+     AND tss.site_id = pvs.site_id
+    """
+)
+
+trial_site_daily_metrics_silver_df.createOrReplaceTempView(
+    "trial_site_daily_metrics_silver"
+)
+
+(
+    trial_site_daily_metrics_silver_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/trial_site_daily_metrics_silver.csv")
+)
+
+job.commit()
