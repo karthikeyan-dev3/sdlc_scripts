@@ -1,23 +1,24 @@
 import sys
 from awsglue.context import GlueContext
+from awsglue.job import Job
+from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 
-# NOTE: getResolvedOptions requires at least one option name; if no job parameters are needed,
-# avoid calling it to prevent runtime errors.
+args = getResolvedOptions(sys.argv, ["JOB_NAME"])
+
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args["JOB_NAME"], args)
 
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 FILE_FORMAT = "csv"
 
-sc = SparkContext.getOrCreate()
-glueContext = GlueContext(sc)
-spark = glueContext.spark_session
-
-spark.conf.set("spark.sql.legacy.timeParserPolicy", "LEGACY")
-
-# -----------------------------------------------------------------------------------
-# 1) Read source tables (Bronze) and create temp views
-# -----------------------------------------------------------------------------------
+# ----------------------------
+# Read source tables (Bronze)
+# ----------------------------
 patient_enrollment_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
@@ -32,281 +33,262 @@ clinical_visit_bronze_df = (
 )
 clinical_visit_bronze_df.createOrReplaceTempView("clinical_visit_bronze")
 
-# ===================================================================================
-# TABLE: clinical_trials_silver
-# ===================================================================================
-clinical_trials_silver_df = spark.sql(
+# ============================================================
+# Table: silver.trial_site_patient_silver
+# ============================================================
+trial_site_patient_silver_df = spark.sql(
     """
-    WITH peb_clean AS (
+    WITH ranked AS (
       SELECT
-        peb.trial_id AS trial_id,
-        peb.site_id AS site_id,
-        UPPER(TRIM(peb.country)) AS country,
-        peb.enrollment_date AS enrollment_date
-      FROM patient_enrollment_bronze peb
-      WHERE peb.trial_id IS NOT NULL
-        AND peb.site_id IS NOT NULL
-    ),
-    latest_non_null_country AS (
-      SELECT
-        trial_id,
-        site_id,
-        country,
-        ROW_NUMBER() OVER (
-          PARTITION BY trial_id, site_id
-          ORDER BY
-            CASE WHEN country IS NULL THEN 1 ELSE 0 END ASC,
-            enrollment_date DESC
-        ) AS rn
-      FROM peb_clean
-    )
-    SELECT
-      trial_id,
-      site_id,
-      country
-    FROM latest_non_null_country
-    WHERE rn = 1
-    """
-)
-
-(
-    clinical_trials_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/clinical_trials_silver.csv")
-)
-
-# ===================================================================================
-# TABLE: trial_enrollment_silver
-# ===================================================================================
-trial_enrollment_silver_df = spark.sql(
-    """
-    WITH peb_patient_latest AS (
-      SELECT
-        peb.trial_id AS trial_id,
-        peb.site_id AS site_id,
-        UPPER(TRIM(peb.country)) AS country,
         peb.patient_id AS patient_id,
+        peb.trial_id AS trial_id,
+        peb.site_id AS site_id,
+        peb.country AS country,
+        CAST(peb.enrollment_date AS TIMESTAMP) AS enrollment_date,
         peb.consent_status AS consent_status,
-        peb.enrollment_date AS enrollment_date,
+        CASE
+          WHEN peb.consent_status IN ('Consented','Y','Yes','True','1') THEN TRUE
+          ELSE FALSE
+        END AS enrolled_flag,
         ROW_NUMBER() OVER (
-          PARTITION BY peb.patient_id, peb.trial_id, peb.site_id
-          ORDER BY peb.enrollment_date DESC
+          PARTITION BY peb.patient_id, peb.trial_id
+          ORDER BY CAST(peb.enrollment_date AS TIMESTAMP) DESC, peb.source_system DESC
         ) AS rn
       FROM patient_enrollment_bronze peb
-    ),
-    peb_dedup AS (
-      SELECT
-        trial_id,
-        site_id,
-        country,
-        patient_id,
-        consent_status,
-        enrollment_date
-      FROM peb_patient_latest
-      WHERE rn = 1
     )
     SELECT
+      patient_id,
       trial_id,
       site_id,
       country,
-      COUNT(DISTINCT CASE WHEN UPPER(consent_status) IN ('CONSENTED','Y','YES','TRUE') THEN patient_id END) AS enrolled_patients_count,
-      COUNT(DISTINCT CASE WHEN UPPER(consent_status) IN ('ACTIVE') THEN patient_id END) AS currently_active_patients,
-      COUNT(DISTINCT CASE WHEN UPPER(consent_status) IN ('DROPPED','WITHDRAWN','INACTIVE') THEN patient_id END) AS patient_dropout_count,
-      DATE(MAX(enrollment_date)) AS snapshot_date,
-      MAX(enrollment_date) AS data_timestamp
-    FROM peb_dedup
-    GROUP BY trial_id, site_id, country
+      enrollment_date,
+      consent_status,
+      enrolled_flag
+    FROM ranked
+    WHERE rn = 1
     """
 )
-trial_enrollment_silver_df.createOrReplaceTempView("trial_enrollment_silver")
+trial_site_patient_silver_df.createOrReplaceTempView("trial_site_patient_silver")
 
 (
-    trial_enrollment_silver_df.coalesce(1)
+    trial_site_patient_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/trial_enrollment_silver.csv")
+    .save(f"{TARGET_PATH}/trial_site_patient_silver.csv")
 )
 
-# ===================================================================================
-# TABLE: trial_progress_silver
-# ===================================================================================
-trial_progress_silver_df = spark.sql(
-    """
-    WITH cvb_dedup AS (
-      SELECT
-        cvb.visit_id AS visit_id,
-        cvb.trial_id AS trial_id,
-        cvb.patient_id AS patient_id,
-        cvb.visit_type AS visit_type,
-        cvb.visit_date AS visit_date,
-        ROW_NUMBER() OVER (
-          PARTITION BY cvb.visit_id
-          ORDER BY cvb.visit_date DESC
-        ) AS rn
-      FROM clinical_visit_bronze cvb
-    ),
-    cvb_latest AS (
-      SELECT
-        visit_id,
-        trial_id,
-        patient_id,
-        visit_type,
-        visit_date
-      FROM cvb_dedup
-      WHERE rn = 1
-    ),
-    peb_patient_latest AS (
-      SELECT
-        peb.patient_id AS patient_id,
-        peb.trial_id AS trial_id,
-        peb.site_id AS site_id,
-        UPPER(TRIM(peb.country)) AS country,
-        peb.enrollment_date AS enrollment_date,
-        ROW_NUMBER() OVER (
-          PARTITION BY peb.patient_id, peb.trial_id
-          ORDER BY peb.enrollment_date DESC
-        ) AS rn
-      FROM patient_enrollment_bronze peb
-    ),
-    peb_latest AS (
-      SELECT
-        patient_id,
-        trial_id,
-        site_id,
-        country
-      FROM peb_patient_latest
-      WHERE rn = 1
-    ),
-    progress_base AS (
-      SELECT
-        cvb.trial_id AS trial_id,
-        peb.site_id AS site_id,
-        peb.country AS country,
-        cvb.patient_id AS patient_id,
-        cvb.visit_type AS visit_type,
-        cvb.visit_date AS visit_date
-      FROM cvb_latest cvb
-      INNER JOIN peb_latest peb
-        ON cvb.patient_id = peb.patient_id
-       AND cvb.trial_id = peb.trial_id
-    ),
-    progress_agg AS (
-      SELECT
-        trial_id,
-        site_id,
-        country,
-        (COUNT(DISTINCT CONCAT(patient_id,'|',visit_type)) / NULLIF(COUNT(DISTINCT patient_id), 0)) * 100 AS visit_completion_percentage,
-        DATE(MAX(visit_date)) AS snapshot_date,
-        MAX(visit_date) AS data_timestamp
-      FROM progress_base
-      GROUP BY trial_id, site_id, country
-    ),
-    trend_calc AS (
-      SELECT
-        tes.trial_id,
-        tes.site_id,
-        tes.country,
-        tes.snapshot_date,
-        (tes.enrolled_patients_count - LAG(tes.enrolled_patients_count) OVER (
-          PARTITION BY tes.trial_id, tes.site_id, tes.country
-          ORDER BY tes.snapshot_date
-        )) AS enrollment_trend
-      FROM trial_enrollment_silver tes
-    )
-    SELECT
-      p.trial_id AS trial_id,
-      p.site_id AS site_id,
-      p.country AS country,
-      p.visit_completion_percentage AS visit_completion_percentage,
-      t.enrollment_trend AS enrollment_trend,
-      p.snapshot_date AS snapshot_date,
-      p.data_timestamp AS data_timestamp
-    FROM progress_agg p
-    LEFT JOIN trend_calc t
-      ON p.trial_id = t.trial_id
-     AND p.site_id = t.site_id
-     AND p.country = t.country
-     AND p.snapshot_date = t.snapshot_date
-    """
-)
-trial_progress_silver_df.createOrReplaceTempView("trial_progress_silver")
-
-(
-    trial_progress_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/trial_progress_silver.csv")
-)
-
-# ===================================================================================
-# TABLE: kpi_metrics_silver
-# ===================================================================================
-kpi_metrics_silver_df = spark.sql(
+# ============================================================
+# Table: silver.trial_site_visit_silver
+# ============================================================
+trial_site_visit_silver_df = spark.sql(
     """
     WITH joined AS (
       SELECT
-        tes.trial_id AS trial_id,
-        tes.site_id AS site_id,
-        tes.country AS country,
-        tes.snapshot_date AS snapshot_date,
-        tes.data_timestamp AS tes_data_timestamp,
-        tps.data_timestamp AS tps_data_timestamp,
-        tps.trial_id AS tps_trial_id,
-        tps.snapshot_date AS tps_snapshot_date
-      FROM trial_enrollment_silver tes
-      LEFT JOIN trial_progress_silver tps
-        ON tes.trial_id = tps.trial_id
-       AND tes.site_id = tps.site_id
-       AND tes.country = tps.country
-       AND tes.snapshot_date = tps.snapshot_date
-    ),
-    null_stats AS (
-      SELECT
-        AVG(
-          (
-            CASE WHEN trial_id IS NULL THEN 1 ELSE 0 END +
-            CASE WHEN site_id IS NULL THEN 1 ELSE 0 END +
-            CASE WHEN country IS NULL THEN 1 ELSE 0 END +
-            CASE WHEN tps_trial_id IS NULL THEN 1 ELSE 0 END +
-            CASE WHEN tps_snapshot_date IS NULL THEN 1 ELSE 0 END
-          ) / 5.0
-        ) AS null_rate
-      FROM joined
-    ),
-    dup_stats AS (
-      SELECT
-        (COUNT(*) - COUNT(DISTINCT CONCAT(COALESCE(trial_id,''),'|',COALESCE(site_id,''),'|',COALESCE(country,''),'|',COALESCE(CAST(snapshot_date AS STRING),'')))) / NULLIF(COUNT(*), 0) AS duplicate_rate
-      FROM joined
+        cvb.visit_id AS visit_id,
+        cvb.patient_id AS patient_id,
+        cvb.trial_id AS trial_id,
+        tsps.site_id AS site_id,
+        tsps.country AS country,
+        CAST(cvb.visit_date AS TIMESTAMP) AS visit_date,
+        cvb.visit_type AS visit_type,
+        ROW_NUMBER() OVER (
+          PARTITION BY cvb.visit_id
+          ORDER BY CAST(cvb.visit_date AS TIMESTAMP) DESC, cvb.source_system DESC
+        ) AS rn
+      FROM clinical_visit_bronze cvb
+      INNER JOIN trial_site_patient_silver tsps
+        ON cvb.patient_id = tsps.patient_id
+       AND cvb.trial_id = tsps.trial_id
     )
     SELECT
-      CAST(hash(CONCAT(j.trial_id,'|',CAST(j.snapshot_date AS STRING))) AS STRING) AS metric_id,
-      j.trial_id AS trial_id,
-      CAST(((unix_timestamp(current_timestamp()) - unix_timestamp(greatest(j.tes_data_timestamp, j.tps_data_timestamp))) / 60) AS BIGINT) AS reporting_latency,
-      CAST(((unix_timestamp(current_timestamp()) - unix_timestamp(greatest(j.tes_data_timestamp, j.tps_data_timestamp))) / 60) AS BIGINT) AS data_freshness,
-      CAST(
-        greatest(
-          0D,
-          least(
-            100D,
-            100D - (100D * (ns.null_rate + ds.duplicate_rate) / 2D)
-          )
-        ) AS DOUBLE
-      ) AS data_quality_score,
-      current_timestamp() AS evaluation_timestamp
-    FROM joined j
-    CROSS JOIN null_stats ns
-    CROSS JOIN dup_stats ds
+      visit_id,
+      patient_id,
+      trial_id,
+      site_id,
+      country,
+      visit_date,
+      visit_type
+    FROM joined
+    WHERE rn = 1
+    """
+)
+trial_site_visit_silver_df.createOrReplaceTempView("trial_site_visit_silver")
+
+(
+    trial_site_visit_silver_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/trial_site_visit_silver.csv")
+)
+
+# ============================================================
+# Table: silver.trial_site_daily_kpis_silver
+# ============================================================
+trial_site_daily_kpis_silver_df = spark.sql(
+    """
+    WITH base AS (
+      SELECT
+        tsps.trial_id AS trial_id,
+        tsps.country AS country,
+        tsps.site_id AS site_id,
+        CAST(COALESCE(tsvs.visit_date, tsps.enrollment_date) AS DATE) AS date,
+        tsps.enrolled_flag AS enrolled_flag,
+        tsps.patient_id AS patient_id,
+        tsvs.visit_date AS visit_date,
+        tsvs.visit_id AS visit_id
+      FROM trial_site_patient_silver tsps
+      LEFT JOIN trial_site_visit_silver tsvs
+        ON tsps.patient_id = tsvs.patient_id
+       AND tsps.trial_id = tsvs.trial_id
+    ),
+    agg AS (
+      SELECT
+        trial_id,
+        country,
+        site_id,
+        date,
+        COUNT(DISTINCT CASE WHEN enrolled_flag THEN patient_id END) AS total_enrolled_patients,
+        COUNT(DISTINCT CASE WHEN enrolled_flag AND (visit_date IS NOT NULL) THEN patient_id END) AS active_patients,
+        COUNT(DISTINCT CASE WHEN 1 = 0 THEN patient_id END) AS patient_dropout_count,
+        (
+          (COUNT(DISTINCT visit_id) / NULLIF(COUNT(DISTINCT patient_id), 0)) * 100.0
+        ) AS visit_completion_percentage
+      FROM base
+      GROUP BY trial_id, country, site_id, date
+    )
+    SELECT
+      trial_id,
+      country,
+      site_id,
+      date,
+      total_enrolled_patients,
+      active_patients,
+      patient_dropout_count,
+      visit_completion_percentage,
+      (total_enrolled_patients - LAG(total_enrolled_patients) OVER (
+        PARTITION BY trial_id, country, site_id
+        ORDER BY date
+      )) AS enrollment_trend
+    FROM agg
+    """
+)
+trial_site_daily_kpis_silver_df.createOrReplaceTempView("trial_site_daily_kpis_silver")
+
+(
+    trial_site_daily_kpis_silver_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/trial_site_daily_kpis_silver.csv")
+)
+
+# ============================================================
+# Table: silver.trial_site_current_kpis_silver
+# ============================================================
+trial_site_current_kpis_silver_df = spark.sql(
+    """
+    WITH ranked AS (
+      SELECT
+        tsdks.trial_id AS trial_id,
+        tsdks.country AS country,
+        tsdks.site_id AS site_id,
+        tsdks.total_enrolled_patients AS total_enrolled_patients,
+        tsdks.active_patients AS active_patients,
+        tsdks.patient_dropout_count AS patient_dropout_count,
+        tsdks.visit_completion_percentage AS visit_completion_percentage,
+        tsdks.enrollment_trend AS enrollment_trend,
+        CURRENT_TIMESTAMP AS data_capture_timestamp,
+        ROW_NUMBER() OVER (
+          PARTITION BY tsdks.trial_id, tsdks.country, tsdks.site_id
+          ORDER BY tsdks.date DESC
+        ) AS rn
+      FROM trial_site_daily_kpis_silver tsdks
+    )
+    SELECT
+      trial_id,
+      country,
+      site_id,
+      total_enrolled_patients,
+      active_patients,
+      patient_dropout_count,
+      visit_completion_percentage,
+      enrollment_trend,
+      data_capture_timestamp
+    FROM ranked
+    WHERE rn = 1
+    """
+)
+trial_site_current_kpis_silver_df.createOrReplaceTempView("trial_site_current_kpis_silver")
+
+(
+    trial_site_current_kpis_silver_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/trial_site_current_kpis_silver.csv")
+)
+
+# ============================================================
+# Table: silver.trial_site_aggregated_metrics_silver
+# ============================================================
+trial_site_aggregated_metrics_silver_df = spark.sql(
+    """
+    SELECT
+      tsdks.trial_id AS trial_id,
+      tsdks.country AS country,
+      tsdks.site_id AS site_id,
+      MAX(tsdks.total_enrolled_patients) AS aggregated_enrolment_count,
+      SUM(tsdks.patient_dropout_count) AS aggregated_dropout_count,
+      AVG(tsdks.visit_completion_percentage) AS aggregated_completion_rate,
+      AVG(tsdks.enrollment_trend) AS aggregated_enrollment_trend
+    FROM trial_site_daily_kpis_silver tsdks
+    GROUP BY
+      tsdks.trial_id,
+      tsdks.country,
+      tsdks.site_id
+    """
+)
+trial_site_aggregated_metrics_silver_df.createOrReplaceTempView("trial_site_aggregated_metrics_silver")
+
+(
+    trial_site_aggregated_metrics_silver_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/trial_site_aggregated_metrics_silver.csv")
+)
+
+# ============================================================
+# Table: silver.dashboard_metrics_silver
+# ============================================================
+dashboard_metrics_silver_df = spark.sql(
+    """
+    SELECT
+      CAST(hash(concat('kpi', tscks.trial_id, tscks.country, tscks.site_id)) AS STRING) AS metric_id,
+      concat('total_enrolled_patients:', tscks.trial_id) AS metric_name,
+      CAST(tscks.total_enrolled_patients AS DOUBLE) AS value,
+      tscks.data_capture_timestamp AS last_updated
+    FROM trial_site_current_kpis_silver tscks
+
+    UNION ALL
+
+    SELECT
+      CAST(hash(concat('kpi', tsams.trial_id, tsams.country, tsams.site_id)) AS STRING) AS metric_id,
+      concat('total_enrolled_patients:', tsams.trial_id) AS metric_name,
+      CAST(tsams.aggregated_enrolment_count AS DOUBLE) AS value,
+      CURRENT_TIMESTAMP AS last_updated
+    FROM trial_site_aggregated_metrics_silver tsams
     """
 )
 
 (
-    kpi_metrics_silver_df.coalesce(1)
+    dashboard_metrics_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/kpi_metrics_silver.csv")
+    .save(f"{TARGET_PATH}/dashboard_metrics_silver.csv")
 )
+
+job.commit()
