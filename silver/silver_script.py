@@ -3,7 +3,6 @@ from awsglue.context import GlueContext
 from awsglue.job import Job
 from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
-from pyspark.sql import SparkSession
 
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
 
@@ -17,231 +16,189 @@ SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 FILE_FORMAT = "csv"
 
-# =========================
-# Read Source Tables (Bronze)
-# =========================
-
-stores_bronze_df = (
-    spark.read.format(FILE_FORMAT)
+# --------------------------------------------------------------------
+# 1) Read source tables (Bronze)
+# --------------------------------------------------------------------
+product_master_bronze_df = (
+    spark.read
+    .format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/stores_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/product_master_bronze.{FILE_FORMAT}/")
 )
-stores_bronze_df.createOrReplaceTempView("stores_bronze")
 
-products_bronze_df = (
-    spark.read.format(FILE_FORMAT)
+store_master_bronze_df = (
+    spark.read
+    .format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/products_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/store_master_bronze.{FILE_FORMAT}/")
 )
-products_bronze_df.createOrReplaceTempView("products_bronze")
 
-sales_transactions_bronze_df = (
-    spark.read.format(FILE_FORMAT)
+sales_performance_bronze_df = (
+    spark.read
+    .format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/sales_transactions_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/sales_performance_bronze.{FILE_FORMAT}/")
 )
-sales_transactions_bronze_df.createOrReplaceTempView("sales_transactions_bronze")
 
-# =========================
-# Target: silver.stores_silver
-# =========================
+# --------------------------------------------------------------------
+# 2) Create temp views
+# --------------------------------------------------------------------
+product_master_bronze_df.createOrReplaceTempView("product_master_bronze")
+store_master_bronze_df.createOrReplaceTempView("store_master_bronze")
+sales_performance_bronze_df.createOrReplaceTempView("sales_performance_bronze")
 
-stores_silver_sql = """
+# --------------------------------------------------------------------
+# 3) Transform + Dedup: silver.product_master_silver
+# --------------------------------------------------------------------
+product_master_silver_sql = """
 WITH base AS (
   SELECT
-    sb.store_id AS store_id,
-    sb.store_name AS store_name,
-    sb.city AS city,
-    sb.state AS state,
-    sb.store_type AS store_type,
-    CAST(sb.open_date AS date) AS open_date
-  FROM stores_bronze sb
-),
-dedup AS (
-  SELECT
-    store_id,
-    store_name,
-    city,
-    state,
-    store_type,
-    open_date,
+    TRIM(UPPER(pmb.product_id))                           AS product_id,
+    TRIM(pmb.product_name)                               AS product_name,
+    TRIM(pmb.category)                                   AS category,
+    TRIM(pmb.brand)                                      AS manufacturer,
+    CAST(pmb.price AS DECIMAL(18,2))                     AS price,
     ROW_NUMBER() OVER (
-      PARTITION BY store_id
-      ORDER BY open_date DESC
+      PARTITION BY TRIM(UPPER(pmb.product_id))
+      ORDER BY
+        (CASE WHEN TRIM(pmb.product_name) IS NOT NULL AND TRIM(pmb.product_name) <> '' THEN 1 ELSE 0 END) +
+        (CASE WHEN TRIM(pmb.category) IS NOT NULL AND TRIM(pmb.category) <> '' THEN 1 ELSE 0 END) +
+        (CASE WHEN TRIM(pmb.brand) IS NOT NULL AND TRIM(pmb.brand) <> '' THEN 1 ELSE 0 END) +
+        (CASE WHEN pmb.price IS NOT NULL THEN 1 ELSE 0 END) DESC
     ) AS rn
-  FROM base
-)
-SELECT
-  store_id,
-  store_name,
-  city,
-  state,
-  store_type,
-  open_date
-FROM dedup
-WHERE rn = 1
-"""
-
-stores_silver_df = spark.sql(stores_silver_sql)
-stores_silver_df.createOrReplaceTempView("stores_silver")
-
-(
-    stores_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/stores_silver.csv")
-)
-
-# =========================
-# Target: silver.products_silver
-# =========================
-
-products_silver_sql = """
-WITH base AS (
-  SELECT
-    pb.product_id AS product_id,
-    pb.product_name AS product_name,
-    pb.category AS category,
-    pb.brand AS brand,
-    CAST(pb.price AS double) AS price,
-    CAST(pb.is_active AS boolean) AS is_active
-  FROM products_bronze pb
-  WHERE COALESCE(CAST(pb.is_active AS boolean), false) = true
-),
-dedup AS (
-  SELECT
-    product_id,
-    product_name,
-    category,
-    brand,
-    price,
-    is_active,
-    ROW_NUMBER() OVER (
-      PARTITION BY product_id
-      ORDER BY product_id
-    ) AS rn
-  FROM base
+  FROM product_master_bronze pmb
+  WHERE COALESCE(LOWER(TRIM(pmb.is_active)), 'false') = 'true'
 )
 SELECT
   product_id,
   product_name,
   category,
-  brand,
-  price,
-  is_active
-FROM dedup
+  manufacturer,
+  price
+FROM base
 WHERE rn = 1
 """
 
-products_silver_df = spark.sql(products_silver_sql)
-products_silver_df.createOrReplaceTempView("products_silver")
+product_master_silver_df = spark.sql(product_master_silver_sql)
+product_master_silver_df.createOrReplaceTempView("product_master_silver")
 
-(
-    products_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/products_silver.csv")
+# --------------------------------------------------------------------
+# 4) Write: product_master_silver (single CSV directly under TARGET_PATH)
+# --------------------------------------------------------------------
+product_master_silver_df.coalesce(1).write.mode("overwrite").format("csv").option("header", "true").save(
+    f"{TARGET_PATH}/product_master_silver.csv"
 )
 
-# =========================
-# Target: silver.sales_transactions_silver
-# =========================
-
-sales_transactions_silver_sql = """
+# --------------------------------------------------------------------
+# 3) Transform + Dedup: silver.store_master_silver
+# --------------------------------------------------------------------
+store_master_silver_sql = """
 WITH base AS (
   SELECT
-    stb.transaction_id AS transaction_id,
-    stb.store_id AS store_id,
-    stb.product_id AS product_id,
-    CAST(stb.quantity AS int) AS quantity,
-    CAST(stb.sale_amount AS double) AS sale_amount,
-    CAST(stb.transaction_time AS timestamp) AS transaction_time,
-    CAST(CAST(stb.transaction_time AS timestamp) AS date) AS reporting_date
-  FROM sales_transactions_bronze stb
-),
-validated AS (
+    TRIM(UPPER(smb.store_id))                              AS store_id,
+    TRIM(smb.store_name)                                  AS store_name,
+    CONCAT(TRIM(smb.city), ', ', TRIM(smb.state))          AS location,
+    CASE
+      WHEN UPPER(TRIM(smb.state)) IN ('ME','NH','VT','MA','RI','CT','NY','NJ','PA') THEN 'NORTHEAST'
+      WHEN UPPER(TRIM(smb.state)) IN ('IL','IN','MI','OH','WI','IA','KS','MN','MO','NE','ND','SD') THEN 'MIDWEST'
+      WHEN UPPER(TRIM(smb.state)) IN ('DE','FL','GA','MD','NC','SC','VA','DC','WV','AL','KY','MS','TN','AR','LA','OK','TX') THEN 'SOUTH'
+      WHEN UPPER(TRIM(smb.state)) IN ('AZ','CO','ID','MT','NV','NM','UT','WY','AK','CA','HI','OR','WA') THEN 'WEST'
+      ELSE 'UNKNOWN'
+    END                                                   AS region,
+    TRIM(smb.store_type)                                  AS store_type,
+    ROW_NUMBER() OVER (
+      PARTITION BY TRIM(UPPER(smb.store_id))
+      ORDER BY
+        (CASE WHEN TRIM(smb.store_name) IS NOT NULL AND TRIM(smb.store_name) <> '' THEN 1 ELSE 0 END) +
+        (CASE WHEN TRIM(smb.city) IS NOT NULL AND TRIM(smb.city) <> '' THEN 1 ELSE 0 END) +
+        (CASE WHEN TRIM(smb.state) IS NOT NULL AND TRIM(smb.state) <> '' THEN 1 ELSE 0 END) +
+        (CASE WHEN TRIM(smb.store_type) IS NOT NULL AND TRIM(smb.store_type) <> '' THEN 1 ELSE 0 END) DESC
+    ) AS rn
+  FROM store_master_bronze smb
+)
+SELECT
+  store_id,
+  store_name,
+  location,
+  region,
+  store_type
+FROM base
+WHERE rn = 1
+"""
+
+store_master_silver_df = spark.sql(store_master_silver_sql)
+store_master_silver_df.createOrReplaceTempView("store_master_silver")
+
+# --------------------------------------------------------------------
+# 4) Write: store_master_silver (single CSV directly under TARGET_PATH)
+# --------------------------------------------------------------------
+store_master_silver_df.coalesce(1).write.mode("overwrite").format("csv").option("header", "true").save(
+    f"{TARGET_PATH}/store_master_silver.csv"
+)
+
+# --------------------------------------------------------------------
+# 3) Transform + Dedup + Conformance: silver.sales_performance_silver
+# --------------------------------------------------------------------
+sales_performance_silver_sql = """
+WITH base AS (
   SELECT
-    transaction_id,
-    store_id,
-    product_id,
-    quantity,
-    sale_amount,
-    transaction_time,
-    reporting_date
-  FROM base
-  WHERE COALESCE(quantity, 0) >= 0
-    AND COALESCE(sale_amount, 0.0) >= 0.0
+    TRIM(UPPER(spb.transaction_id))                AS transaction_id,
+    CAST(spb.transaction_time AS DATE)            AS sale_date,
+    TRIM(UPPER(spb.product_id))                   AS product_id,
+    TRIM(UPPER(spb.store_id))                     AS store_id,
+    CAST(spb.quantity AS INT)                     AS quantity_sold,
+    CAST(spb.sale_amount AS DECIMAL(18,2))        AS sales_amount,
+    spb.transaction_time                          AS transaction_time,
+    ROW_NUMBER() OVER (
+      PARTITION BY TRIM(UPPER(spb.transaction_id))
+      ORDER BY spb.transaction_time DESC
+    ) AS rn
+  FROM sales_performance_bronze spb
 ),
 dedup AS (
   SELECT
     transaction_id,
-    store_id,
+    sale_date,
     product_id,
-    quantity,
-    sale_amount,
-    transaction_time,
-    reporting_date,
-    ROW_NUMBER() OVER (
-      PARTITION BY transaction_id
-      ORDER BY transaction_time DESC
-    ) AS rn
-  FROM validated
+    store_id,
+    quantity_sold,
+    sales_amount
+  FROM base
+  WHERE rn = 1
+),
+validated AS (
+  SELECT
+    transaction_id,
+    sale_date,
+    product_id,
+    store_id,
+    quantity_sold,
+    sales_amount
+  FROM dedup
+  WHERE COALESCE(quantity_sold, 0) >= 0
+    AND COALESCE(sales_amount, CAST(0 AS DECIMAL(18,2))) >= CAST(0 AS DECIMAL(18,2))
 )
 SELECT
-  transaction_id,
-  store_id,
-  product_id,
-  quantity,
-  sale_amount,
-  transaction_time,
-  reporting_date
-FROM dedup
-WHERE rn = 1
+  TRIM(UPPER(v.transaction_id)) AS transaction_id,
+  v.sale_date                  AS sale_date,
+  TRIM(UPPER(v.product_id))    AS product_id,
+  TRIM(UPPER(v.store_id))      AS store_id,
+  CAST(v.quantity_sold AS INT) AS quantity_sold,
+  CAST(v.sales_amount AS DECIMAL(18,2)) AS sales_amount
+FROM validated v
+LEFT JOIN product_master_silver pms
+  ON v.product_id = pms.product_id
+LEFT JOIN store_master_silver sms
+  ON v.store_id = sms.store_id
 """
 
-sales_transactions_silver_df = spark.sql(sales_transactions_silver_sql)
-sales_transactions_silver_df.createOrReplaceTempView("sales_transactions_silver")
+sales_performance_silver_df = spark.sql(sales_performance_silver_sql)
 
-(
-    sales_transactions_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/sales_transactions_silver.csv")
-)
-
-# =========================
-# Target: silver.sales_store_product_daily_silver
-# =========================
-
-sales_store_product_daily_silver_sql = """
-SELECT
-  sts.store_id AS store_id,
-  sts.product_id AS product_id,
-  sts.reporting_date AS reporting_date,
-  SUM(sts.sale_amount) AS revenue,
-  SUM(sts.quantity) AS quantity_sold
-FROM sales_transactions_silver sts
-INNER JOIN stores_silver ss
-  ON sts.store_id = ss.store_id
-INNER JOIN products_silver ps
-  ON sts.product_id = ps.product_id
-GROUP BY
-  sts.store_id,
-  sts.product_id,
-  sts.reporting_date
-"""
-
-sales_store_product_daily_silver_df = spark.sql(sales_store_product_daily_silver_sql)
-
-(
-    sales_store_product_daily_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/sales_store_product_daily_silver.csv")
+# --------------------------------------------------------------------
+# 4) Write: sales_performance_silver (single CSV directly under TARGET_PATH)
+# --------------------------------------------------------------------
+sales_performance_silver_df.coalesce(1).write.mode("overwrite").format("csv").option("header", "true").save(
+    f"{TARGET_PATH}/sales_performance_silver.csv"
 )
 
 job.commit()
