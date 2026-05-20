@@ -1,12 +1,13 @@
 import sys
-from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
 from awsglue.job import Job
+from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
+from pyspark.sql import SparkSession
 
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
 
-sc = SparkContext()
+sc = SparkContext.getOrCreate()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
 job = Job(glueContext)
@@ -16,209 +17,99 @@ SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-# =========================
-# Read Source Tables (S3)
-# =========================
-sales_transactions_silver_df = (
+# ----------------------------
+# Source: silver.patient_analytics_silver (pas)
+# Target: gold.gold_patient_analytics
+# ----------------------------
+pas_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/sales_transactions_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/patient_analytics_silver.{FILE_FORMAT}/")
 )
-products_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/products_silver.{FILE_FORMAT}/")
-)
-stores_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/stores_silver.{FILE_FORMAT}/")
-)
-store_day_summary_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/store_day_summary_silver.{FILE_FORMAT}/")
-)
-store_comparison_period_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/store_comparison_period_silver.{FILE_FORMAT}/")
-)
-data_quality_checks_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/data_quality_checks_silver.{FILE_FORMAT}/")
-)
-metadata_tracking_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/metadata_tracking_silver.{FILE_FORMAT}/")
-)
+pas_df.createOrReplaceTempView("patient_analytics_silver")
 
-# =========================
-# Create Temp Views
-# =========================
-sales_transactions_silver_df.createOrReplaceTempView("sales_transactions_silver")
-products_silver_df.createOrReplaceTempView("products_silver")
-stores_silver_df.createOrReplaceTempView("stores_silver")
-store_day_summary_silver_df.createOrReplaceTempView("store_day_summary_silver")
-store_comparison_period_silver_df.createOrReplaceTempView("store_comparison_period_silver")
-data_quality_checks_silver_df.createOrReplaceTempView("data_quality_checks_silver")
-metadata_tracking_silver_df.createOrReplaceTempView("metadata_tracking_silver")
-
-# ======================================================
-# Target: gold_sales_performance (gsp)
-# ======================================================
-gold_sales_performance_df = spark.sql(
+gpa_df = spark.sql(
     """
     SELECT
-        CAST(sts.transaction_id AS STRING)              AS transaction_id,
-        CAST(sts.product_id AS STRING)                  AS product_id,
-        CAST(sts.store_id AS STRING)                    AS store_id,
-        CAST(sts.transaction_date AS DATE)              AS transaction_date,
-        CAST(sts.revenue AS DOUBLE)                     AS revenue,
-        CAST(sts.quantity AS INT)                       AS quantity,
-        CAST(ps.category AS STRING)                     AS category,
-        CAST(ps.product_name AS STRING)                 AS product_name,
-        CAST(ss.store_name AS STRING)                   AS store_name
-    FROM sales_transactions_silver sts
-    LEFT JOIN products_silver ps
-        ON sts.product_id = ps.product_id
-    LEFT JOIN stores_silver ss
-        ON sts.store_id = ss.store_id
+        CAST(pas.patient_id AS STRING) AS patient_id,
+        CAST(pas.enrollment_date AS TIMESTAMP) AS enrollment_date,
+        CAST(pas.clinical_visit_date AS TIMESTAMP) AS clinical_visit_date,
+        CAST(pas.lab_result AS STRING) AS lab_result,
+        CAST(pas.treatment_effectiveness AS STRING) AS treatment_effectiveness,
+        CAST(pas.health_progression AS STRING) AS health_progression,
+        CAST(pas.safety_risk AS STRING) AS safety_risk,
+        CAST(pas.standardized_patient_identifier AS STRING) AS standardized_patient_identifier
+    FROM patient_analytics_silver pas
     """
 )
 
 (
-    gold_sales_performance_df.coalesce(1)
+    gpa_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_sales_performance.csv")
+    .save(f"{TARGET_PATH}/gold_patient_analytics.csv")
 )
 
-# ======================================================
-# Target: gold_store_performance (gstorep)
-# ======================================================
-gold_store_performance_df = spark.sql(
+# ----------------------------
+# Source: silver.dashboard_reporting_silver (drs)
+# Target: gold.gold_clinical_dashboard
+# ----------------------------
+drs_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/dashboard_reporting_silver.{FILE_FORMAT}/")
+)
+drs_df.createOrReplaceTempView("dashboard_reporting_silver")
+
+gcd_df = spark.sql(
     """
     SELECT
-        CAST(sdss.store_id AS STRING)                           AS store_id,
-        CAST(ss.store_name AS STRING)                           AS store_name,
-        CAST(sdss.total_revenue AS DOUBLE)                      AS total_revenue,
-        CAST(sdss.total_transactions AS INT)                    AS total_transactions,
-        CAST(sdss.total_quantity AS INT)                        AS total_quantity,
-        CAST(scps.comparison_period_revenue AS DOUBLE)          AS comparison_period_revenue,
-        CAST(scps.comparison_period_transactions AS INT)        AS comparison_period_transactions
-    FROM store_day_summary_silver sdss
-    LEFT JOIN store_comparison_period_silver scps
-        ON sdss.store_id = scps.store_id
-       AND sdss.transaction_date = scps.transaction_date
-    LEFT JOIN stores_silver ss
-        ON sdss.store_id = ss.store_id
+        CAST(drs.dashboard_id AS STRING) AS dashboard_id,
+        CAST(drs.reporting_tool AS STRING) AS reporting_tool,
+        CAST(drs.access_date AS TIMESTAMP) AS access_date,
+        CAST(drs.user_id AS STRING) AS user_id,
+        CAST(drs.decision_support AS STRING) AS decision_support
+    FROM dashboard_reporting_silver drs
     """
 )
 
 (
-    gold_store_performance_df.coalesce(1)
+    gcd_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_store_performance.csv")
+    .save(f"{TARGET_PATH}/gold_clinical_dashboard.csv")
 )
 
-# ======================================================
-# Target: gold_product_performance (gpp)
-# ======================================================
-gold_product_performance_df = spark.sql(
-    """
-    WITH product_totals AS (
-        SELECT
-            CAST(ps.product_id AS STRING)          AS product_id,
-            CAST(ps.product_name AS STRING)        AS product_name,
-            CAST(ps.category AS STRING)            AS category,
-            CAST(SUM(CAST(sts.revenue AS DOUBLE)) AS DOUBLE)   AS total_revenue,
-            CAST(SUM(CAST(sts.quantity AS INT)) AS INT)        AS total_quantity
-        FROM sales_transactions_silver sts
-        INNER JOIN products_silver ps
-            ON sts.product_id = ps.product_id
-        GROUP BY
-            ps.product_id,
-            ps.product_name,
-            ps.category
-    ),
-    thresholds AS (
-        SELECT
-            PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY total_revenue) AS p90_total_revenue
-        FROM product_totals
-    )
-    SELECT
-        pt.product_id,
-        pt.product_name,
-        pt.category,
-        pt.total_revenue,
-        pt.total_quantity,
-        CASE
-            WHEN pt.total_revenue >= th.p90_total_revenue THEN TRUE
-            ELSE FALSE
-        END AS top_product_flag
-    FROM product_totals pt
-    CROSS JOIN thresholds th
-    """
-)
-
-(
-    gold_product_performance_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
+# ----------------------------
+# Source: silver.data_governance_silver (dgs)
+# Target: gold.gold_data_quality
+# ----------------------------
+dgs_df = (
+    spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_product_performance.csv")
+    .load(f"{SOURCE_PATH}/data_governance_silver.{FILE_FORMAT}/")
 )
+dgs_df.createOrReplaceTempView("data_governance_silver")
 
-# ======================================================
-# Target: gold_data_quality (gdq)
-# ======================================================
-gold_data_quality_df = spark.sql(
+gdq_df = spark.sql(
     """
     SELECT
-        CAST(dqcs.record_id AS STRING)            AS record_id,
-        CAST(dqcs.source_table AS STRING)         AS source_table,
-        CAST(dqcs.is_valid AS BOOLEAN)            AS is_valid,
-        CAST(dqcs.error_description AS STRING)    AS error_description,
-        CAST(dqcs.processing_date AS DATE)        AS processing_date
-    FROM data_quality_checks_silver dqcs
+        CAST(dgs.data_source AS STRING) AS data_source,
+        CAST(dgs.quality_score AS DOUBLE) AS quality_score,
+        CAST(dgs.validation_checks AS STRING) AS validation_checks,
+        CAST(dgs.compliance_audit_date AS TIMESTAMP) AS compliance_audit_date
+    FROM data_governance_silver dgs
     """
 )
 
 (
-    gold_data_quality_df.coalesce(1)
+    gdq_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
     .save(f"{TARGET_PATH}/gold_data_quality.csv")
-)
-
-# ======================================================
-# Target: gold_metadata_management (gmm)
-# ======================================================
-gold_metadata_management_df = spark.sql(
-    """
-    SELECT
-        CAST(mts.data_source AS STRING)               AS data_source,
-        CAST(mts.data_ingestion_date AS DATE)         AS data_ingestion_date,
-        CAST(mts.data_processing_date AS TIMESTAMP)   AS data_processing_date,
-        CAST(mts.data_lineage AS STRING)              AS data_lineage,
-        CAST(mts.compliance_status AS STRING)         AS compliance_status
-    FROM metadata_tracking_silver mts
-    """
-)
-
-(
-    gold_metadata_management_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_metadata_management.csv")
 )
 
 job.commit()
