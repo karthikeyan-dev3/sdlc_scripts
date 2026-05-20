@@ -3,6 +3,7 @@ from awsglue.context import GlueContext
 from awsglue.job import Job
 from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
+from pyspark.sql import SparkSession
 
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
 
@@ -16,104 +17,165 @@ SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-# -----------------------------------------------------------------------------------
-# Read Source Tables from S3
-# -----------------------------------------------------------------------------------
-tsr_df = (
+# ------------------------------------------------------------------------------
+# 1) READ SOURCE TABLES FROM S3
+# ------------------------------------------------------------------------------
+
+clinical_trial_site_enrollment_silver_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/trial_site_rollup_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/clinical_trial_site_enrollment_silver.{FILE_FORMAT}/")
 )
 
-sps_df = (
+clinical_trial_site_visit_silver_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/site_performance_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/clinical_trial_site_visit_silver.{FILE_FORMAT}/")
 )
 
-rms_df = (
+clinical_trial_metadata_silver_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/reporting_metrics_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/clinical_trial_metadata_silver.{FILE_FORMAT}/")
 )
 
-# -----------------------------------------------------------------------------------
-# Create Temp Views
-# -----------------------------------------------------------------------------------
-tsr_df.createOrReplaceTempView("trial_site_rollup_silver")
-sps_df.createOrReplaceTempView("site_performance_silver")
-rms_df.createOrReplaceTempView("reporting_metrics_silver")
+# ------------------------------------------------------------------------------
+# 2) CREATE TEMP VIEWS
+# ------------------------------------------------------------------------------
 
-# -----------------------------------------------------------------------------------
-# Target: gold_clinical_trial_metrics
-# -----------------------------------------------------------------------------------
-gctm_df = spark.sql(
+clinical_trial_site_enrollment_silver_df.createOrReplaceTempView("clinical_trial_site_enrollment_silver")
+clinical_trial_site_visit_silver_df.createOrReplaceTempView("clinical_trial_site_visit_silver")
+clinical_trial_metadata_silver_df.createOrReplaceTempView("clinical_trial_metadata_silver")
+
+# ------------------------------------------------------------------------------
+# 3) TRANSFORMATIONS USING SPARK SQL
+# ------------------------------------------------------------------------------
+
+# --- Target: gold_clinical_trial_kpis ---
+gold_clinical_trial_kpis_df = spark.sql(
+    """
+    WITH base AS (
+        SELECT
+            ctses.trial_id AS trial_id,
+            ctses.country AS country,
+            ctses.site_id AS site_id,
+
+            COUNT(DISTINCT ctses.patient_id) OVER (
+                PARTITION BY ctses.trial_id, ctses.country, ctses.site_id
+            ) AS total_enrolled_patients,
+
+            (
+                COUNT(DISTINCT ctsvs.visit_id) OVER (
+                    PARTITION BY ctses.trial_id, ctses.country, ctses.site_id
+                ) /
+                NULLIF(
+                    COUNT(DISTINCT ctses.patient_id) OVER (
+                        PARTITION BY ctses.trial_id, ctses.country, ctses.site_id
+                    ),
+                    0
+                )
+            ) * 100 AS visit_completion_percentage,
+
+            CASE
+                WHEN COUNT(DISTINCT CASE WHEN CAST(ctses.enrollment_date AS DATE) >= CURRENT_DATE - 30 THEN ctses.patient_id END) OVER (
+                    PARTITION BY ctses.trial_id, ctses.country, ctses.site_id
+                ) = 0
+                THEN 'delayed'
+                ELSE 'on track'
+            END AS enrollment_status,
+
+            CURRENT_TIMESTAMP AS date_aggregated
+        FROM clinical_trial_site_enrollment_silver ctses
+        LEFT JOIN clinical_trial_site_visit_silver ctsvs
+            ON ctses.trial_id = ctsvs.trial_id
+           AND ctses.country = ctsvs.country
+           AND ctses.site_id = ctsvs.site_id
+    )
+    SELECT DISTINCT
+        trial_id,
+        country,
+        site_id,
+        CAST(total_enrolled_patients AS INT) AS total_enrolled_patients,
+        CAST(visit_completion_percentage AS DECIMAL(38, 10)) AS visit_completion_percentage,
+        enrollment_status,
+        date_aggregated
+    FROM base
+    """
+)
+
+# --- Target: gold_clinical_trial_trends ---
+gold_clinical_trial_trends_df = spark.sql(
+    """
+    WITH base AS (
+        SELECT
+            ctses.trial_id AS trial_id,
+            COALESCE(CAST(ctses.enrollment_date AS DATE), CAST(ctsvs.visit_date AS DATE)) AS date,
+
+            COUNT(DISTINCT ctses.patient_id) OVER (
+                PARTITION BY ctses.trial_id, CAST(ctses.enrollment_date AS DATE)
+            ) AS enrollment_trend,
+
+            (
+                COUNT(DISTINCT ctsvs.visit_id) OVER (
+                    PARTITION BY ctses.trial_id, COALESCE(CAST(ctses.enrollment_date AS DATE), CAST(ctsvs.visit_date AS DATE))
+                ) /
+                NULLIF(
+                    COUNT(DISTINCT ctses.patient_id) OVER (
+                        PARTITION BY ctses.trial_id, CAST(ctses.enrollment_date AS DATE)
+                    ),
+                    0
+                )
+            ) * 100 AS visit_completion_trend
+        FROM clinical_trial_site_enrollment_silver ctses
+        LEFT JOIN clinical_trial_site_visit_silver ctsvs
+            ON ctses.trial_id = ctsvs.trial_id
+           AND CAST(ctses.enrollment_date AS DATE) = CAST(ctsvs.visit_date AS DATE)
+    )
+    SELECT DISTINCT
+        trial_id,
+        date,
+        CAST(enrollment_trend AS INT) AS enrollment_trend,
+        CAST(visit_completion_trend AS DECIMAL(38, 10)) AS visit_completion_trend
+    FROM base
+    """
+)
+
+# --- Target: gold_clinical_trial_metadata ---
+gold_clinical_trial_metadata_df = spark.sql(
     """
     SELECT
-        CAST(tsr.trial_id AS STRING)                         AS trial_id,
-        CAST(tsr.country AS STRING)                          AS country,
-        CAST(tsr.site_id AS STRING)                          AS site_id,
-        CAST(tsr.total_enrolled_patients AS BIGINT)          AS total_enrolled_patients,
-        CAST(tsr.dropout_count AS BIGINT)                    AS dropout_count,
-        CAST(tsr.total_sites AS BIGINT)                      AS total_sites,
-        CAST(tsr.metric_aggregation_time AS TIMESTAMP)       AS metric_aggregation_time
-    FROM trial_site_rollup_silver tsr
+        ctms.trial_id AS trial_id,
+        ctms.start_date AS start_date
+    FROM clinical_trial_metadata_silver ctms
     """
+)
+
+# ------------------------------------------------------------------------------
+# 4) WRITE EACH TARGET TABLE SEPARATELY (SINGLE CSV FILE DIRECTLY UNDER TARGET_PATH)
+# ------------------------------------------------------------------------------
+
+(
+    gold_clinical_trial_kpis_df.coalesce(1)
+    .write.mode("overwrite")
+    .format(FILE_FORMAT)
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/gold_clinical_trial_kpis.csv")
 )
 
 (
-    gctm_df.coalesce(1)
+    gold_clinical_trial_trends_df.coalesce(1)
     .write.mode("overwrite")
-    .format("csv")
+    .format(FILE_FORMAT)
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_clinical_trial_metrics.csv")
-)
-
-# -----------------------------------------------------------------------------------
-# Target: gold_clinical_performance_summary
-# -----------------------------------------------------------------------------------
-gcps_df = spark.sql(
-    """
-    SELECT
-        CAST(sps.trial_id AS STRING)                   AS trial_id,
-        CAST(sps.country AS STRING)                    AS country,
-        CAST(sps.site_id AS STRING)                    AS site_id,
-        CAST(sps.is_underperforming AS BOOLEAN)        AS is_underperforming,
-        CAST(sps.performance_rating AS STRING)         AS performance_rating,
-        CAST(sps.summary_time_period AS TIMESTAMP)     AS summary_time_period
-    FROM site_performance_silver sps
-    """
+    .save(f"{TARGET_PATH}/gold_clinical_trial_trends.csv")
 )
 
 (
-    gcps_df.coalesce(1)
+    gold_clinical_trial_metadata_df.coalesce(1)
     .write.mode("overwrite")
-    .format("csv")
+    .format(FILE_FORMAT)
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_clinical_performance_summary.csv")
-)
-
-# -----------------------------------------------------------------------------------
-# Target: gold_reporting_metrics
-# -----------------------------------------------------------------------------------
-grm_df = spark.sql(
-    """
-    SELECT
-        CAST(rms.update_timestamp AS TIMESTAMP)               AS update_timestamp,
-        CAST(rms.reporting_latency_minutes AS BIGINT)         AS reporting_latency_minutes,
-        CAST(rms.data_freshness_percent AS DECIMAL(5,2))      AS data_freshness_percent,
-        CAST(rms.dashboard_usage_percent AS DECIMAL(5,2))     AS dashboard_usage_percent,
-        CAST(rms.data_quality_score AS DECIMAL(5,2))          AS data_quality_score
-    FROM reporting_metrics_silver rms
-    """
-)
-
-(
-    grm_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_reporting_metrics.csv")
+    .save(f"{TARGET_PATH}/gold_clinical_trial_metadata.csv")
 )
 
 job.commit()
