@@ -16,155 +16,104 @@ SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-# =============================================================================
-# Read Source Tables
-# =============================================================================
-ctkds_df = (
+# -----------------------------------------------------------------------------------
+# Read Source Tables from S3
+# -----------------------------------------------------------------------------------
+tsr_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/clinical_trial_kpi_daily_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/trial_site_rollup_silver.{FILE_FORMAT}/")
 )
-ctkds_df.createOrReplaceTempView("clinical_trial_kpi_daily_silver")
 
-hkrs_df = (
+sps_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/historical_kpi_records_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/site_performance_silver.{FILE_FORMAT}/")
 )
-hkrs_df.createOrReplaceTempView("historical_kpi_records_silver")
 
-spmds_df = (
+rms_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/site_performance_metrics_daily_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/reporting_metrics_silver.{FILE_FORMAT}/")
 )
-spmds_df.createOrReplaceTempView("site_performance_metrics_daily_silver")
 
-# =============================================================================
-# Target: gold_clinical_trial_kpis
-# =============================================================================
-gold_clinical_trial_kpis_df = spark.sql(
+# -----------------------------------------------------------------------------------
+# Create Temp Views
+# -----------------------------------------------------------------------------------
+tsr_df.createOrReplaceTempView("trial_site_rollup_silver")
+sps_df.createOrReplaceTempView("site_performance_silver")
+rms_df.createOrReplaceTempView("reporting_metrics_silver")
+
+# -----------------------------------------------------------------------------------
+# Target: gold_clinical_trial_metrics
+# -----------------------------------------------------------------------------------
+gctm_df = spark.sql(
     """
-    WITH base AS (
-      SELECT
-        CAST(ctkds.trial_id AS STRING) AS trial_id,
-        CAST(ctkds.country AS STRING) AS country,
-        CAST(ctkds.site_id AS STRING) AS site_id,
-        CAST(ctkds.total_enrolled_patients AS BIGINT) AS total_enrolled_patients,
-        CAST(ctkds.active_patients AS BIGINT) AS active_patients,
-        CAST(ctkds.patient_dropout_count AS BIGINT) AS patient_dropout_count,
-        CAST(ctkds.visit_completion_percentage AS DOUBLE) AS visit_completion_percentage,
-        DATE(ctkds.date) AS date,
-        LAG(CAST(ctkds.total_enrolled_patients AS BIGINT)) OVER (
-          PARTITION BY ctkds.trial_id, ctkds.country, ctkds.site_id
-          ORDER BY DATE(ctkds.date)
-        ) AS prev_total_enrolled_patients,
-        ROW_NUMBER() OVER (
-          PARTITION BY ctkds.trial_id, ctkds.country, ctkds.site_id
-          ORDER BY DATE(ctkds.date) DESC
-        ) AS rn
-      FROM clinical_trial_kpi_daily_silver ctkds
-    )
     SELECT
-      trial_id,
-      country,
-      site_id,
-      total_enrolled_patients,
-      active_patients,
-      patient_dropout_count,
-      visit_completion_percentage,
-      CASE
-        WHEN total_enrolled_patients > prev_total_enrolled_patients THEN 'INCREASING'
-        WHEN total_enrolled_patients < prev_total_enrolled_patients THEN 'DECREASING'
-        ELSE 'FLAT'
-      END AS enrollment_trend
-    FROM base
-    WHERE rn = 1
+        CAST(tsr.trial_id AS STRING)                         AS trial_id,
+        CAST(tsr.country AS STRING)                          AS country,
+        CAST(tsr.site_id AS STRING)                          AS site_id,
+        CAST(tsr.total_enrolled_patients AS BIGINT)          AS total_enrolled_patients,
+        CAST(tsr.dropout_count AS BIGINT)                    AS dropout_count,
+        CAST(tsr.total_sites AS BIGINT)                      AS total_sites,
+        CAST(tsr.metric_aggregation_time AS TIMESTAMP)       AS metric_aggregation_time
+    FROM trial_site_rollup_silver tsr
     """
 )
 
 (
-    gold_clinical_trial_kpis_df.coalesce(1)
+    gctm_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_clinical_trial_kpis.csv")
+    .save(f"{TARGET_PATH}/gold_clinical_trial_metrics.csv")
 )
 
-# =============================================================================
-# Target: gold_historical_kpi_trends
-# =============================================================================
-gold_historical_kpi_trends_df = spark.sql(
+# -----------------------------------------------------------------------------------
+# Target: gold_clinical_performance_summary
+# -----------------------------------------------------------------------------------
+gcps_df = spark.sql(
     """
     SELECT
-      CAST(hkrs.trial_id AS STRING) AS trial_id,
-      DATE(hkrs.date) AS date,
-      CAST(hkrs.total_enrolled_patients AS BIGINT) AS total_enrolled_patients,
-      CAST(hkrs.patient_dropout_count AS BIGINT) AS patient_dropout_count,
-      CAST(hkrs.visit_completion_percentage AS DOUBLE) AS visit_completion_percentage,
-      CAST(hkrs.data_quality_score AS DOUBLE) AS data_quality_score
-    FROM historical_kpi_records_silver hkrs
+        CAST(sps.trial_id AS STRING)                   AS trial_id,
+        CAST(sps.country AS STRING)                    AS country,
+        CAST(sps.site_id AS STRING)                    AS site_id,
+        CAST(sps.is_underperforming AS BOOLEAN)        AS is_underperforming,
+        CAST(sps.performance_rating AS STRING)         AS performance_rating,
+        CAST(sps.summary_time_period AS TIMESTAMP)     AS summary_time_period
+    FROM site_performance_silver sps
     """
 )
 
 (
-    gold_historical_kpi_trends_df.coalesce(1)
+    gcps_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_historical_kpi_trends.csv")
+    .save(f"{TARGET_PATH}/gold_clinical_performance_summary.csv")
 )
 
-# =============================================================================
-# Target: gold_site_performance
-# =============================================================================
-gold_site_performance_df = spark.sql(
+# -----------------------------------------------------------------------------------
+# Target: gold_reporting_metrics
+# -----------------------------------------------------------------------------------
+grm_df = spark.sql(
     """
-    WITH base AS (
-      SELECT
-        CAST(spmds.site_id AS STRING) AS site_id,
-        CAST(spmds.patient_retention_rate AS DOUBLE) AS patient_retention_rate,
-        CAST(spmds.visit_adherence_rate AS DOUBLE) AS visit_adherence_rate,
-        DATE(spmds.date) AS date,
-        SUM(
-          CASE
-            WHEN (spmds.patient_retention_rate IS NOT NULL OR spmds.visit_adherence_rate IS NOT NULL) THEN 1
-            ELSE 0
-          END
-        ) OVER (
-          PARTITION BY spmds.site_id
-          ORDER BY DATE(spmds.date)
-          ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
-        ) AS recent_non_null_cnt,
-        ROW_NUMBER() OVER (
-          PARTITION BY spmds.site_id
-          ORDER BY DATE(spmds.date) DESC
-        ) AS rn
-      FROM site_performance_metrics_daily_silver spmds
-    )
     SELECT
-      site_id,
-      patient_retention_rate,
-      visit_adherence_rate,
-      CASE
-        WHEN patient_retention_rate < 0.8 OR visit_adherence_rate < 80 THEN 'Y'
-        ELSE 'N'
-      END AS underperformance_flag,
-      CASE
-        WHEN recent_non_null_cnt = 0 THEN 'Y'
-        ELSE 'N'
-      END AS enrollment_delay_detected
-    FROM base
-    WHERE rn = 1
+        CAST(rms.update_timestamp AS TIMESTAMP)               AS update_timestamp,
+        CAST(rms.reporting_latency_minutes AS BIGINT)         AS reporting_latency_minutes,
+        CAST(rms.data_freshness_percent AS DECIMAL(5,2))      AS data_freshness_percent,
+        CAST(rms.dashboard_usage_percent AS DECIMAL(5,2))     AS dashboard_usage_percent,
+        CAST(rms.data_quality_score AS DECIMAL(5,2))          AS data_quality_score
+    FROM reporting_metrics_silver rms
     """
 )
 
 (
-    gold_site_performance_df.coalesce(1)
+    grm_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_site_performance.csv")
+    .save(f"{TARGET_PATH}/gold_reporting_metrics.csv")
 )
 
 job.commit()
