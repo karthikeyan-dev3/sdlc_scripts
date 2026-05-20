@@ -1,6 +1,6 @@
 from awsglue.context import GlueContext
-from awsglue.job import Job
 from pyspark.context import SparkContext
+from awsglue.job import Job
 
 sc = SparkContext()
 glueContext = GlueContext(sc)
@@ -9,41 +9,665 @@ spark = glueContext.spark_session
 job = Job(glueContext)
 job.init("bronze_job", {})
 
-metadata = {'tables': [{'target_schema': 'bronze', 'target_table': 'patient_enrollment_bronze', 'target_alias': 'peb', 'mapping_details': 'patient_enrollment_raw_2000 pe', 'description': 'Bronze ingestion of patient enrollment records at patient-trial-site grain for Patient entity (patient_id, trial_id, site_id, patient_name, gender, date_of_birth, country, enrollment_date, consent_status, source_system). Excludes Unnamed columns.'}, {'target_schema': 'bronze', 'target_table': 'clinical_visit_bronze', 'target_alias': 'cvb', 'mapping_details': 'clinical_visit_raw_2000 cv', 'description': 'Bronze ingestion of clinical visit observations for Clinical Data entity (visit_id, patient_id, trial_id, visit_date, visit_type, blood_pressure, heart_rate, weight_kg, physician_notes, source_system). Excludes Unnamed columns.'}, {'target_schema': 'bronze', 'target_table': 'lab_results_bronze', 'target_alias': 'lrb', 'mapping_details': 'lab_results_raw_2000 lr', 'description': 'Bronze ingestion of laboratory test results for Clinical Data entity (lab_result_id, patient_id, sample_id, test_name, test_result, test_unit, reference_range, abnormal_flag, test_date, lab_name). Excludes Unnamed columns.'}, {'target_schema': 'bronze', 'target_table': 'drug_administration_bronze', 'target_alias': 'dab', 'mapping_details': 'drug_administration_raw_2000 da', 'description': 'Bronze ingestion of drug administration events supporting clinical analytics (administration_id, patient_id, drug_code, dosage_mg, administration_date, administration_route, administered_by, batch_number). Excludes Unnamed columns.'}, {'target_schema': 'bronze', 'target_table': 'adverse_events_bronze', 'target_alias': 'aeb', 'mapping_details': 'adverse_events_raw_2000 ae', 'description': 'Bronze ingestion of adverse event reports supporting clinical analytics and dashboards (event_id, patient_id, event_type, severity, event_start_date, event_end_date, outcome, related_to_drug, hospitalization_required, reported_by). Excludes Unnamed columns.'}, {'target_schema': 'bronze', 'target_table': 'wearable_monitoring_bronze', 'target_alias': 'wmb', 'mapping_details': 'wearable_monitoring_raw_2000 wm', 'description': 'Bronze ingestion of wearable monitoring time-series records supporting Patient tracking_info and analytics timestamping (device_record_id, patient_id, device_type, recorded_timestamp, glucose_level, step_count, sleep_hours, heart_rate, battery_status). Excludes Unnamed columns.'}], 'columns': [{'source_column': "['pe.patient_id']", 'source_type': 'varchar(20)', 'source_nullable': 'not_null', 'target_column': 'patient_id', 'target_type': 'varchar(20)', 'target_nullable': 'not_null', 'transformation': 'pe.patient_id', 'target_table': 'pe'}, {'source_column': "['pe.trial_id']", 'source_type': 'varchar(20)', 'source_nullable': 'not_null', 'target_column': 'trial_id', 'target_type': 'varchar(20)', 'target_nullable': 'not_null', 'transformation': 'pe.trial_id', 'target_table': 'pe'}, {'source_column': "['pe.site_id']", 'source_type': 'varchar(20)', 'source_nullable': 'nan', 'target_column': 'site_id', 'target_type': 'varchar(20)', 'target_nullable': 'nan', 'transformation': 'pe.site_id', 'target_table': 'pe'}, {'source_column': "['pe.patient_name']", 'source_type': 'varchar(255)', 'source_nullable': 'nan', 'target_column': 'patient_name', 'target_type': 'varchar(255)', 'target_nullable': 'nan', 'transformation': 'pe.patient_name', 'target_table': 'pe'}, {'source_column': "['pe.gender']", 'source_type': 'varchar(10)', 'source_nullable': 'nan', 'target_column': 'gender', 'target_type': 'varchar(10)', 'target_nullable': 'nan', 'transformation': 'pe.gender', 'target_table': 'pe'}, {'source_column': "['pe.date_of_birth']", 'source_type': 'date', 'source_nullable': 'nan', 'target_column': 'date_of_birth', 'target_type': 'date', 'target_nullable': 'nan', 'transformation': 'pe.date_of_birth', 'target_table': 'pe'}, {'source_column': "['pe.country']", 'source_type': 'varchar(100)', 'source_nullable': 'nan', 'target_column': 'country', 'target_type': 'varchar(100)', 'target_nullable': 'nan', 'transformation': 'pe.country', 'target_table': 'pe'}, {'source_column': "['pe.enrollment_date']", 'source_type': 'timestamp', 'source_nullable': 'nan', 'target_column': 'enrollment_date', 'target_type': 'timestamp', 'target_nullable': 'nan', 'transformation': 'pe.enrollment_date', 'target_table': 'pe'}, {'source_column': "['pe.consent_status']", 'source_type': 'varchar(20)', 'source_nullable': 'nan', 'target_column': 'consent_status', 'target_type': 'varchar(20)', 'target_nullable': 'nan', 'transformation': 'pe.consent_status', 'target_table': 'pe'}, {'source_column': "['pe.source_system']", 'source_type': 'varchar(50)', 'source_nullable': 'nan', 'target_column': 'source_system', 'target_type': 'varchar(50)', 'target_nullable': 'nan', 'transformation': 'pe.source_system', 'target_table': 'pe'}, {'source_column': "['cv.visit_id']", 'source_type': 'varchar(255)', 'source_nullable': 'not_null', 'target_column': 'visit_id', 'target_type': 'varchar(255)', 'target_nullable': 'not_null', 'transformation': 'cv.visit_id', 'target_table': 'cv'}, {'source_column': "['cv.patient_id']", 'source_type': 'varchar(255)', 'source_nullable': 'not_null', 'target_column': 'patient_id', 'target_type': 'varchar(255)', 'target_nullable': 'not_null', 'transformation': 'cv.patient_id', 'target_table': 'cv'}, {'source_column': "['cv.trial_id']", 'source_type': 'varchar(255)', 'source_nullable': 'nan', 'target_column': 'trial_id', 'target_type': 'varchar(255)', 'target_nullable': 'nan', 'transformation': 'cv.trial_id', 'target_table': 'cv'}, {'source_column': "['cv.visit_date']", 'source_type': 'timestamp', 'source_nullable': 'nan', 'target_column': 'visit_date', 'target_type': 'timestamp', 'target_nullable': 'nan', 'transformation': 'cv.visit_date', 'target_table': 'cv'}, {'source_column': "['cv.visit_type']", 'source_type': 'varchar(255)', 'source_nullable': 'nan', 'target_column': 'visit_type', 'target_type': 'varchar(255)', 'target_nullable': 'nan', 'transformation': 'cv.visit_type', 'target_table': 'cv'}, {'source_column': "['cv.blood_pressure']", 'source_type': 'double', 'source_nullable': 'nan', 'target_column': 'blood_pressure', 'target_type': 'double', 'target_nullable': 'nan', 'transformation': 'cv.blood_pressure', 'target_table': 'cv'}, {'source_column': "['cv.heart_rate']", 'source_type': 'double', 'source_nullable': 'nan', 'target_column': 'heart_rate', 'target_type': 'double', 'target_nullable': 'nan', 'transformation': 'cv.heart_rate', 'target_table': 'cv'}, {'source_column': "['cv.weight_kg']", 'source_type': 'double', 'source_nullable': 'nan', 'target_column': 'weight_kg', 'target_type': 'double', 'target_nullable': 'nan', 'transformation': 'cv.weight_kg', 'target_table': 'cv'}, {'source_column': "['cv.physician_notes']", 'source_type': 'text', 'source_nullable': 'nan', 'target_column': 'physician_notes', 'target_type': 'text', 'target_nullable': 'nan', 'transformation': 'cv.physician_notes', 'target_table': 'cv'}, {'source_column': "['cv.source_system']", 'source_type': 'varchar(255)', 'source_nullable': 'nan', 'target_column': 'source_system', 'target_type': 'varchar(255)', 'target_nullable': 'nan', 'transformation': 'cv.source_system', 'target_table': 'cv'}, {'source_column': "['lr.lab_result_id']", 'source_type': 'varchar(255)', 'source_nullable': 'not_null', 'target_column': 'lab_result_id', 'target_type': 'varchar(255)', 'target_nullable': 'not_null', 'transformation': 'lr.lab_result_id', 'target_table': 'lr'}, {'source_column': "['lr.patient_id']", 'source_type': 'varchar(255)', 'source_nullable': 'not_null', 'target_column': 'patient_id', 'target_type': 'varchar(255)', 'target_nullable': 'not_null', 'transformation': 'lr.patient_id', 'target_table': 'lr'}, {'source_column': "['lr.sample_id']", 'source_type': 'varchar(255)', 'source_nullable': 'nan', 'target_column': 'sample_id', 'target_type': 'varchar(255)', 'target_nullable': 'nan', 'transformation': 'lr.sample_id', 'target_table': 'lr'}, {'source_column': "['lr.test_name']", 'source_type': 'varchar(255)', 'source_nullable': 'nan', 'target_column': 'test_name', 'target_type': 'varchar(255)', 'target_nullable': 'nan', 'transformation': 'lr.test_name', 'target_table': 'lr'}, {'source_column': "['lr.test_result']", 'source_type': 'double', 'source_nullable': 'nan', 'target_column': 'test_result', 'target_type': 'double', 'target_nullable': 'nan', 'transformation': 'lr.test_result', 'target_table': 'lr'}, {'source_column': "['lr.test_unit']", 'source_type': 'varchar(255)', 'source_nullable': 'nan', 'target_column': 'test_unit', 'target_type': 'varchar(255)', 'target_nullable': 'nan', 'transformation': 'lr.test_unit', 'target_table': 'lr'}, {'source_column': "['lr.reference_range']", 'source_type': 'varchar(255)', 'source_nullable': 'nan', 'target_column': 'reference_range', 'target_type': 'varchar(255)', 'target_nullable': 'nan', 'transformation': 'lr.reference_range', 'target_table': 'lr'}, {'source_column': "['lr.abnormal_flag']", 'source_type': 'varchar(255)', 'source_nullable': 'nan', 'target_column': 'abnormal_flag', 'target_type': 'varchar(255)', 'target_nullable': 'nan', 'transformation': 'lr.abnormal_flag', 'target_table': 'lr'}, {'source_column': "['lr.test_date']", 'source_type': 'timestamp', 'source_nullable': 'nan', 'target_column': 'test_date', 'target_type': 'timestamp', 'target_nullable': 'nan', 'transformation': 'lr.test_date', 'target_table': 'lr'}, {'source_column': "['lr.lab_name']", 'source_type': 'varchar(255)', 'source_nullable': 'nan', 'target_column': 'lab_name', 'target_type': 'varchar(255)', 'target_nullable': 'nan', 'transformation': 'lr.lab_name', 'target_table': 'lr'}, {'source_column': "['da.administration_id']", 'source_type': 'varchar(255)', 'source_nullable': 'not_null', 'target_column': 'administration_id', 'target_type': 'varchar(255)', 'target_nullable': 'not_null', 'transformation': 'da.administration_id', 'target_table': 'da'}, {'source_column': "['da.patient_id']", 'source_type': 'varchar(255)', 'source_nullable': 'not_null', 'target_column': 'patient_id', 'target_type': 'varchar(255)', 'target_nullable': 'not_null', 'transformation': 'da.patient_id', 'target_table': 'da'}, {'source_column': "['da.drug_code']", 'source_type': 'varchar(255)', 'source_nullable': 'nan', 'target_column': 'drug_code', 'target_type': 'varchar(255)', 'target_nullable': 'nan', 'transformation': 'da.drug_code', 'target_table': 'da'}, {'source_column': "['da.dosage_mg']", 'source_type': 'float', 'source_nullable': 'nan', 'target_column': 'dosage_mg', 'target_type': 'float', 'target_nullable': 'nan', 'transformation': 'da.dosage_mg', 'target_table': 'da'}, {'source_column': "['da.administration_date']", 'source_type': 'timestamp', 'source_nullable': 'nan', 'target_column': 'administration_date', 'target_type': 'timestamp', 'target_nullable': 'nan', 'transformation': 'da.administration_date', 'target_table': 'da'}, {'source_column': "['da.administration_route']", 'source_type': 'varchar(255)', 'source_nullable': 'nan', 'target_column': 'administration_route', 'target_type': 'varchar(255)', 'target_nullable': 'nan', 'transformation': 'da.administration_route', 'target_table': 'da'}, {'source_column': "['da.administered_by']", 'source_type': 'varchar(255)', 'source_nullable': 'nan', 'target_column': 'administered_by', 'target_type': 'varchar(255)', 'target_nullable': 'nan', 'transformation': 'da.administered_by', 'target_table': 'da'}, {'source_column': "['da.batch_number']", 'source_type': 'varchar(255)', 'source_nullable': 'nan', 'target_column': 'batch_number', 'target_type': 'varchar(255)', 'target_nullable': 'nan', 'transformation': 'da.batch_number', 'target_table': 'da'}, {'source_column': "['ae.event_id']", 'source_type': 'varchar(255)', 'source_nullable': 'not_null', 'target_column': 'event_id', 'target_type': 'varchar(255)', 'target_nullable': 'not_null', 'transformation': 'ae.event_id', 'target_table': 'ae'}, {'source_column': "['ae.patient_id']", 'source_type': 'varchar(255)', 'source_nullable': 'not_null', 'target_column': 'patient_id', 'target_type': 'varchar(255)', 'target_nullable': 'not_null', 'transformation': 'ae.patient_id', 'target_table': 'ae'}, {'source_column': "['ae.event_type']", 'source_type': 'varchar(255)', 'source_nullable': 'nan', 'target_column': 'event_type', 'target_type': 'varchar(255)', 'target_nullable': 'nan', 'transformation': 'ae.event_type', 'target_table': 'ae'}, {'source_column': "['ae.severity']", 'source_type': 'varchar(255)', 'source_nullable': 'nan', 'target_column': 'severity', 'target_type': 'varchar(255)', 'target_nullable': 'nan', 'transformation': 'ae.severity', 'target_table': 'ae'}, {'source_column': "['ae.event_start_date']", 'source_type': 'timestamp', 'source_nullable': 'nan', 'target_column': 'event_start_date', 'target_type': 'timestamp', 'target_nullable': 'nan', 'transformation': 'ae.event_start_date', 'target_table': 'ae'}, {'source_column': "['ae.event_end_date']", 'source_type': 'timestamp', 'source_nullable': 'nan', 'target_column': 'event_end_date', 'target_type': 'timestamp', 'target_nullable': 'nan', 'transformation': 'ae.event_end_date', 'target_table': 'ae'}, {'source_column': "['ae.outcome']", 'source_type': 'varchar(255)', 'source_nullable': 'nan', 'target_column': 'outcome', 'target_type': 'varchar(255)', 'target_nullable': 'nan', 'transformation': 'ae.outcome', 'target_table': 'ae'}, {'source_column': "['ae.related_to_drug']", 'source_type': 'boolean', 'source_nullable': 'nan', 'target_column': 'related_to_drug', 'target_type': 'boolean', 'target_nullable': 'nan', 'transformation': 'ae.related_to_drug', 'target_table': 'ae'}, {'source_column': "['ae.hospitalization_required']", 'source_type': 'boolean', 'source_nullable': 'nan', 'target_column': 'hospitalization_required', 'target_type': 'boolean', 'target_nullable': 'nan', 'transformation': 'ae.hospitalization_required', 'target_table': 'ae'}, {'source_column': "['ae.reported_by']", 'source_type': 'varchar(255)', 'source_nullable': 'nan', 'target_column': 'reported_by', 'target_type': 'varchar(255)', 'target_nullable': 'nan', 'transformation': 'ae.reported_by', 'target_table': 'ae'}, {'source_column': "['wm.device_record_id']", 'source_type': 'varchar(255)', 'source_nullable': 'not_null', 'target_column': 'device_record_id', 'target_type': 'varchar(255)', 'target_nullable': 'not_null', 'transformation': 'wm.device_record_id', 'target_table': 'wm'}, {'source_column': "['wm.patient_id']", 'source_type': 'varchar(255)', 'source_nullable': 'not_null', 'target_column': 'patient_id', 'target_type': 'varchar(255)', 'target_nullable': 'not_null', 'transformation': 'wm.patient_id', 'target_table': 'wm'}, {'source_column': "['wm.device_type']", 'source_type': 'varchar(255)', 'source_nullable': 'nan', 'target_column': 'device_type', 'target_type': 'varchar(255)', 'target_nullable': 'nan', 'transformation': 'wm.device_type', 'target_table': 'wm'}, {'source_column': "['wm.recorded_timestamp']", 'source_type': 'timestamp', 'source_nullable': 'not_null', 'target_column': 'recorded_timestamp', 'target_type': 'timestamp', 'target_nullable': 'not_null', 'transformation': 'wm.recorded_timestamp', 'target_table': 'wm'}, {'source_column': "['wm.glucose_level']", 'source_type': 'double', 'source_nullable': 'nan', 'target_column': 'glucose_level', 'target_type': 'double', 'target_nullable': 'nan', 'transformation': 'wm.glucose_level', 'target_table': 'wm'}, {'source_column': "['wm.step_count']", 'source_type': 'int', 'source_nullable': 'nan', 'target_column': 'step_count', 'target_type': 'int', 'target_nullable': 'nan', 'transformation': 'wm.step_count', 'target_table': 'wm'}, {'source_column': "['wm.sleep_hours']", 'source_type': 'double', 'source_nullable': 'nan', 'target_column': 'sleep_hours', 'target_type': 'double', 'target_nullable': 'nan', 'transformation': 'wm.sleep_hours', 'target_table': 'wm'}, {'source_column': "['wm.heart_rate']", 'source_type': 'double', 'source_nullable': 'nan', 'target_column': 'heart_rate', 'target_type': 'double', 'target_nullable': 'nan', 'transformation': 'wm.heart_rate', 'target_table': 'wm'}, {'source_column': "['wm.battery_status']", 'source_type': 'varchar(255)', 'source_nullable': 'nan', 'target_column': 'battery_status', 'target_type': 'varchar(255)', 'target_nullable': 'nan', 'transformation': 'wm.battery_status', 'target_table': 'wm'}], 'runtime_config': {'base_path': 's3://sdlc-agent-bucket/engineering-agent/clinical_trail/', 'target_path': 's3://sdlc-agent-bucket/engineering-agent/bronze/', 'read_format': 'csv', 'write_format': 'csv', 'write_mode': 'overwrite'}}
+metadata = {
+    'tables': [
+        {
+            'target_schema': 'bronze',
+            'target_table': 'patient_enrollment_bronze',
+            'target_alias': 'peb',
+            'mapping_details': 'patient_enrollment_raw_2000 pe',
+            'description': 'Bronze ingestion of patient enrollment records at patient-trial-site grain for Patient entity (patient_id, trial_id, site_id, patient_name, gender, date_of_birth, country, enrollment_date, consent_status, source_system). Excludes Unnamed columns.'
+        },
+        {
+            'target_schema': 'bronze',
+            'target_table': 'clinical_visit_bronze',
+            'target_alias': 'cvb',
+            'mapping_details': 'clinical_visit_raw_2000 cv',
+            'description': 'Bronze ingestion of clinical visit observations for Clinical Data entity (visit_id, patient_id, trial_id, visit_date, visit_type, blood_pressure, heart_rate, weight_kg, physician_notes, source_system). Excludes Unnamed columns.'
+        },
+        {
+            'target_schema': 'bronze',
+            'target_table': 'lab_results_bronze',
+            'target_alias': 'lrb',
+            'mapping_details': 'lab_results_raw_2000 lr',
+            'description': 'Bronze ingestion of laboratory test results for Clinical Data entity (lab_result_id, patient_id, sample_id, test_name, test_result, test_unit, reference_range, abnormal_flag, test_date, lab_name). Excludes Unnamed columns.'
+        },
+        {
+            'target_schema': 'bronze',
+            'target_table': 'drug_administration_bronze',
+            'target_alias': 'dab',
+            'mapping_details': 'drug_administration_raw_2000 da',
+            'description': 'Bronze ingestion of drug administration events supporting clinical analytics (administration_id, patient_id, drug_code, dosage_mg, administration_date, administration_route, administered_by, batch_number). Excludes Unnamed columns.'
+        },
+        {
+            'target_schema': 'bronze',
+            'target_table': 'adverse_events_bronze',
+            'target_alias': 'aeb',
+            'mapping_details': 'adverse_events_raw_2000 ae',
+            'description': 'Bronze ingestion of adverse event reports supporting clinical analytics and dashboards (event_id, patient_id, event_type, severity, event_start_date, event_end_date, outcome, related_to_drug, hospitalization_required, reported_by). Excludes Unnamed columns.'
+        },
+        {
+            'target_schema': 'bronze',
+            'target_table': 'wearable_monitoring_bronze',
+            'target_alias': 'wmb',
+            'mapping_details': 'wearable_monitoring_raw_2000 wm',
+            'description': 'Bronze ingestion of wearable monitoring time-series records supporting Patient tracking_info and analytics timestamping (device_record_id, patient_id, device_type, recorded_timestamp, glucose_level, step_count, sleep_hours, heart_rate, battery_status). Excludes Unnamed columns.'
+        }
+    ],
+    'columns': [
+        {
+            'source_column': "['pe.patient_id']",
+            'source_type': 'varchar(20)',
+            'source_nullable': 'not_null',
+            'target_column': 'patient_id',
+            'target_type': 'varchar(20)',
+            'target_nullable': 'not_null',
+            'transformation': 'pe.patient_id',
+            'target_table': 'pe'
+        },
+        {
+            'source_column': "['pe.trial_id']",
+            'source_type': 'varchar(20)',
+            'source_nullable': 'not_null',
+            'target_column': 'trial_id',
+            'target_type': 'varchar(20)',
+            'target_nullable': 'not_null',
+            'transformation': 'pe.trial_id',
+            'target_table': 'pe'
+        },
+        {
+            'source_column': "['pe.site_id']",
+            'source_type': 'varchar(20)',
+            'source_nullable': 'nan',
+            'target_column': 'site_id',
+            'target_type': 'varchar(20)',
+            'target_nullable': 'nan',
+            'transformation': 'pe.site_id',
+            'target_table': 'pe'
+        },
+        {
+            'source_column': "['pe.patient_name']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'nan',
+            'target_column': 'patient_name',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'nan',
+            'transformation': 'pe.patient_name',
+            'target_table': 'pe'
+        },
+        {
+            'source_column': "['pe.gender']",
+            'source_type': 'varchar(10)',
+            'source_nullable': 'nan',
+            'target_column': 'gender',
+            'target_type': 'varchar(10)',
+            'target_nullable': 'nan',
+            'transformation': 'pe.gender',
+            'target_table': 'pe'
+        },
+        {
+            'source_column': "['pe.date_of_birth']",
+            'source_type': 'date',
+            'source_nullable': 'nan',
+            'target_column': 'date_of_birth',
+            'target_type': 'date',
+            'target_nullable': 'nan',
+            'transformation': 'pe.date_of_birth',
+            'target_table': 'pe'
+        },
+        {
+            'source_column': "['pe.country']",
+            'source_type': 'varchar(100)',
+            'source_nullable': 'nan',
+            'target_column': 'country',
+            'target_type': 'varchar(100)',
+            'target_nullable': 'nan',
+            'transformation': 'pe.country',
+            'target_table': 'pe'
+        },
+        {
+            'source_column': "['pe.enrollment_date']",
+            'source_type': 'timestamp',
+            'source_nullable': 'nan',
+            'target_column': 'enrollment_date',
+            'target_type': 'timestamp',
+            'target_nullable': 'nan',
+            'transformation': 'pe.enrollment_date',
+            'target_table': 'pe'
+        },
+        {
+            'source_column': "['pe.consent_status']",
+            'source_type': 'varchar(20)',
+            'source_nullable': 'nan',
+            'target_column': 'consent_status',
+            'target_type': 'varchar(20)',
+            'target_nullable': 'nan',
+            'transformation': 'pe.consent_status',
+            'target_table': 'pe'
+        },
+        {
+            'source_column': "['pe.source_system']",
+            'source_type': 'varchar(50)',
+            'source_nullable': 'nan',
+            'target_column': 'source_system',
+            'target_type': 'varchar(50)',
+            'target_nullable': 'nan',
+            'transformation': 'pe.source_system',
+            'target_table': 'pe'
+        },
+        {
+            'source_column': "['cv.visit_id']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'not_null',
+            'target_column': 'visit_id',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'not_null',
+            'transformation': 'cv.visit_id',
+            'target_table': 'cv'
+        },
+        {
+            'source_column': "['cv.patient_id']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'not_null',
+            'target_column': 'patient_id',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'not_null',
+            'transformation': 'cv.patient_id',
+            'target_table': 'cv'
+        },
+        {
+            'source_column': "['cv.trial_id']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'nan',
+            'target_column': 'trial_id',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'nan',
+            'transformation': 'cv.trial_id',
+            'target_table': 'cv'
+        },
+        {
+            'source_column': "['cv.visit_date']",
+            'source_type': 'timestamp',
+            'source_nullable': 'nan',
+            'target_column': 'visit_date',
+            'target_type': 'timestamp',
+            'target_nullable': 'nan',
+            'transformation': 'cv.visit_date',
+            'target_table': 'cv'
+        },
+        {
+            'source_column': "['cv.visit_type']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'nan',
+            'target_column': 'visit_type',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'nan',
+            'transformation': 'cv.visit_type',
+            'target_table': 'cv'
+        },
+        {
+            'source_column': "['cv.blood_pressure']",
+            'source_type': 'double',
+            'source_nullable': 'nan',
+            'target_column': 'blood_pressure',
+            'target_type': 'double',
+            'target_nullable': 'nan',
+            'transformation': 'cv.blood_pressure',
+            'target_table': 'cv'
+        },
+        {
+            'source_column': "['cv.heart_rate']",
+            'source_type': 'double',
+            'source_nullable': 'nan',
+            'target_column': 'heart_rate',
+            'target_type': 'double',
+            'target_nullable': 'nan',
+            'transformation': 'cv.heart_rate',
+            'target_table': 'cv'
+        },
+        {
+            'source_column': "['cv.weight_kg']",
+            'source_type': 'double',
+            'source_nullable': 'nan',
+            'target_column': 'weight_kg',
+            'target_type': 'double',
+            'target_nullable': 'nan',
+            'transformation': 'cv.weight_kg',
+            'target_table': 'cv'
+        },
+        {
+            'source_column': "['cv.physician_notes']",
+            'source_type': 'text',
+            'source_nullable': 'nan',
+            'target_column': 'physician_notes',
+            'target_type': 'text',
+            'target_nullable': 'nan',
+            'transformation': 'cv.physician_notes',
+            'target_table': 'cv'
+        },
+        {
+            'source_column': "['cv.source_system']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'nan',
+            'target_column': 'source_system',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'nan',
+            'transformation': 'cv.source_system',
+            'target_table': 'cv'
+        },
+        {
+            'source_column': "['lr.lab_result_id']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'not_null',
+            'target_column': 'lab_result_id',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'not_null',
+            'transformation': 'lr.lab_result_id',
+            'target_table': 'lr'
+        },
+        {
+            'source_column': "['lr.patient_id']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'not_null',
+            'target_column': 'patient_id',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'not_null',
+            'transformation': 'lr.patient_id',
+            'target_table': 'lr'
+        },
+        {
+            'source_column': "['lr.sample_id']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'nan',
+            'target_column': 'sample_id',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'nan',
+            'transformation': 'lr.sample_id',
+            'target_table': 'lr'
+        },
+        {
+            'source_column': "['lr.test_name']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'nan',
+            'target_column': 'test_name',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'nan',
+            'transformation': 'lr.test_name',
+            'target_table': 'lr'
+        },
+        {
+            'source_column': "['lr.test_result']",
+            'source_type': 'double',
+            'source_nullable': 'nan',
+            'target_column': 'test_result',
+            'target_type': 'double',
+            'target_nullable': 'nan',
+            'transformation': 'lr.test_result',
+            'target_table': 'lr'
+        },
+        {
+            'source_column': "['lr.test_unit']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'nan',
+            'target_column': 'test_unit',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'nan',
+            'transformation': 'lr.test_unit',
+            'target_table': 'lr'
+        },
+        {
+            'source_column': "['lr.reference_range']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'nan',
+            'target_column': 'reference_range',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'nan',
+            'transformation': 'lr.reference_range',
+            'target_table': 'lr'
+        },
+        {
+            'source_column': "['lr.abnormal_flag']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'nan',
+            'target_column': 'abnormal_flag',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'nan',
+            'transformation': 'lr.abnormal_flag',
+            'target_table': 'lr'
+        },
+        {
+            'source_column': "['lr.test_date']",
+            'source_type': 'timestamp',
+            'source_nullable': 'nan',
+            'target_column': 'test_date',
+            'target_type': 'timestamp',
+            'target_nullable': 'nan',
+            'transformation': 'lr.test_date',
+            'target_table': 'lr'
+        },
+        {
+            'source_column': "['lr.lab_name']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'nan',
+            'target_column': 'lab_name',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'nan',
+            'transformation': 'lr.lab_name',
+            'target_table': 'lr'
+        },
+        {
+            'source_column': "['da.administration_id']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'not_null',
+            'target_column': 'administration_id',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'not_null',
+            'transformation': 'da.administration_id',
+            'target_table': 'da'
+        },
+        {
+            'source_column': "['da.patient_id']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'not_null',
+            'target_column': 'patient_id',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'not_null',
+            'transformation': 'da.patient_id',
+            'target_table': 'da'
+        },
+        {
+            'source_column': "['da.drug_code']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'nan',
+            'target_column': 'drug_code',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'nan',
+            'transformation': 'da.drug_code',
+            'target_table': 'da'
+        },
+        {
+            'source_column': "['da.dosage_mg']",
+            'source_type': 'float',
+            'source_nullable': 'nan',
+            'target_column': 'dosage_mg',
+            'target_type': 'float',
+            'target_nullable': 'nan',
+            'transformation': 'da.dosage_mg',
+            'target_table': 'da'
+        },
+        {
+            'source_column': "['da.administration_date']",
+            'source_type': 'timestamp',
+            'source_nullable': 'nan',
+            'target_column': 'administration_date',
+            'target_type': 'timestamp',
+            'target_nullable': 'nan',
+            'transformation': 'da.administration_date',
+            'target_table': 'da'
+        },
+        {
+            'source_column': "['da.administration_route']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'nan',
+            'target_column': 'administration_route',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'nan',
+            'transformation': 'da.administration_route',
+            'target_table': 'da'
+        },
+        {
+            'source_column': "['da.administered_by']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'nan',
+            'target_column': 'administered_by',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'nan',
+            'transformation': 'da.administered_by',
+            'target_table': 'da'
+        },
+        {
+            'source_column': "['da.batch_number']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'nan',
+            'target_column': 'batch_number',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'nan',
+            'transformation': 'da.batch_number',
+            'target_table': 'da'
+        },
+        {
+            'source_column': "['ae.event_id']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'not_null',
+            'target_column': 'event_id',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'not_null',
+            'transformation': 'ae.event_id',
+            'target_table': 'ae'
+        },
+        {
+            'source_column': "['ae.patient_id']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'not_null',
+            'target_column': 'patient_id',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'not_null',
+            'transformation': 'ae.patient_id',
+            'target_table': 'ae'
+        },
+        {
+            'source_column': "['ae.event_type']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'nan',
+            'target_column': 'event_type',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'nan',
+            'transformation': 'ae.event_type',
+            'target_table': 'ae'
+        },
+        {
+            'source_column': "['ae.severity']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'nan',
+            'target_column': 'severity',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'nan',
+            'transformation': 'ae.severity',
+            'target_table': 'ae'
+        },
+        {
+            'source_column': "['ae.event_start_date']",
+            'source_type': 'timestamp',
+            'source_nullable': 'nan',
+            'target_column': 'event_start_date',
+            'target_type': 'timestamp',
+            'target_nullable': 'nan',
+            'transformation': 'ae.event_start_date',
+            'target_table': 'ae'
+        },
+        {
+            'source_column': "['ae.event_end_date']",
+            'source_type': 'timestamp',
+            'source_nullable': 'nan',
+            'target_column': 'event_end_date',
+            'target_type': 'timestamp',
+            'target_nullable': 'nan',
+            'transformation': 'ae.event_end_date',
+            'target_table': 'ae'
+        },
+        {
+            'source_column': "['ae.outcome']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'nan',
+            'target_column': 'outcome',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'nan',
+            'transformation': 'ae.outcome',
+            'target_table': 'ae'
+        },
+        {
+            'source_column': "['ae.related_to_drug']",
+            'source_type': 'boolean',
+            'source_nullable': 'nan',
+            'target_column': 'related_to_drug',
+            'target_type': 'boolean',
+            'target_nullable': 'nan',
+            'transformation': 'ae.related_to_drug',
+            'target_table': 'ae'
+        },
+        {
+            'source_column': "['ae.hospitalization_required']",
+            'source_type': 'boolean',
+            'source_nullable': 'nan',
+            'target_column': 'hospitalization_required',
+            'target_type': 'boolean',
+            'target_nullable': 'nan',
+            'transformation': 'ae.hospitalization_required',
+            'target_table': 'ae'
+        },
+        {
+            'source_column': "['ae.reported_by']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'nan',
+            'target_column': 'reported_by',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'nan',
+            'transformation': 'ae.reported_by',
+            'target_table': 'ae'
+        },
+        {
+            'source_column': "['wm.device_record_id']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'not_null',
+            'target_column': 'device_record_id',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'not_null',
+            'transformation': 'wm.device_record_id',
+            'target_table': 'wm'
+        },
+        {
+            'source_column': "['wm.patient_id']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'not_null',
+            'target_column': 'patient_id',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'not_null',
+            'transformation': 'wm.patient_id',
+            'target_table': 'wm'
+        },
+        {
+            'source_column': "['wm.device_type']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'nan',
+            'target_column': 'device_type',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'nan',
+            'transformation': 'wm.device_type',
+            'target_table': 'wm'
+        },
+        {
+            'source_column': "['wm.recorded_timestamp']",
+            'source_type': 'timestamp',
+            'source_nullable': 'not_null',
+            'target_column': 'recorded_timestamp',
+            'target_type': 'timestamp',
+            'target_nullable': 'not_null',
+            'transformation': 'wm.recorded_timestamp',
+            'target_table': 'wm'
+        },
+        {
+            'source_column': "['wm.glucose_level']",
+            'source_type': 'double',
+            'source_nullable': 'nan',
+            'target_column': 'glucose_level',
+            'target_type': 'double',
+            'target_nullable': 'nan',
+            'transformation': 'wm.glucose_level',
+            'target_table': 'wm'
+        },
+        {
+            'source_column': "['wm.step_count']",
+            'source_type': 'int',
+            'source_nullable': 'nan',
+            'target_column': 'step_count',
+            'target_type': 'int',
+            'target_nullable': 'nan',
+            'transformation': 'wm.step_count',
+            'target_table': 'wm'
+        },
+        {
+            'source_column': "['wm.sleep_hours']",
+            'source_type': 'double',
+            'source_nullable': 'nan',
+            'target_column': 'sleep_hours',
+            'target_type': 'double',
+            'target_nullable': 'nan',
+            'transformation': 'wm.sleep_hours',
+            'target_table': 'wm'
+        },
+        {
+            'source_column': "['wm.heart_rate']",
+            'source_type': 'double',
+            'source_nullable': 'nan',
+            'target_column': 'heart_rate',
+            'target_type': 'double',
+            'target_nullable': 'nan',
+            'transformation': 'wm.heart_rate',
+            'target_table': 'wm'
+        },
+        {
+            'source_column': "['wm.battery_status']",
+            'source_type': 'varchar(255)',
+            'source_nullable': 'nan',
+            'target_column': 'battery_status',
+            'target_type': 'varchar(255)',
+            'target_nullable': 'nan',
+            'transformation': 'wm.battery_status',
+            'target_table': 'wm'
+        }
+    ],
+    'runtime_config': {
+        'base_path': 's3://sdlc-agent-bucket/engineering-agent/clinical_trail/',
+        'target_path': 's3://sdlc-agent-bucket/engineering-agent/bronze/',
+        'read_format': 'csv',
+        'write_format': 'csv',
+        'write_mode': 'overwrite'
+    }
+}
 
-runtime_config = metadata["runtime_config"]
-base_path = runtime_config["base_path"]
-target_path = runtime_config["target_path"]
-read_format = runtime_config["read_format"]
-write_format = runtime_config["write_format"]
-write_mode = runtime_config["write_mode"]
+read_format = metadata['runtime_config']['read_format']
+base_path = metadata['runtime_config']['base_path']
+write_format = metadata['runtime_config']['write_format']
+write_mode = metadata['runtime_config']['write_mode']
+target_path = metadata['runtime_config']['target_path']
 
-for table in metadata["tables"]:
-    mapping_details = table["mapping_details"].split()
+for table in metadata['tables']:
+    mapping_details = table['mapping_details'].split()
     source_table = mapping_details[0]
     source_alias = mapping_details[1]
-    target_table = table["target_table"]
+    target_table = table['target_table']
 
     reader = spark.read.format(read_format)
-    if read_format == "csv":
+    if read_format == 'csv':
         reader = reader.option("header", "true").option("inferSchema", "true")
 
-    df = reader.load(base_path + f"{source_table}.{read_format}")
+    df = reader.load(base_path + source_table + "." + read_format)
     df = df.alias(source_alias)
 
     transformations = []
-    for col in metadata["columns"]:
-        if col["target_table"] == source_alias:
-            rhs = col["transformation"].split("=", 1)[-1].strip()
-            target_column = col["target_column"]
+    for col_meta in metadata['columns']:
+        if col_meta['target_table'] == source_alias:
+            transformation = col_meta['transformation']
+            rhs = transformation.split('=', 1)[-1].strip()
+            target_column = col_meta['target_column']
             transformations.append(f"{rhs} as {target_column}")
 
     df = df.selectExpr(*transformations)
 
     writer = df.write.mode(write_mode).format(write_format)
-    if write_format == "csv":
+    if write_format == 'csv':
         writer = writer.option("header", "true")
 
-    writer.save(target_path + f"{target_table}.{write_format}")
+    writer.save(target_path + target_table + "." + write_format)
 
 job.commit()
