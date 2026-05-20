@@ -5,31 +5,40 @@ from awsglue.job import Job
 from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 
+# -------------------------------------------------------------------
+# Initialize Glue Job
+# -------------------------------------------------------------------
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
 
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
+
 job = Job(glueContext)
 job.init(args["JOB_NAME"], args)
 
-SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
-TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
+# -------------------------------------------------------------------
+# Paths and Config
+# -------------------------------------------------------------------
+SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver"
+TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold"
 FILE_FORMAT = "csv"
 
 # -------------------------------------------------------------------
-# Read Source Tables
+# Read Silver Tables
 # -------------------------------------------------------------------
 pds_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .load(f"{SOURCE_PATH}/patient_data_silver.{FILE_FORMAT}/")
 )
+
 hes_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .load(f"{SOURCE_PATH}/healthcare_events_silver.{FILE_FORMAT}/")
 )
+
 ctds_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
@@ -44,7 +53,7 @@ hes_df.createOrReplaceTempView("healthcare_events_silver")
 ctds_df.createOrReplaceTempView("clinical_trial_data_silver")
 
 # -------------------------------------------------------------------
-# gold.gold_patient_data
+# GOLD TABLE : gold_patient_data
 # -------------------------------------------------------------------
 gold_patient_data_df = spark.sql(
     """
@@ -61,22 +70,22 @@ gold_patient_data_df = spark.sql(
 (
     gold_patient_data_df.coalesce(1)
     .write.mode("overwrite")
-    .format("csv")
+    .format(FILE_FORMAT)
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_patient_data.csv")
+    .save(f"{TARGET_PATH}/gold_patient_data.{FILE_FORMAT}")
 )
 
 # -------------------------------------------------------------------
-# gold.gold_healthcare_events
+# GOLD TABLE : gold_healthcare_events
 # -------------------------------------------------------------------
 gold_healthcare_events_df = spark.sql(
     """
     SELECT
         CAST(hes.patient_id AS STRING) AS patient_id,
-        CAST(hes.event_start_date AS TIMESTAMP) AS event_date,
+        CAST(hes.event_date AS TIMESTAMP) AS event_date,
         CAST(hes.event_type AS STRING) AS event_type,
         CAST(hes.event_description AS STRING) AS event_description,
-        CAST(hes.reported_by AS STRING) AS healthcare_provider
+        CAST(hes.healthcare_provider AS STRING) AS healthcare_provider
     FROM healthcare_events_silver hes
     """
 )
@@ -84,13 +93,13 @@ gold_healthcare_events_df = spark.sql(
 (
     gold_healthcare_events_df.coalesce(1)
     .write.mode("overwrite")
-    .format("csv")
+    .format(FILE_FORMAT)
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_healthcare_events.csv")
+    .save(f"{TARGET_PATH}/gold_healthcare_events.{FILE_FORMAT}")
 )
 
 # -------------------------------------------------------------------
-# gold.gold_clinical_trial_data
+# GOLD TABLE : gold_clinical_trial_data
 # -------------------------------------------------------------------
 gold_clinical_trial_data_df = spark.sql(
     """
@@ -98,8 +107,8 @@ gold_clinical_trial_data_df = spark.sql(
         CAST(ctds.patient_id AS STRING) AS patient_id,
         CAST(ctds.trial_id AS STRING) AS trial_id,
         CAST(ctds.enrollment_date AS TIMESTAMP) AS enrollment_date,
-        CAST(ctds.consent_status AS STRING) AS trial_status,
-        CAST(ctds.visit_type AS STRING) AS results
+        CAST(ctds.trial_status AS STRING) AS trial_status,
+        CAST(ctds.results AS STRING) AS results
     FROM clinical_trial_data_silver ctds
     """
 )
@@ -107,9 +116,12 @@ gold_clinical_trial_data_df = spark.sql(
 (
     gold_clinical_trial_data_df.coalesce(1)
     .write.mode("overwrite")
-    .format("csv")
+    .format(FILE_FORMAT)
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_clinical_trial_data.csv")
+    .save(f"{TARGET_PATH}/gold_clinical_trial_data.{FILE_FORMAT}")
 )
 
+# -------------------------------------------------------------------
+# Commit Job
+# -------------------------------------------------------------------
 job.commit()
