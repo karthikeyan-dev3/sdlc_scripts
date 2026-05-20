@@ -1,235 +1,218 @@
 import sys
 from awsglue.context import GlueContext
+from awsglue.job import Job
 from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
+from pyspark.sql import SparkSession
 
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
+
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args["JOB_NAME"], args)
 
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 FILE_FORMAT = "csv"
 
-sc = SparkContext()
-glueContext = GlueContext(sc)
-spark = glueContext.spark_session
-spark.sparkContext.setLogLevel("WARN")
+spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
 
-# ------------------------------------------------------------------------------------
-# Read source tables from S3
-# ------------------------------------------------------------------------------------
-peb_df = (
+# ============================================================
+# Source Reads (Bronze)
+# ============================================================
+patient_enrollment_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .load(f"{SOURCE_PATH}/patient_enrollment_bronze.{FILE_FORMAT}/")
 )
-peb_df.createOrReplaceTempView("patient_enrollment_bronze")
+patient_enrollment_bronze_df.createOrReplaceTempView("patient_enrollment_bronze")
 
-cvb_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/clinical_visit_bronze.{FILE_FORMAT}/")
-)
-cvb_df.createOrReplaceTempView("clinical_visit_bronze")
-
-# ------------------------------------------------------------------------------------
-# Target: clinical_trial_patient_status_silver (ctps)
-# Source: bronze.patient_enrollment_bronze (peb) with dedup via ROW_NUMBER
-# ------------------------------------------------------------------------------------
-ctps_sql = """
-WITH ranked AS (
+# ============================================================
+# Target: silver.patient_enrollment_silver
+# ============================================================
+patient_enrollment_silver_sql = """
+WITH standardized AS (
   SELECT
-    peb.trial_id AS trial_id,
-    peb.site_id AS site_id,
-    peb.patient_id AS patient_id,
-    UPPER(TRIM(peb.country)) AS country,
-    CAST(peb.enrollment_date AS TIMESTAMP) AS enrollment_date,
-    UPPER(TRIM(peb.consent_status)) AS consent_status,
-    CASE
-      WHEN UPPER(TRIM(peb.consent_status)) IN ('WITHDRAWN','DROPPED','DROPOUT') THEN 'DROPPED_OUT'
-      WHEN UPPER(TRIM(peb.consent_status)) IN ('COMPLETED','COMPLETE') THEN 'COMPLETED'
-      WHEN UPPER(TRIM(peb.consent_status)) IN ('CONSENTED','ENROLLED','ACTIVE') THEN 'ACTIVE'
-      ELSE 'UNKNOWN'
-    END AS enrollment_status,
-    ROW_NUMBER() OVER (
-      PARTITION BY peb.trial_id, peb.site_id, peb.patient_id
-      ORDER BY peb.enrollment_date DESC, peb.source_system DESC
-    ) AS rn
+    upper(trim(peb.patient_id)) AS patient_id,
+    upper(trim(peb.trial_id)) AS trial_id,
+    upper(trim(peb.site_id)) AS site_id,
+    upper(trim(peb.country)) AS country,
+    cast(peb.enrollment_date as timestamp) AS enrollment_date,
+    case
+      when upper(trim(peb.consent_status)) in ('CONSENTED','NOT_CONSENTED','WITHDRAWN','UNKNOWN')
+        then upper(trim(peb.consent_status))
+      else 'UNKNOWN'
+    end AS consent_status,
+    upper(trim(peb.gender)) AS gender,
+    peb.date_of_birth AS date_of_birth,
+    peb.source_system AS source_system
   FROM patient_enrollment_bronze peb
+),
+deduped AS (
+  SELECT
+    patient_id,
+    trial_id,
+    site_id,
+    country,
+    enrollment_date,
+    consent_status,
+    gender,
+    date_of_birth,
+    source_system,
+    row_number() OVER (
+      PARTITION BY patient_id, trial_id, site_id, country, consent_status, gender, date_of_birth
+      ORDER BY enrollment_date DESC, source_system DESC
+    ) AS rn
+  FROM standardized
 )
 SELECT
+  patient_id,
   trial_id,
   site_id,
-  patient_id,
   country,
   enrollment_date,
   consent_status,
-  enrollment_status
-FROM ranked
+  gender,
+  date_of_birth,
+  source_system
+FROM deduped
 WHERE rn = 1
 """
-ctps_df = spark.sql(ctps_sql)
-ctps_df.createOrReplaceTempView("clinical_trial_patient_status_silver")
+
+patient_enrollment_silver_df = spark.sql(patient_enrollment_silver_sql)
+patient_enrollment_silver_df.createOrReplaceTempView("patient_enrollment_silver")
 
 (
-    ctps_df.coalesce(1)
+    patient_enrollment_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/clinical_trial_patient_status_silver.csv")
+    .save(f"{TARGET_PATH}/patient_enrollment_silver.csv")
 )
 
-# ------------------------------------------------------------------------------------
-# Target: patient_visit_tracking_silver (pvts)
-# Source: bronze.clinical_visit_bronze (cvb) INNER JOIN silver.ctps with dedup
-# ------------------------------------------------------------------------------------
-pvts_sql = """
-WITH joined AS (
+# ============================================================
+# Target: silver.trial_site_rollup_silver
+# ============================================================
+trial_site_rollup_silver_sql = """
+WITH base AS (
   SELECT
-    cvb.trial_id AS trial_id,
-    cvb.patient_id AS patient_id,
-    ctps.site_id AS site_id,
-    cvb.visit_id AS visit_id,
-    CAST(cvb.visit_date AS TIMESTAMP) AS visit_date,
-    UPPER(TRIM(cvb.visit_type)) AS visit_type,
-    CASE
-      WHEN cvb.visit_date IS NOT NULL THEN 'COMPLETED'
-      ELSE 'UNKNOWN'
-    END AS visit_status,
-    ROW_NUMBER() OVER (
-      PARTITION BY cvb.trial_id, cvb.patient_id, cvb.visit_id
-      ORDER BY cvb.visit_date DESC, cvb.source_system DESC
-    ) AS rn
-  FROM clinical_visit_bronze cvb
-  INNER JOIN clinical_trial_patient_status_silver ctps
-    ON cvb.trial_id = ctps.trial_id
-   AND cvb.patient_id = ctps.patient_id
+    pes.trial_id AS trial_id,
+    pes.country AS country,
+    pes.site_id AS site_id,
+    count(distinct case when pes.consent_status='CONSENTED' then pes.patient_id end) AS total_enrolled_patients,
+    count(distinct case when pes.consent_status in ('WITHDRAWN','NOT_CONSENTED') then pes.patient_id end) AS dropout_count,
+    count(distinct pes.site_id) over (partition by pes.trial_id, pes.country) AS total_sites,
+    current_timestamp() AS metric_aggregation_time
+  FROM patient_enrollment_silver pes
+  GROUP BY
+    pes.trial_id,
+    pes.country,
+    pes.site_id
 )
 SELECT
   trial_id,
-  patient_id,
+  country,
   site_id,
-  visit_id,
-  visit_date,
-  visit_type,
-  visit_status
-FROM joined
-WHERE rn = 1
+  total_enrolled_patients,
+  dropout_count,
+  total_sites,
+  metric_aggregation_time
+FROM base
 """
-pvts_df = spark.sql(pvts_sql)
-pvts_df.createOrReplaceTempView("patient_visit_tracking_silver")
+
+trial_site_rollup_silver_df = spark.sql(trial_site_rollup_silver_sql)
+trial_site_rollup_silver_df.createOrReplaceTempView("trial_site_rollup_silver")
 
 (
-    pvts_df.coalesce(1)
+    trial_site_rollup_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/patient_visit_tracking_silver.csv")
+    .save(f"{TARGET_PATH}/trial_site_rollup_silver.csv")
 )
 
-# ------------------------------------------------------------------------------------
-# Target: clinical_trial_kpi_daily_silver (ctkds)
-# Source: silver.ctps LEFT JOIN silver.pvts GROUP BY trial,country,site,date
-# ------------------------------------------------------------------------------------
-ctkds_sql = """
+# ============================================================
+# Target: silver.site_performance_silver
+# ============================================================
+site_performance_silver_sql = """
 SELECT
-  ctps.trial_id AS trial_id,
-  ctps.country AS country,
-  ctps.site_id AS site_id,
-  CAST(COALESCE(pvts.visit_date, ctps.enrollment_date) AS DATE) AS date,
-  COUNT(DISTINCT ctps.patient_id) AS total_enrolled_patients,
-  COUNT(DISTINCT CASE WHEN ctps.enrollment_status = 'ACTIVE' THEN ctps.patient_id END) AS active_patients,
-  COUNT(DISTINCT CASE WHEN ctps.enrollment_status = 'DROPPED_OUT' THEN ctps.patient_id END) AS patient_dropout_count,
-  COUNT(DISTINCT CASE WHEN pvts.visit_status = 'COMPLETED' THEN pvts.visit_id END) AS completed_visit_count,
-  CASE
-    WHEN COUNT(DISTINCT pvts.visit_id) = 0 THEN NULL
-    ELSE (COUNT(DISTINCT CASE WHEN pvts.visit_status = 'COMPLETED' THEN pvts.visit_id END) * 100.0)
-         / COUNT(DISTINCT pvts.visit_id)
-  END AS visit_completion_percentage
-FROM clinical_trial_patient_status_silver ctps
-LEFT JOIN patient_visit_tracking_silver pvts
-  ON ctps.trial_id = pvts.trial_id
- AND ctps.site_id = pvts.site_id
- AND ctps.patient_id = pvts.patient_id
-GROUP BY
-  ctps.trial_id,
-  ctps.country,
-  ctps.site_id,
-  CAST(COALESCE(pvts.visit_date, ctps.enrollment_date) AS DATE)
+  tsr.trial_id AS trial_id,
+  tsr.country AS country,
+  tsr.site_id AS site_id,
+  case
+    when percent_rank() over (partition by tsr.trial_id, tsr.country order by tsr.total_enrolled_patients asc) <= 0.2
+      or (tsr.dropout_count > 0.2 * nullif(tsr.total_enrolled_patients + tsr.dropout_count, 0))
+      then true
+    else false
+  end AS is_underperforming,
+  case
+    when percent_rank() over (partition by tsr.trial_id, tsr.country order by tsr.total_enrolled_patients desc) <= 0.2
+      and (tsr.dropout_count <= 0.1 * nullif(tsr.total_enrolled_patients + tsr.dropout_count, 0))
+      then 'HIGH'
+    when percent_rank() over (partition by tsr.trial_id, tsr.country order by tsr.total_enrolled_patients asc) <= 0.2
+      or (tsr.dropout_count > 0.1 * nullif(tsr.total_enrolled_patients + tsr.dropout_count, 0))
+      then 'LOW'
+    else 'MEDIUM'
+  end AS performance_rating,
+  date_trunc('day', tsr.metric_aggregation_time) AS summary_time_period
+FROM trial_site_rollup_silver tsr
 """
-ctkds_df = spark.sql(ctkds_sql)
-ctkds_df.createOrReplaceTempView("clinical_trial_kpi_daily_silver")
+
+site_performance_silver_df = spark.sql(site_performance_silver_sql)
+site_performance_silver_df.createOrReplaceTempView("site_performance_silver")
 
 (
-    ctkds_df.coalesce(1)
+    site_performance_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/clinical_trial_kpi_daily_silver.csv")
+    .save(f"{TARGET_PATH}/site_performance_silver.csv")
 )
 
-# ------------------------------------------------------------------------------------
-# Target: site_performance_metrics_daily_silver (spmds)
-# Source: silver.ctkds GROUP BY site_id,date
-# ------------------------------------------------------------------------------------
-spmds_sql = """
+# ============================================================
+# Target: silver.reporting_metrics_silver
+# ============================================================
+reporting_metrics_silver_sql = """
+WITH base AS (
+  SELECT
+    current_timestamp() AS update_timestamp
+  FROM patient_enrollment_silver pes
+  LIMIT 1
+),
+metrics AS (
+  SELECT
+    b.update_timestamp AS update_timestamp,
+    datediff('minute', max(pes.enrollment_date), b.update_timestamp) AS reporting_latency_minutes,
+    100.0 * sum(case when pes.enrollment_date >= b.update_timestamp - interval '60 minutes' then 1 else 0 end) / nullif(count(1), 0) AS data_freshness_percent,
+    0.0 AS dashboard_usage_percent,
+    100.0 - (
+      (100.0 * sum(case when pes.country is null then 1 else 0 end) / nullif(count(1), 0)) * 0.30
+      + (100.0 * sum(case when pes.enrollment_date is null then 1 else 0 end) / nullif(count(1), 0)) * 0.40
+      + (100.0 * sum(case when pes.consent_status not in ('CONSENTED','NOT_CONSENTED','WITHDRAWN','UNKNOWN') then 1 else 0 end) / nullif(count(1), 0)) * 0.30
+    ) AS data_quality_score
+  FROM patient_enrollment_silver pes
+  CROSS JOIN base b
+)
 SELECT
-  ctkds.site_id AS site_id,
-  ctkds.date AS date,
-  CASE
-    WHEN SUM(ctkds.total_enrolled_patients) = 0 THEN NULL
-    ELSE ((SUM(ctkds.total_enrolled_patients) - SUM(ctkds.patient_dropout_count)) * 1.0)
-         / SUM(ctkds.total_enrolled_patients)
-  END AS patient_retention_rate,
-  AVG(ctkds.visit_completion_percentage) AS visit_adherence_rate
-FROM clinical_trial_kpi_daily_silver ctkds
-GROUP BY
-  ctkds.site_id,
-  ctkds.date
+  update_timestamp,
+  reporting_latency_minutes,
+  data_freshness_percent,
+  dashboard_usage_percent,
+  data_quality_score
+FROM metrics
 """
-spmds_df = spark.sql(spmds_sql)
-spmds_df.createOrReplaceTempView("site_performance_metrics_daily_silver")
+
+reporting_metrics_silver_df = spark.sql(reporting_metrics_silver_sql)
+reporting_metrics_silver_df.createOrReplaceTempView("reporting_metrics_silver")
 
 (
-    spmds_df.coalesce(1)
+    reporting_metrics_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/site_performance_metrics_daily_silver.csv")
+    .save(f"{TARGET_PATH}/reporting_metrics_silver.csv")
 )
 
-# ------------------------------------------------------------------------------------
-# Target: historical_kpi_records_silver (hkrs)
-# Source: silver.ctkds GROUP BY trial_id,date
-# ------------------------------------------------------------------------------------
-hkrs_sql = """
-SELECT
-  ctkds.trial_id AS trial_id,
-  ctkds.date AS date,
-  SUM(ctkds.total_enrolled_patients) AS total_enrolled_patients,
-  SUM(ctkds.patient_dropout_count) AS patient_dropout_count,
-  AVG(ctkds.visit_completion_percentage) AS visit_completion_percentage,
-  CASE
-    WHEN (
-      SUM(CASE WHEN ctkds.total_enrolled_patients IS NULL THEN 1 ELSE 0 END) +
-      SUM(CASE WHEN ctkds.visit_completion_percentage IS NULL THEN 1 ELSE 0 END)
-    ) = 0 THEN 100
-    ELSE
-      100
-      - 50 * (SUM(CASE WHEN ctkds.total_enrolled_patients IS NULL THEN 1 ELSE 0 END) > 0)
-      - 50 * (SUM(CASE WHEN ctkds.visit_completion_percentage IS NULL THEN 1 ELSE 0 END) > 0)
-  END AS data_quality_score
-FROM clinical_trial_kpi_daily_silver ctkds
-GROUP BY
-  ctkds.trial_id,
-  ctkds.date
-"""
-hkrs_df = spark.sql(hkrs_sql)
-hkrs_df.createOrReplaceTempView("historical_kpi_records_silver")
-
-(
-    hkrs_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/historical_kpi_records_silver.csv")
-)
+job.commit()
