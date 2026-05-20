@@ -17,166 +17,137 @@ SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-# -------------------------
-# Read source tables (S3)
-# -------------------------
-pis_df = (
-    spark.read
-    .format(FILE_FORMAT)
+# ----------------------------
+# 1) Read source tables from S3
+# ----------------------------
+sales_store_product_daily_silver_df = (
+    spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/patient_identity_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/sales_store_product_daily_silver.{FILE_FORMAT}/")
 )
 
-pas_df = (
-    spark.read
-    .format(FILE_FORMAT)
+stores_silver_df = (
+    spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/patient_analytics_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/stores_silver.{FILE_FORMAT}/")
 )
 
-pces_df = (
-    spark.read
-    .format(FILE_FORMAT)
+products_silver_df = (
+    spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/patient_clinical_events_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/products_silver.{FILE_FORMAT}/")
 )
 
-pdms_df = (
-    spark.read
-    .format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/patient_dashboard_metrics_silver.{FILE_FORMAT}/")
-)
-
-rls_df = (
-    spark.read
-    .format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/report_latency_silver.{FILE_FORMAT}/")
-)
-
-dpms_df = (
-    spark.read
-    .format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/data_process_monitor_silver.{FILE_FORMAT}/")
-)
-
-# -------------------------
-# Create temp views
-# -------------------------
-pis_df.createOrReplaceTempView("pis")
-pas_df.createOrReplaceTempView("pas")
-pces_df.createOrReplaceTempView("pces")
-pdms_df.createOrReplaceTempView("pdms")
-rls_df.createOrReplaceTempView("rls")
-dpms_df.createOrReplaceTempView("dpms")
+# ----------------------------
+# 2) Create temp views
+# ----------------------------
+sales_store_product_daily_silver_df.createOrReplaceTempView("sales_store_product_daily_silver")
+stores_silver_df.createOrReplaceTempView("stores_silver")
+products_silver_df.createOrReplaceTempView("products_silver")
 
 # ============================================================
-# Target: gold.gold_patient_entity
-# mapping: silver.patient_identity_silver pis LEFT JOIN silver.patient_analytics_silver pas ON pis.patient_id = pas.patient_id
+# TARGET TABLE: gold_store_performance
 # ============================================================
-gold_patient_entity_df = spark.sql("""
-WITH pas_ranked AS (
-  SELECT
-    pas.patient_id AS patient_id,
-    ROW_NUMBER() OVER (
-      PARTITION BY pas.patient_id
-      ORDER BY CAST(pas.record_timestamp AS timestamp) DESC
-    ) AS rn
-  FROM pas
+gold_store_performance_df = spark.sql(
+    """
+    SELECT
+        CAST(sspd.store_id AS STRING)                         AS store_id,
+        DATE(sspd.reporting_date)                             AS reporting_date,
+        CAST(ss.city AS STRING)                               AS city,
+        CAST(ss.state AS STRING)                              AS state,
+        CAST(ss.store_type AS STRING)                         AS store_type,
+        CAST(SUM(CAST(sspd.revenue AS DOUBLE)) AS DOUBLE)     AS revenue,
+        CAST(SUM(CAST(sspd.quantity_sold AS INT)) AS INT)     AS quantity_sold
+    FROM sales_store_product_daily_silver sspd
+    INNER JOIN stores_silver ss
+        ON sspd.store_id = ss.store_id
+    GROUP BY
+        sspd.store_id,
+        sspd.reporting_date,
+        ss.city,
+        ss.state,
+        ss.store_type
+    """
 )
-SELECT
-  CAST(pis.patient_id AS string) AS patient_id,
-  CAST(pis.healthcare_system AS string) AS healthcare_system
-FROM pis
-LEFT JOIN pas_ranked
-  ON CAST(pis.patient_id AS string) = CAST(pas_ranked.patient_id AS string)
- AND pas_ranked.rn = 1
-""")
 
+gold_store_performance_output = f"{TARGET_PATH}/gold_store_performance.csv"
 (
-    gold_patient_entity_df
-    .coalesce(1)
-    .write
-    .mode("overwrite")
+    gold_store_performance_df.coalesce(1)
+    .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_patient_entity.csv")
+    .save(gold_store_performance_output)
 )
 
 # ============================================================
-# Target: gold.gold_clinical_data_entity
-# mapping: silver.patient_identity_silver pis LEFT JOIN silver.patient_clinical_events_silver pces ON pis.patient_id = pces.patient_id LEFT JOIN silver.patient_dashboard_metrics_silver pdms ON pis.patient_id = pdms.patient_id
+# TARGET TABLE: gold_product_performance
 # ============================================================
-gold_clinical_data_entity_df = spark.sql("""
-SELECT
-  CAST(pis.patient_id AS string) AS patient_id,
-  CAST(pis.healthcare_system AS string) AS healthcare_system,
-  CAST(pces.record_timestamp AS timestamp) AS record_timestamp
-FROM pis
-LEFT JOIN pces
-  ON CAST(pis.patient_id AS string) = CAST(pces.patient_id AS string)
-LEFT JOIN pdms
-  ON CAST(pis.patient_id AS string) = CAST(pdms.patient_id AS string)
-""")
+gold_product_performance_df = spark.sql(
+    """
+    SELECT
+        CAST(sspd.product_id AS STRING)                       AS product_id,
+        DATE(sspd.reporting_date)                             AS reporting_date,
+        CAST(ps.product_name AS STRING)                       AS product_name,
+        CAST(ps.category AS STRING)                           AS category,
+        CAST(ps.brand AS STRING)                              AS brand,
+        CAST(ps.price AS FLOAT)                               AS price,
+        CAST(SUM(CAST(sspd.revenue AS DOUBLE)) AS DOUBLE)     AS revenue,
+        CAST(SUM(CAST(sspd.quantity_sold AS INT)) AS INT)     AS quantity_sold
+    FROM sales_store_product_daily_silver sspd
+    INNER JOIN products_silver ps
+        ON sspd.product_id = ps.product_id
+    GROUP BY
+        sspd.product_id,
+        sspd.reporting_date,
+        ps.product_name,
+        ps.category,
+        ps.brand,
+        ps.price
+    """
+)
 
+gold_product_performance_output = f"{TARGET_PATH}/gold_product_performance.csv"
 (
-    gold_clinical_data_entity_df
-    .coalesce(1)
-    .write
-    .mode("overwrite")
+    gold_product_performance_df.coalesce(1)
+    .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_clinical_data_entity.csv")
+    .save(gold_product_performance_output)
 )
 
 # ============================================================
-# Target: gold.gold_analytics_entity
-# mapping: silver.patient_identity_silver pis LEFT JOIN silver.patient_clinical_events_silver pces ON pis.patient_id = pces.patient_id LEFT JOIN silver.report_latency_silver rls ON pis.patient_id = rls.patient_id LEFT JOIN silver.data_process_monitor_silver dpms ON dpms.pipeline_id = 'patient_360_build'
+# TARGET TABLE: gold_aggregated_sales
 # ============================================================
-gold_analytics_entity_df = spark.sql("""
-SELECT
-  CAST(pis.patient_id AS string) AS patient_id,
-  CAST(pces.record_timestamp AS timestamp) AS record_timestamp,
-  CAST(dpms.data_updated_timestamp AS timestamp) AS data_updated_timestamp
-FROM pis
-LEFT JOIN pces
-  ON CAST(pis.patient_id AS string) = CAST(pces.patient_id AS string)
-LEFT JOIN rls
-  ON CAST(pis.patient_id AS string) = CAST(rls.patient_id AS string)
-LEFT JOIN dpms
-  ON CAST(dpms.pipeline_id AS string) = 'patient_360_build'
-""")
-
-(
-    gold_analytics_entity_df
-    .coalesce(1)
-    .write
-    .mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_analytics_entity.csv")
+gold_aggregated_sales_df = spark.sql(
+    """
+    SELECT
+        CAST(sspd.store_id AS STRING)           AS store_id,
+        CAST(sspd.product_id AS STRING)         AS product_id,
+        DATE(sspd.reporting_date)               AS reporting_date,
+        CAST(sspd.revenue AS DOUBLE)            AS revenue,
+        CAST(sspd.quantity_sold AS INT)         AS quantity_sold,
+        CAST(ss.city AS STRING)                 AS city,
+        CAST(ss.state AS STRING)                AS state,
+        CAST(ss.store_type AS STRING)           AS store_type,
+        CAST(ps.product_name AS STRING)         AS product_name,
+        CAST(ps.category AS STRING)             AS category,
+        CAST(ps.brand AS STRING)                AS brand,
+        CAST(ps.price AS FLOAT)                 AS price
+    FROM sales_store_product_daily_silver sspd
+    INNER JOIN stores_silver ss
+        ON sspd.store_id = ss.store_id
+    INNER JOIN products_silver ps
+        ON sspd.product_id = ps.product_id
+    """
 )
 
-# ============================================================
-# Target: gold.gold_monitoring_entity
-# mapping: silver.data_process_monitor_silver dpms
-# ============================================================
-gold_monitoring_entity_df = spark.sql("""
-SELECT
-  CAST(dpms.data_updated_timestamp AS timestamp) AS data_updated_timestamp
-FROM dpms
-""")
-
+gold_aggregated_sales_output = f"{TARGET_PATH}/gold_aggregated_sales.csv"
 (
-    gold_monitoring_entity_df
-    .coalesce(1)
-    .write
-    .mode("overwrite")
+    gold_aggregated_sales_df.coalesce(1)
+    .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_monitoring_entity.csv")
+    .save(gold_aggregated_sales_output)
 )
 
 job.commit()
