@@ -1,10 +1,12 @@
 import sys
-from pyspark.context import SparkContext
 from awsglue.context import GlueContext
 from awsglue.job import Job
 from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from pyspark.sql import SparkSession
 
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
+
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
@@ -15,209 +17,231 @@ SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 FILE_FORMAT = "csv"
 
-# -----------------------------
-# 1) Read source tables (Bronze)
-# -----------------------------
-peb_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/patient_enrollment_bronze.{FILE_FORMAT}/")
-)
-cvb_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/clinical_visit_bronze.{FILE_FORMAT}/")
-)
-lrb_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/lab_results_bronze.{FILE_FORMAT}/")
-)
-dab_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/drug_administration_bronze.{FILE_FORMAT}/")
-)
-aeb_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/adverse_events_bronze.{FILE_FORMAT}/")
-)
-wmb_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/wearable_monitoring_bronze.{FILE_FORMAT}/")
-)
+# =========================
+# Read Source Tables (Bronze)
+# =========================
 
-# -----------------------------
-# 2) Create temp views
-# -----------------------------
-peb_df.createOrReplaceTempView("peb")
-cvb_df.createOrReplaceTempView("cvb")
-lrb_df.createOrReplaceTempView("lrb")
-dab_df.createOrReplaceTempView("dab")
-aeb_df.createOrReplaceTempView("aeb")
-wmb_df.createOrReplaceTempView("wmb")
+stores_bronze_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/stores_bronze.{FILE_FORMAT}/")
+)
+stores_bronze_df.createOrReplaceTempView("stores_bronze")
 
-# ============================================================
-# TABLE: silver.patient_identity_silver
-# ============================================================
-patient_identity_sql = """
+products_bronze_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/products_bronze.{FILE_FORMAT}/")
+)
+products_bronze_df.createOrReplaceTempView("products_bronze")
+
+sales_transactions_bronze_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/sales_transactions_bronze.{FILE_FORMAT}/")
+)
+sales_transactions_bronze_df.createOrReplaceTempView("sales_transactions_bronze")
+
+# =========================
+# Target: silver.stores_silver
+# =========================
+
+stores_silver_sql = """
 WITH base AS (
   SELECT
-    UPPER(TRIM(peb.patient_id)) AS patient_id,
-    TRIM(peb.source_system) AS healthcare_system,
-    TRIM(peb.trial_id) AS trial_id,
-    TRIM(peb.site_id) AS site_id,
-    CAST(peb.enrollment_date AS TIMESTAMP) AS enrollment_date,
-    TRIM(peb.consent_status) AS consent_status
-  FROM peb
-  WHERE peb.patient_id IS NOT NULL
+    sb.store_id AS store_id,
+    sb.store_name AS store_name,
+    sb.city AS city,
+    sb.state AS state,
+    sb.store_type AS store_type,
+    CAST(sb.open_date AS date) AS open_date
+  FROM stores_bronze sb
 ),
 dedup AS (
   SELECT
-    patient_id,
-    healthcare_system,
-    trial_id,
-    site_id,
-    enrollment_date,
-    consent_status,
+    store_id,
+    store_name,
+    city,
+    state,
+    store_type,
+    open_date,
     ROW_NUMBER() OVER (
-      PARTITION BY patient_id
-      ORDER BY enrollment_date DESC NULLS LAST
+      PARTITION BY store_id
+      ORDER BY open_date DESC
     ) AS rn
   FROM base
 )
 SELECT
-  patient_id,
-  healthcare_system,
-  trial_id,
-  site_id,
-  enrollment_date,
-  consent_status
+  store_id,
+  store_name,
+  city,
+  state,
+  store_type,
+  open_date
 FROM dedup
 WHERE rn = 1
 """
-patient_identity_df = spark.sql(patient_identity_sql)
+
+stores_silver_df = spark.sql(stores_silver_sql)
+stores_silver_df.createOrReplaceTempView("stores_silver")
 
 (
-    patient_identity_df.coalesce(1)
+    stores_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/patient_identity_silver.csv")
+    .save(f"{TARGET_PATH}/stores_silver.csv")
 )
 
-patient_identity_df.createOrReplaceTempView("pis")
+# =========================
+# Target: silver.products_silver
+# =========================
 
-# ============================================================
-# TABLE: silver.patient_clinical_events_silver
-# NOTE: UDT does not define target columns for this table.
-#       Per requirement, do not invent columns; write empty schema result.
-# ============================================================
-patient_clinical_events_sql = """
+products_silver_sql = """
+WITH base AS (
+  SELECT
+    pb.product_id AS product_id,
+    pb.product_name AS product_name,
+    pb.category AS category,
+    pb.brand AS brand,
+    CAST(pb.price AS double) AS price,
+    CAST(pb.is_active AS boolean) AS is_active
+  FROM products_bronze pb
+  WHERE COALESCE(CAST(pb.is_active AS boolean), false) = true
+),
+dedup AS (
+  SELECT
+    product_id,
+    product_name,
+    category,
+    brand,
+    price,
+    is_active,
+    ROW_NUMBER() OVER (
+      PARTITION BY product_id
+      ORDER BY product_id
+    ) AS rn
+  FROM base
+)
 SELECT
-  CAST(NULL AS STRING) AS patient_id
-WHERE 1 = 0
+  product_id,
+  product_name,
+  category,
+  brand,
+  price,
+  is_active
+FROM dedup
+WHERE rn = 1
 """
-patient_clinical_events_df = spark.sql(patient_clinical_events_sql)
+
+products_silver_df = spark.sql(products_silver_sql)
+products_silver_df.createOrReplaceTempView("products_silver")
 
 (
-    patient_clinical_events_df.coalesce(1)
+    products_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/patient_clinical_events_silver.csv")
+    .save(f"{TARGET_PATH}/products_silver.csv")
 )
 
-patient_clinical_events_df.createOrReplaceTempView("pces")
+# =========================
+# Target: silver.sales_transactions_silver
+# =========================
 
-# ============================================================
-# TABLE: silver.patient_dashboard_metrics_silver
-# NOTE: UDT does not define target columns for this table.
-#       Per requirement, do not invent columns; write empty schema result.
-# ============================================================
-patient_dashboard_metrics_sql = """
+sales_transactions_silver_sql = """
+WITH base AS (
+  SELECT
+    stb.transaction_id AS transaction_id,
+    stb.store_id AS store_id,
+    stb.product_id AS product_id,
+    CAST(stb.quantity AS int) AS quantity,
+    CAST(stb.sale_amount AS double) AS sale_amount,
+    CAST(stb.transaction_time AS timestamp) AS transaction_time,
+    CAST(CAST(stb.transaction_time AS timestamp) AS date) AS reporting_date
+  FROM sales_transactions_bronze stb
+),
+validated AS (
+  SELECT
+    transaction_id,
+    store_id,
+    product_id,
+    quantity,
+    sale_amount,
+    transaction_time,
+    reporting_date
+  FROM base
+  WHERE COALESCE(quantity, 0) >= 0
+    AND COALESCE(sale_amount, 0.0) >= 0.0
+),
+dedup AS (
+  SELECT
+    transaction_id,
+    store_id,
+    product_id,
+    quantity,
+    sale_amount,
+    transaction_time,
+    reporting_date,
+    ROW_NUMBER() OVER (
+      PARTITION BY transaction_id
+      ORDER BY transaction_time DESC
+    ) AS rn
+  FROM validated
+)
 SELECT
-  CAST(NULL AS STRING) AS patient_id,
-  CAST(NULL AS TIMESTAMP) AS metric_as_of_timestamp
-WHERE 1 = 0
+  transaction_id,
+  store_id,
+  product_id,
+  quantity,
+  sale_amount,
+  transaction_time,
+  reporting_date
+FROM dedup
+WHERE rn = 1
 """
-patient_dashboard_metrics_df = spark.sql(patient_dashboard_metrics_sql)
+
+sales_transactions_silver_df = spark.sql(sales_transactions_silver_sql)
+sales_transactions_silver_df.createOrReplaceTempView("sales_transactions_silver")
 
 (
-    patient_dashboard_metrics_df.coalesce(1)
+    sales_transactions_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/patient_dashboard_metrics_silver.csv")
+    .save(f"{TARGET_PATH}/sales_transactions_silver.csv")
 )
 
-patient_dashboard_metrics_df.createOrReplaceTempView("pdms")
+# =========================
+# Target: silver.sales_store_product_daily_silver
+# =========================
 
-# ============================================================
-# TABLE: silver.data_process_monitor_silver
-# NOTE: UDT does not define target columns for this table.
-#       Per requirement, do not invent columns; write empty schema result.
-# ============================================================
-data_process_monitor_sql = """
+sales_store_product_daily_silver_sql = """
 SELECT
-  CAST(NULL AS TIMESTAMP) AS data_updated_timestamp
-WHERE 1 = 0
+  sts.store_id AS store_id,
+  sts.product_id AS product_id,
+  sts.reporting_date AS reporting_date,
+  SUM(sts.sale_amount) AS revenue,
+  SUM(sts.quantity) AS quantity_sold
+FROM sales_transactions_silver sts
+INNER JOIN stores_silver ss
+  ON sts.store_id = ss.store_id
+INNER JOIN products_silver ps
+  ON sts.product_id = ps.product_id
+GROUP BY
+  sts.store_id,
+  sts.product_id,
+  sts.reporting_date
 """
-data_process_monitor_df = spark.sql(data_process_monitor_sql)
+
+sales_store_product_daily_silver_df = spark.sql(sales_store_product_daily_silver_sql)
 
 (
-    data_process_monitor_df.coalesce(1)
+    sales_store_product_daily_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/data_process_monitor_silver.csv")
-)
-
-data_process_monitor_df.createOrReplaceTempView("dpms")
-
-# ============================================================
-# TABLE: silver.report_latency_silver
-# NOTE: UDT does not define target columns for this table.
-#       Per requirement, do not invent columns; write empty schema result.
-# ============================================================
-report_latency_sql = """
-SELECT
-  CAST(NULL AS TIMESTAMP) AS metric_as_of_timestamp,
-  CAST(NULL AS TIMESTAMP) AS data_updated_timestamp
-WHERE 1 = 0
-"""
-report_latency_df = spark.sql(report_latency_sql)
-
-(
-    report_latency_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/report_latency_silver.csv")
-)
-
-report_latency_df.createOrReplaceTempView("rls")
-
-# ============================================================
-# TABLE: silver.patient_analytics_silver
-# NOTE: UDT does not define target columns for this table.
-#       Per requirement, do not invent columns; write empty schema result.
-# ============================================================
-patient_analytics_sql = """
-SELECT
-  CAST(NULL AS STRING) AS patient_id
-WHERE 1 = 0
-"""
-patient_analytics_df = spark.sql(patient_analytics_sql)
-
-(
-    patient_analytics_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/patient_analytics_silver.csv")
+    .save(f"{TARGET_PATH}/sales_store_product_daily_silver.csv")
 )
 
 job.commit()
