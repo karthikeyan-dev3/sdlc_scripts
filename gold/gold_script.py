@@ -3,133 +3,114 @@ from awsglue.context import GlueContext
 from awsglue.job import Job
 from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
+from pyspark.sql import SparkSession
 
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
+
+SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
+TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
+FILE_FORMAT = "csv"
+
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
 job = Job(glueContext)
 job.init(args["JOB_NAME"], args)
 
-SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
-TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
-FILE_FORMAT = "csv"
-
-# -------------------------------------------------------------------
-# Read Source Tables (S3) + Temp Views
-# -------------------------------------------------------------------
-stes_df = (
+# ------------------------------------------------------------------------------------
+# Read Source Tables (S3)
+# ------------------------------------------------------------------------------------
+site_trial_kpi_daily_silver_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/silver_trial_enrollment_statistics.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/site_trial_kpi_daily_silver.{FILE_FORMAT}/")
 )
-stes_df.createOrReplaceTempView("silver_trial_enrollment_statistics")
 
-sspm_df = (
+clinical_trial_site_dim_silver_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/silver_site_performance_metrics.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/clinical_trial_site_dim_silver.{FILE_FORMAT}/")
 )
-sspm_df.createOrReplaceTempView("silver_site_performance_metrics")
 
-srgl_df = (
+site_trial_performance_silver_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/silver_report_generation_logs.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/site_trial_performance_silver.{FILE_FORMAT}/")
 )
-srgl_df.createOrReplaceTempView("silver_report_generation_logs")
 
-# -------------------------------------------------------------------
-# Target: gold_clinical_trial_kpis
-# -------------------------------------------------------------------
-gold_clinical_trial_kpis_df = spark.sql(
+# ------------------------------------------------------------------------------------
+# Create Temp Views
+# ------------------------------------------------------------------------------------
+site_trial_kpi_daily_silver_df.createOrReplaceTempView("site_trial_kpi_daily_silver")
+clinical_trial_site_dim_silver_df.createOrReplaceTempView("clinical_trial_site_dim_silver")
+site_trial_performance_silver_df.createOrReplaceTempView("site_trial_performance_silver")
+
+# ------------------------------------------------------------------------------------
+# Target: gold_clinical_trial_metrics
+# mapping_details: silver.site_trial_kpi_daily_silver stk
+#   INNER JOIN silver.clinical_trial_site_dim_silver ctsd
+#   ON stk.trial_id = ctsd.trial_id AND stk.country = ctsd.country AND stk.site_id = ctsd.site_id
+# ------------------------------------------------------------------------------------
+gold_clinical_trial_metrics_df = spark.sql(
     """
     SELECT
-        stes.trial_id AS trial_id,
-        stes.country AS country,
-        stes.site_id AS site_id,
-        CAST(stes.enrolling_patients_count AS INT) AS total_enrolled_patients,
-        CAST(stes.enrolling_patients_count AS INT) - CAST(stes.dropout_patients_count AS INT) AS active_patients,
-        CAST(stes.dropout_patients_count AS INT) AS patient_dropout_count,
-        CAST(stes.visits_completed_count AS DOUBLE) / NULLIF(CAST(stes.enrolling_patients_count AS DOUBLE), 0D) AS visit_completion_percentage,
-        CAST(stes.enrollment_rate AS DOUBLE) AS enrollment_trend,
-        CONCAT(
-            CAST(stes.enrollment_rate AS STRING), '|',
-            CAST(stes.enrolling_patients_count AS STRING), '|',
-            CAST(stes.dropout_patients_count AS STRING), '|',
-            CAST(stes.visits_completed_count AS STRING)
-        ) AS historical_data
-    FROM silver_trial_enrollment_statistics stes
+        CAST(stk.trial_id AS STRING) AS trial_id,
+        CAST(ctsd.country AS STRING) AS country,
+        CAST(stk.site_id AS STRING) AS site_id,
+        CAST(stk.total_enrolled_patients AS BIGINT) AS total_enrolled_patients,
+        CAST(stk.active_patients AS BIGINT) AS active_patients,
+        CAST(stk.patient_dropout_count AS BIGINT) AS patient_dropout_count,
+        CAST(stk.visit_completion_percentage AS DOUBLE) AS visit_completion_percentage,
+        DATE(stk.kpi_date) AS enrollment_trends
+    FROM site_trial_kpi_daily_silver stk
+    INNER JOIN clinical_trial_site_dim_silver ctsd
+        ON stk.trial_id = ctsd.trial_id
+       AND stk.country = ctsd.country
+       AND stk.site_id = ctsd.site_id
     """
 )
 
+gold_clinical_trial_metrics_output_path = f"{TARGET_PATH}/gold_clinical_trial_metrics.csv"
 (
-    gold_clinical_trial_kpis_df.coalesce(1)
+    gold_clinical_trial_metrics_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_clinical_trial_kpis.csv")
+    .save(gold_clinical_trial_metrics_output_path)
 )
 
-# -------------------------------------------------------------------
-# Target: gold_clinical_trial_analysis
-# -------------------------------------------------------------------
-gold_clinical_trial_analysis_df = spark.sql(
+# ------------------------------------------------------------------------------------
+# Target: gold_clinical_trial_performance
+# mapping_details: silver.site_trial_performance_silver stp
+#   INNER JOIN silver.clinical_trial_site_dim_silver ctsd
+#   ON stp.trial_id = ctsd.trial_id AND stp.country = ctsd.country AND stp.site_id = ctsd.site_id
+# ------------------------------------------------------------------------------------
+gold_clinical_trial_performance_df = spark.sql(
     """
     SELECT
-        sspm.trial_id AS trial_id,
-        sspm.country AS country,
-        sspm.site_id AS site_id,
-        CASE
-            WHEN CAST(sspm.underperformance_metric AS DOUBLE) < 0D THEN 'UNDERPERFORMING'
-            ELSE 'ON_TRACK'
-        END AS underperformance_status,
-        CASE
-            WHEN CAST(sspm.enrollment_delay_metric AS DOUBLE) < 0D THEN 'DELAYED'
-            ELSE 'ON_TIME'
-        END AS enrollment_delay_status,
-        CASE
-            WHEN CAST(sspm.retention_rate_metric AS DOUBLE) < 0.8D THEN 'LOW_RETENTION'
-            ELSE 'GOOD_RETENTION'
-        END AS patient_retention_status,
-        CASE
-            WHEN CAST(sspm.adherence_rate_metric AS DOUBLE) < 0.8D THEN 'LOW_ADHERENCE'
-            ELSE 'GOOD_ADHERENCE'
-        END AS visit_adherence_status
-    FROM silver_site_performance_metrics sspm
+        CAST(stp.trial_id AS STRING) AS trial_id,
+        CAST(ctsd.country AS STRING) AS country,
+        CAST(stp.site_id AS STRING) AS site_id,
+        CAST(stp.underperforming_flag AS BOOLEAN) AS underperforming_flag,
+        CAST(stp.enrollment_delay_flag AS BOOLEAN) AS enrollment_delay_flag,
+        CAST(stp.patient_retention_rate AS DOUBLE) AS patient_retention_rate,
+        CAST(stp.visit_adherence_rate AS DOUBLE) AS visit_adherence_rate,
+        CAST(stp.historical_reports AS STRING) AS historical_reports
+    FROM site_trial_performance_silver stp
+    INNER JOIN clinical_trial_site_dim_silver ctsd
+        ON stp.trial_id = ctsd.trial_id
+       AND stp.country = ctsd.country
+       AND stp.site_id = ctsd.site_id
     """
 )
 
+gold_clinical_trial_performance_output_path = f"{TARGET_PATH}/gold_clinical_trial_performance.csv"
 (
-    gold_clinical_trial_analysis_df.coalesce(1)
+    gold_clinical_trial_performance_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_clinical_trial_analysis.csv")
-)
-
-# -------------------------------------------------------------------
-# Target: gold_clinical_trial_reporting
-# -------------------------------------------------------------------
-gold_clinical_trial_reporting_df = spark.sql(
-    """
-    SELECT
-        srgl.report_id AS report_id,
-        srgl.trial_id AS trial_id,
-        srgl.country AS country,
-        srgl.site_id AS site_id,
-        srgl.report_generated_time AS generated_timestamp,
-        CAST(srgl.latency_metric AS INT) AS report_latency
-    FROM silver_report_generation_logs srgl
-    """
-)
-
-(
-    gold_clinical_trial_reporting_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_clinical_trial_reporting.csv")
+    .save(gold_clinical_trial_performance_output_path)
 )
 
 job.commit()
