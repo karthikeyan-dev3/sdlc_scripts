@@ -1,9 +1,8 @@
 import sys
-from awsglue.transforms import *
-from awsglue.utils import getResolvedOptions
-from pyspark.context import SparkContext
 from awsglue.context import GlueContext
 from awsglue.job import Job
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
@@ -18,97 +17,126 @@ SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-# -------------------------------------------------------------------
+# ------------------------------------------------------------
 # 1) Read source tables from S3
-# -------------------------------------------------------------------
-tscdm_df = (
+# ------------------------------------------------------------
+sales_transactions_silver_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/trial_site_country_daily_metrics_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/sales_transactions_silver.{FILE_FORMAT}/")
 )
 
-tdils_df = (
+product_master_silver_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/trial_data_ingestion_latency_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/product_master_silver.{FILE_FORMAT}/")
 )
 
-# -------------------------------------------------------------------
+store_master_silver_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/store_master_silver.{FILE_FORMAT}/")
+)
+
+# ------------------------------------------------------------
 # 2) Create temp views
-# -------------------------------------------------------------------
-tscdm_df.createOrReplaceTempView("trial_site_country_daily_metrics_silver")
-tdils_df.createOrReplaceTempView("trial_data_ingestion_latency_silver")
+# ------------------------------------------------------------
+sales_transactions_silver_df.createOrReplaceTempView("sales_transactions_silver")
+product_master_silver_df.createOrReplaceTempView("product_master_silver")
+store_master_silver_df.createOrReplaceTempView("store_master_silver")
 
-# -------------------------------------------------------------------
-# 3) Transformations using Spark SQL
-# -------------------------------------------------------------------
-
-# Target: gold.gold_clinical_trial_summary
-gold_clinical_trial_summary_df = spark.sql("""
-SELECT
-  CAST(tscdm.trial_id AS STRING) AS trial_id,
-  CAST(tscdm.country AS STRING) AS country,
-  CAST(tscdm.site_id AS STRING) AS site_id,
-  SUM(CAST(tscdm.total_enrolled_patients AS BIGINT)) AS total_enrolled_patients,
-  SUM(CAST(tscdm.active_patients AS BIGINT)) AS active_patients,
-  SUM(CAST(tscdm.patient_dropout_count AS BIGINT)) AS patient_dropout_count,
-  AVG(CAST(tscdm.visit_completion_percentage AS DOUBLE)) AS visit_completion_percentage,
-  SUM(CAST(tscdm.enrollment_trend AS BIGINT)) AS enrollment_trend
-FROM trial_site_country_daily_metrics_silver tscdm
-GROUP BY
-  CAST(tscdm.trial_id AS STRING),
-  CAST(tscdm.country AS STRING),
-  CAST(tscdm.site_id AS STRING)
-""")
-
-# Target: gold.gold_clinical_trial_real_time_data
-gold_clinical_trial_real_time_data_df = spark.sql("""
-SELECT
-  CAST(tdils.trial_id AS STRING) AS trial_id,
-  MAX(CAST(tdils.data_ingestion_timestamp AS TIMESTAMP)) AS data_ingestion_timestamp,
-  MAX(tdils.metric_update_latency) AS metric_update_latency
-FROM trial_data_ingestion_latency_silver tdils
-GROUP BY
-  CAST(tdils.trial_id AS STRING)
-""")
-
-# Target: gold.gold_clinical_trial_historical_trends
-gold_clinical_trial_historical_trends_df = spark.sql("""
-SELECT
-  CAST(tscdm.trial_id AS STRING) AS trial_id,
-  CAST(tscdm.country AS STRING) AS country,
-  CAST(tscdm.site_id AS STRING) AS site_id,
-  DATE(CAST(tscdm.date AS DATE)) AS date,
-  CAST(tscdm.enrollment_trend AS BIGINT) AS enrollment_trend,
-  CAST(tscdm.retention_trend AS BIGINT) AS retention_trend
-FROM trial_site_country_daily_metrics_silver tscdm
-""")
-
-# -------------------------------------------------------------------
-# 4) Save outputs (single CSV file directly under TARGET_PATH)
-# -------------------------------------------------------------------
-(
-    gold_clinical_trial_summary_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_clinical_trial_summary.csv")
+# ------------------------------------------------------------
+# 3) Transform + 4) Write: gold_sales_transactions
+# ------------------------------------------------------------
+gold_sales_transactions_df = spark.sql(
+    """
+    SELECT
+        CAST(sts.transaction_id AS STRING) AS transaction_id,
+        CAST(sts.product_id AS STRING) AS product_id,
+        CAST(sts.store_id AS STRING) AS store_id,
+        DATE(sts.sale_date) AS sale_date,
+        CAST(sts.quantity_sold AS INT) AS quantity_sold,
+        CAST(sts.sale_amount AS DOUBLE) AS sale_amount
+    FROM sales_transactions_silver sts
+    """
 )
 
 (
-    gold_clinical_trial_real_time_data_df.coalesce(1)
+    gold_sales_transactions_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_clinical_trial_real_time_data.csv")
+    .save(f"{TARGET_PATH}/gold_sales_transactions.csv")
+)
+
+# ------------------------------------------------------------
+# 3) Transform + 4) Write: gold_product_master
+# ------------------------------------------------------------
+gold_product_master_df = spark.sql(
+    """
+    SELECT
+        CAST(pms.product_id AS STRING) AS product_id,
+        CAST(pms.product_name AS STRING) AS product_name,
+        CAST(pms.category AS STRING) AS category,
+        CAST(pms.price AS DOUBLE) AS price
+    FROM product_master_silver pms
+    """
 )
 
 (
-    gold_clinical_trial_historical_trends_df.coalesce(1)
+    gold_product_master_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_clinical_trial_historical_trends.csv")
+    .save(f"{TARGET_PATH}/gold_product_master.csv")
+)
+
+# ------------------------------------------------------------
+# 3) Transform + 4) Write: gold_store_master
+# ------------------------------------------------------------
+gold_store_master_df = spark.sql(
+    """
+    SELECT
+        CAST(sms.store_id AS STRING) AS store_id,
+        CAST(sms.store_name AS STRING) AS store_name,
+        CAST(sms.location AS STRING) AS location
+    FROM store_master_silver sms
+    """
+)
+
+(
+    gold_store_master_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/gold_store_master.csv")
+)
+
+# ------------------------------------------------------------
+# 3) Transform + 4) Write: gold_aggregated_sales
+# ------------------------------------------------------------
+gold_aggregated_sales_df = spark.sql(
+    """
+    SELECT
+        DATE(sts.sale_date) AS sale_date,
+        CAST(sts.store_id AS STRING) AS store_id,
+        CAST(sts.product_id AS STRING) AS product_id,
+        CAST(SUM(CAST(sts.quantity_sold AS INT)) AS INT) AS total_quantity_sold,
+        CAST(SUM(CAST(sts.sale_amount AS DOUBLE)) AS DOUBLE) AS total_sales_amount
+    FROM sales_transactions_silver sts
+    GROUP BY
+        DATE(sts.sale_date),
+        CAST(sts.store_id AS STRING),
+        CAST(sts.product_id AS STRING)
+    """
+)
+
+(
+    gold_aggregated_sales_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/gold_aggregated_sales.csv")
 )
 
 job.commit()
