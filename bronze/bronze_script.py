@@ -9,256 +9,44 @@ spark = glueContext.spark_session
 job = Job(glueContext)
 job.init("bronze_job", {})
 
-metadata = {
-    'tables': [
-        {
-            'target_schema': 'bronze',
-            'target_table': 'products_bronze',
-            'target_alias': 'pb',
-            'mapping_details': 'products_raw pr',
-            'description': 'Bronze table created by ingesting raw product records from products_raw. Columns mapped 1:1 (excluding any Unnamed columns if present): product_id, product_name, category, brand, price, is_active.'
-        },
-        {
-            'target_schema': 'bronze',
-            'target_table': 'sales_transactions_bronze',
-            'target_alias': 'stb',
-            'mapping_details': 'sales_transactions_raw str',
-            'description': 'Bronze table created by ingesting raw sales transaction records from sales_transactions_raw. Columns mapped 1:1 (excluding any Unnamed columns if present): transaction_id, store_id, product_id, quantity, sale_amount, transaction_time.'
-        },
-        {
-            'target_schema': 'bronze',
-            'target_table': 'stores_bronze',
-            'target_alias': 'sb',
-            'mapping_details': 'stores_raw sr',
-            'description': 'Bronze table created by ingesting raw store records from stores_raw. Columns mapped 1:1 (excluding any Unnamed columns if present): store_id, store_name, city, state, store_type, open_date.'
-        }
-    ],
-    'columns': [
-        {
-            'source_column': "['pr.product_id']",
-            'source_type': 'varchar(10)',
-            'source_nullable': 'not_specified',
-            'target_column': 'product_id',
-            'target_type': 'varchar(10)',
-            'target_nullable': 'not_specified',
-            'transformation': 'pb.product_id = pr.product_id',
-            'target_table': 'pb'
-        },
-        {
-            'source_column': "['pr.product_name']",
-            'source_type': 'varchar(255)',
-            'source_nullable': 'not_specified',
-            'target_column': 'product_name',
-            'target_type': 'varchar(255)',
-            'target_nullable': 'not_specified',
-            'transformation': 'pb.product_name = pr.product_name',
-            'target_table': 'pb'
-        },
-        {
-            'source_column': "['pr.category']",
-            'source_type': 'varchar(100)',
-            'source_nullable': 'not_specified',
-            'target_column': 'category',
-            'target_type': 'varchar(100)',
-            'target_nullable': 'not_specified',
-            'transformation': 'pb.category = pr.category',
-            'target_table': 'pb'
-        },
-        {
-            'source_column': "['pr.brand']",
-            'source_type': 'varchar(100)',
-            'source_nullable': 'not_specified',
-            'target_column': 'brand',
-            'target_type': 'varchar(100)',
-            'target_nullable': 'not_specified',
-            'transformation': 'pb.brand = pr.brand',
-            'target_table': 'pb'
-        },
-        {
-            'source_column': "['pr.price']",
-            'source_type': 'float',
-            'source_nullable': 'not_specified',
-            'target_column': 'price',
-            'target_type': 'float',
-            'target_nullable': 'not_specified',
-            'transformation': 'pb.price = pr.price',
-            'target_table': 'pb'
-        },
-        {
-            'source_column': "['pr.is_active']",
-            'source_type': 'boolean',
-            'source_nullable': 'not_specified',
-            'target_column': 'is_active',
-            'target_type': 'boolean',
-            'target_nullable': 'not_specified',
-            'transformation': 'pb.is_active = pr.is_active',
-            'target_table': 'pb'
-        },
-        {
-            'source_column': "['str.transaction_id']",
-            'source_type': 'varchar(10)',
-            'source_nullable': 'not_specified',
-            'target_column': 'transaction_id',
-            'target_type': 'varchar(10)',
-            'target_nullable': 'not_specified',
-            'transformation': 'stb.transaction_id = str.transaction_id',
-            'target_table': 'stb'
-        },
-        {
-            'source_column': "['str.store_id']",
-            'source_type': 'varchar(10)',
-            'source_nullable': 'not_specified',
-            'target_column': 'store_id',
-            'target_type': 'varchar(10)',
-            'target_nullable': 'not_specified',
-            'transformation': 'stb.store_id = str.store_id',
-            'target_table': 'stb'
-        },
-        {
-            'source_column': "['str.product_id']",
-            'source_type': 'varchar(10)',
-            'source_nullable': 'not_specified',
-            'target_column': 'product_id',
-            'target_type': 'varchar(10)',
-            'target_nullable': 'not_specified',
-            'transformation': 'stb.product_id = str.product_id',
-            'target_table': 'stb'
-        },
-        {
-            'source_column': "['str.quantity']",
-            'source_type': 'int',
-            'source_nullable': 'not_specified',
-            'target_column': 'quantity',
-            'target_type': 'int',
-            'target_nullable': 'not_specified',
-            'transformation': 'stb.quantity = str.quantity',
-            'target_table': 'stb'
-        },
-        {
-            'source_column': "['str.sale_amount']",
-            'source_type': 'double',
-            'source_nullable': 'not_specified',
-            'target_column': 'sale_amount',
-            'target_type': 'double',
-            'target_nullable': 'not_specified',
-            'transformation': 'stb.sale_amount = str.sale_amount',
-            'target_table': 'stb'
-        },
-        {
-            'source_column': "['str.transaction_time']",
-            'source_type': 'timestamp',
-            'source_nullable': 'not_specified',
-            'target_column': 'transaction_time',
-            'target_type': 'timestamp',
-            'target_nullable': 'not_specified',
-            'transformation': 'stb.transaction_time = str.transaction_time',
-            'target_table': 'stb'
-        },
-        {
-            'source_column': "['sr.store_id']",
-            'source_type': 'varchar(10)',
-            'source_nullable': 'not_specified',
-            'target_column': 'store_id',
-            'target_type': 'varchar(10)',
-            'target_nullable': 'not_specified',
-            'transformation': 'sb.store_id = sr.store_id',
-            'target_table': 'sb'
-        },
-        {
-            'source_column': "['sr.store_name']",
-            'source_type': 'varchar(255)',
-            'source_nullable': 'not_specified',
-            'target_column': 'store_name',
-            'target_type': 'varchar(255)',
-            'target_nullable': 'not_specified',
-            'transformation': 'sb.store_name = sr.store_name',
-            'target_table': 'sb'
-        },
-        {
-            'source_column': "['sr.city']",
-            'source_type': 'varchar(100)',
-            'source_nullable': 'not_specified',
-            'target_column': 'city',
-            'target_type': 'varchar(100)',
-            'target_nullable': 'not_specified',
-            'transformation': 'sb.city = sr.city',
-            'target_table': 'sb'
-        },
-        {
-            'source_column': "['sr.state']",
-            'source_type': 'varchar(100)',
-            'source_nullable': 'not_specified',
-            'target_column': 'state',
-            'target_type': 'varchar(100)',
-            'target_nullable': 'not_specified',
-            'transformation': 'sb.state = sr.state',
-            'target_table': 'sb'
-        },
-        {
-            'source_column': "['sr.store_type']",
-            'source_type': 'varchar(50)',
-            'source_nullable': 'not_specified',
-            'target_column': 'store_type',
-            'target_type': 'varchar(50)',
-            'target_nullable': 'not_specified',
-            'transformation': 'sb.store_type = sr.store_type',
-            'target_table': 'sb'
-        },
-        {
-            'source_column': "['sr.open_date']",
-            'source_type': 'date',
-            'source_nullable': 'not_specified',
-            'target_column': 'open_date',
-            'target_type': 'date',
-            'target_nullable': 'not_specified',
-            'transformation': 'sb.open_date = sr.open_date',
-            'target_table': 'sb'
-        }
-    ],
-    'runtime_config': {
-        'base_path': 's3://sdlc-agent-bucket/engineering-agent/src/',
-        'target_path': 's3://sdlc-agent-bucket/engineering-agent/bronze/',
-        'read_format': 'csv',
-        'write_format': 'csv',
-        'write_mode': 'overwrite'
-    }
-}
+metadata = {'tables': [{'target_schema': 'bronze', 'target_table': 'patient_enrollment_bronze', 'target_alias': 'peb', 'mapping_details': 'patient_enrollment_raw_2000 pe', 'description': 'Bronze table for patient enrollment data used for trial enrollment, site, and country-based metrics. Columns mapped from patient_enrollment_raw_2000: patient_id, trial_id, site_id, patient_name, gender, date_of_birth, country, enrollment_date, consent_status, source_system.'}, {'target_schema': 'bronze', 'target_table': 'clinical_visit_bronze', 'target_alias': 'cvb', 'mapping_details': 'clinical_visit_raw_2000 cv', 'description': 'Bronze table for clinical visit events used for visit adherence and completion analysis at trial/site/country levels. Columns mapped from clinical_visit_raw_2000: visit_id, patient_id, trial_id, visit_date, visit_type, blood_pressure, heart_rate, weight_kg, physician_notes, source_system.'}], 'columns': [{'source_column': "['pe.patient_id']", 'source_type': 'varchar(20)', 'source_nullable': 'null_accepted', 'target_column': 'patient_id', 'target_type': 'varchar(20)', 'target_nullable': 'null_accepted', 'transformation': 'peb.patient_id = pe.patient_id', 'target_table': 'peb'}, {'source_column': "['pe.trial_id']", 'source_type': 'varchar(20)', 'source_nullable': 'null_accepted', 'target_column': 'trial_id', 'target_type': 'varchar(20)', 'target_nullable': 'null_accepted', 'transformation': 'peb.trial_id = pe.trial_id', 'target_table': 'peb'}, {'source_column': "['pe.site_id']", 'source_type': 'varchar(20)', 'source_nullable': 'null_accepted', 'target_column': 'site_id', 'target_type': 'varchar(20)', 'target_nullable': 'null_accepted', 'transformation': 'peb.site_id = pe.site_id', 'target_table': 'peb'}, {'source_column': "['pe.patient_name']", 'source_type': 'varchar(255)', 'source_nullable': 'null_accepted', 'target_column': 'patient_name', 'target_type': 'varchar(255)', 'target_nullable': 'null_accepted', 'transformation': 'peb.patient_name = pe.patient_name', 'target_table': 'peb'}, {'source_column': "['pe.gender']", 'source_type': 'varchar(10)', 'source_nullable': 'null_accepted', 'target_column': 'gender', 'target_type': 'varchar(10)', 'target_nullable': 'null_accepted', 'transformation': 'peb.gender = pe.gender', 'target_table': 'peb'}, {'source_column': "['pe.date_of_birth']", 'source_type': 'date', 'source_nullable': 'null_accepted', 'target_column': 'date_of_birth', 'target_type': 'date', 'target_nullable': 'null_accepted', 'transformation': 'peb.date_of_birth = pe.date_of_birth', 'target_table': 'peb'}, {'source_column': "['pe.country']", 'source_type': 'varchar(100)', 'source_nullable': 'null_accepted', 'target_column': 'country', 'target_type': 'varchar(100)', 'target_nullable': 'null_accepted', 'transformation': 'peb.country = pe.country', 'target_table': 'peb'}, {'source_column': "['pe.enrollment_date']", 'source_type': 'timestamp', 'source_nullable': 'null_accepted', 'target_column': 'enrollment_date', 'target_type': 'timestamp', 'target_nullable': 'null_accepted', 'transformation': 'peb.enrollment_date = pe.enrollment_date', 'target_table': 'peb'}, {'source_column': "['pe.consent_status']", 'source_type': 'varchar(20)', 'source_nullable': 'null_accepted', 'target_column': 'consent_status', 'target_type': 'varchar(20)', 'target_nullable': 'null_accepted', 'transformation': 'peb.consent_status = pe.consent_status', 'target_table': 'peb'}, {'source_column': "['pe.source_system']", 'source_type': 'varchar(50)', 'source_nullable': 'null_accepted', 'target_column': 'source_system', 'target_type': 'varchar(50)', 'target_nullable': 'null_accepted', 'transformation': 'peb.source_system = pe.source_system', 'target_table': 'peb'}, {'source_column': "['cv.visit_id']", 'source_type': 'varchar(255)', 'source_nullable': 'null_accepted', 'target_column': 'visit_id', 'target_type': 'varchar(255)', 'target_nullable': 'null_accepted', 'transformation': 'cvb.visit_id = cv.visit_id', 'target_table': 'cvb'}, {'source_column': "['cv.patient_id']", 'source_type': 'varchar(255)', 'source_nullable': 'null_accepted', 'target_column': 'patient_id', 'target_type': 'varchar(255)', 'target_nullable': 'null_accepted', 'transformation': 'cvb.patient_id = cv.patient_id', 'target_table': 'cvb'}, {'source_column': "['cv.trial_id']", 'source_type': 'varchar(255)', 'source_nullable': 'null_accepted', 'target_column': 'trial_id', 'target_type': 'varchar(255)', 'target_nullable': 'null_accepted', 'transformation': 'cvb.trial_id = cv.trial_id', 'target_table': 'cvb'}, {'source_column': "['cv.visit_date']", 'source_type': 'timestamp', 'source_nullable': 'null_accepted', 'target_column': 'visit_date', 'target_type': 'timestamp', 'target_nullable': 'null_accepted', 'transformation': 'cvb.visit_date = cv.visit_date', 'target_table': 'cvb'}, {'source_column': "['cv.visit_type']", 'source_type': 'varchar(255)', 'source_nullable': 'null_accepted', 'target_column': 'visit_type', 'target_type': 'varchar(255)', 'target_nullable': 'null_accepted', 'transformation': 'cvb.visit_type = cv.visit_type', 'target_table': 'cvb'}, {'source_column': "['cv.blood_pressure']", 'source_type': 'float64', 'source_nullable': 'null_accepted', 'target_column': 'blood_pressure', 'target_type': 'float64', 'target_nullable': 'null_accepted', 'transformation': 'cvb.blood_pressure = cv.blood_pressure', 'target_table': 'cvb'}, {'source_column': "['cv.heart_rate']", 'source_type': 'float64', 'source_nullable': 'null_accepted', 'target_column': 'heart_rate', 'target_type': 'float64', 'target_nullable': 'null_accepted', 'transformation': 'cvb.heart_rate = cv.heart_rate', 'target_table': 'cvb'}, {'source_column': "['cv.weight_kg']", 'source_type': 'float64', 'source_nullable': 'null_accepted', 'target_column': 'weight_kg', 'target_type': 'float64', 'target_nullable': 'null_accepted', 'transformation': 'cvb.weight_kg = cv.weight_kg', 'target_table': 'cvb'}, {'source_column': "['cv.physician_notes']", 'source_type': 'text', 'source_nullable': 'null_accepted', 'target_column': 'physician_notes', 'target_type': 'text', 'target_nullable': 'null_accepted', 'transformation': 'cvb.physician_notes = cv.physician_notes', 'target_table': 'cvb'}, {'source_column': "['cv.source_system']", 'source_type': 'varchar(255)', 'source_nullable': 'null_accepted', 'target_column': 'source_system', 'target_type': 'varchar(255)', 'target_nullable': 'null_accepted', 'transformation': 'cvb.source_system = cv.source_system', 'target_table': 'cvb'}], 'runtime_config': {'base_path': 's3://sdlc-agent-bucket/engineering-agent/clinical_trail/', 'target_path': 's3://sdlc-agent-bucket/engineering-agent/bronze/', 'read_format': 'csv', 'write_format': 'csv', 'write_mode': 'overwrite'}}
 
-runtime_config = metadata['runtime_config']
-base_path = runtime_config['base_path']
-target_path = runtime_config['target_path']
-read_format = runtime_config['read_format']
-write_format = runtime_config['write_format']
-write_mode = runtime_config['write_mode']
+runtime_config = metadata.get('runtime_config', {})
+base_path = runtime_config.get('base_path')
+target_path = runtime_config.get('target_path')
+read_format = runtime_config.get('read_format')
+write_format = runtime_config.get('write_format')
+write_mode = runtime_config.get('write_mode')
 
-for table in metadata['tables']:
-    mapping_details = table['mapping_details'].split()
-    source_table = mapping_details[0]
-    source_alias = mapping_details[1]
-    target_table = table['target_table']
-    target_alias = table['target_alias']
+for table in metadata.get('tables', []):
+    mapping_details = table.get('mapping_details', '')
+    parts = mapping_details.split()
+    source_table = parts[0] if len(parts) > 0 else None
+    source_alias = parts[1] if len(parts) > 1 else None
+    target_table = table.get('target_table')
+    target_alias = table.get('target_alias')
 
     reader = spark.read.format(read_format)
     if read_format == 'csv':
-        reader = reader.option("header", "true").option("inferSchema", "true")
+        reader = reader.option('header', 'true').option('inferSchema', 'true')
 
-    df = reader.load(base_path + f"{source_table}.{read_format}")
+    df = reader.load(base_path + source_table + '.' + read_format)
     df = df.alias(source_alias)
 
     transformations = []
-    for col_meta in metadata['columns']:
-        if col_meta['target_table'] == target_alias:
-            transformation = col_meta['transformation']
-            rhs = transformation.split('=', 1)[1].strip()
-            target_column = col_meta['target_column']
+    for col_meta in metadata.get('columns', []):
+        if col_meta.get('target_table') == target_alias:
+            transformation = col_meta.get('transformation', '')
+            rhs = transformation.split('=', 1)[1].strip() if '=' in transformation else transformation.strip()
+            target_column = col_meta.get('target_column')
             transformations.append(f"{rhs} as {target_column}")
 
     df = df.selectExpr(*transformations)
 
     writer = df.write.mode(write_mode).format(write_format)
     if write_format == 'csv':
-        writer = writer.option("header", "true")
+        writer = writer.option('header', 'true')
 
-    writer.save(target_path + f"{target_table}.{write_format}")
+    writer.save(target_path + target_table + '.' + write_format)
 
 job.commit()
