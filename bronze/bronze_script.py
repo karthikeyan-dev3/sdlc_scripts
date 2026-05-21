@@ -224,25 +224,18 @@ metadata = {
     }
 }
 
-runtime_config = metadata.get('runtime_config', {})
-base_path = runtime_config.get('base_path')
-target_path = runtime_config.get('target_path')
-read_format = runtime_config.get('read_format')
-write_format = runtime_config.get('write_format')
-write_mode = runtime_config.get('write_mode')
+base_path = metadata['runtime_config']['base_path']
+target_path = metadata['runtime_config']['target_path']
+read_format = metadata['runtime_config']['read_format']
+write_format = metadata['runtime_config']['write_format']
+write_mode = metadata['runtime_config']['write_mode']
 
-for table in metadata.get('tables', []):
-    mapping_details = table.get('mapping_details')
-    target_table = table.get('target_table')
-    target_alias = table.get('target_alias')
-
-    source_table = None
-    source_alias = None
-    if mapping_details:
-        parts = mapping_details.split()
-        if len(parts) >= 2:
-            source_table = parts[0]
-            source_alias = parts[1]
+for table in metadata['tables']:
+    mapping_details = table['mapping_details']
+    source_table = mapping_details.split()[0]
+    source_alias = mapping_details.split()[1]
+    target_table = table['target_table']
+    target_alias = table['target_alias']
 
     reader = spark.read.format(read_format)
     if read_format == 'csv':
@@ -252,13 +245,11 @@ for table in metadata.get('tables', []):
     df = df.alias(source_alias)
 
     transformations = []
-    for col_meta in metadata.get('columns', []):
-        if col_meta.get('target_table') == target_alias:
-            transformation = col_meta.get('transformation')
-            target_col = col_meta.get('target_column')
-            if transformation and target_col and '=' in transformation:
-                rhs = transformation.split('=', 1)[1].strip()
-                transformations.append(f"{rhs} as {target_col}")
+    for col_meta in metadata['columns']:
+        if col_meta['target_table'] == target_alias:
+            rhs = col_meta['transformation'].split('=', 1)[1].strip()
+            target_col = col_meta['target_column']
+            transformations.append(f"{rhs} as {target_col}")
 
     df = df.selectExpr(*transformations)
 
