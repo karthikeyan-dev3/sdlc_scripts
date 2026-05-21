@@ -2,6 +2,7 @@ from awsglue.context import GlueContext
 from pyspark.context import SparkContext
 from awsglue.job import Job
 
+sc = SparkContext.getOrCreate()
 glueContext = GlueContext(sc)
 
 job = Job(glueContext)
