@@ -4,6 +4,7 @@ from awsglue.job import Job
 
 sc = SparkContext.getOrCreate()
 glueContext = GlueContext(sc)
+spark = glueContext.spark_session
 
 job = Job(glueContext)
 job.init("bronze_job", {})
