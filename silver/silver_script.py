@@ -1,224 +1,326 @@
+import sys
+from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
 from awsglue.job import Job
 from pyspark.context import SparkContext
+from pyspark.sql import SparkSession
+
+args = getResolvedOptions(sys.argv, ["JOB_NAME"])
 
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
-
 job = Job(glueContext)
-job.init("silver_gold_job", {})
+job.init(args["JOB_NAME"], args)
 
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 FILE_FORMAT = "csv"
-WRITE_MODE = "overwrite"
 
-# ============================================================
-# SOURCE TABLE READS + TEMP VIEWS (BRONZE)
-# ============================================================
+# ------------------------------------------------------------------------------
+# Read source tables from S3 (Bronze) and create temp views
+# ------------------------------------------------------------------------------
 
-branch_master_bronze_df = (
+patient_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/branch_master_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/patient_bronze.{FILE_FORMAT}/")
 )
-branch_master_bronze_df.createOrReplaceTempView("branch_master_bronze")
+patient_bronze_df.createOrReplaceTempView("patient_bronze")
 
-customer_master_bronze_df = (
+patient_visits_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/customer_master_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/patient_visits_bronze.{FILE_FORMAT}/")
 )
-customer_master_bronze_df.createOrReplaceTempView("customer_master_bronze")
+patient_visits_bronze_df.createOrReplaceTempView("patient_visits_bronze")
 
-loan_applications_bronze_df = (
+patient_lab_results_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/loan_applications_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/patient_lab_results_bronze.{FILE_FORMAT}/")
 )
-loan_applications_bronze_df.createOrReplaceTempView("loan_applications_bronze")
+patient_lab_results_bronze_df.createOrReplaceTempView("patient_lab_results_bronze")
 
-repayment_transactions_bronze_df = (
+patient_drug_administrations_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/repayment_transactions_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/patient_drug_administrations_bronze.{FILE_FORMAT}/")
 )
-repayment_transactions_bronze_df.createOrReplaceTempView("repayment_transactions_bronze")
+patient_drug_administrations_bronze_df.createOrReplaceTempView("patient_drug_administrations_bronze")
 
-# ============================================================
-# TARGET: silver.branch_master_silver
-# ============================================================
-
-branch_master_silver_sql = """
-SELECT
-  CAST(bmb.branch_id AS STRING) AS branch_id,
-  CAST(bmb.branch_name AS STRING) AS branch_name,
-  CONCAT(CAST(bmb.city AS STRING), ', ', CAST(bmb.state AS STRING)) AS branch_location,
-  CAST(bmb.manager_name AS STRING) AS branch_manager
-FROM (
-  SELECT
-    bmb.*,
-    ROW_NUMBER() OVER (
-      PARTITION BY bmb.branch_id
-      ORDER BY CAST(bmb.opening_year AS INT) DESC, bmb.branch_name DESC
-    ) AS rn
-  FROM branch_master_bronze bmb
-) bmb
-WHERE bmb.rn = 1
-"""
-
-branch_master_silver_df = spark.sql(branch_master_silver_sql)
-
-branch_master_silver_output_path = f"{TARGET_PATH}/branch_master_silver.csv"
-(
-    branch_master_silver_df.write.mode(WRITE_MODE)
+patient_adverse_events_bronze_df = (
+    spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .csv(branch_master_silver_output_path)
+    .load(f"{SOURCE_PATH}/patient_adverse_events_bronze.{FILE_FORMAT}/")
 )
+patient_adverse_events_bronze_df.createOrReplaceTempView("patient_adverse_events_bronze")
 
-branch_master_silver_df.createOrReplaceTempView("loan_branch_master_silver_ignore")  # no-op view guard
-branch_master_silver_df.createOrReplaceTempView("branch_master_silver")
-
-# ============================================================
-# TARGET: silver.customers_silver
-# ============================================================
-
-customers_silver_sql = """
-SELECT
-  CAST(cmb.customer_id AS STRING) AS customer_id,
-  TRIM(CAST(cmb.customer_name AS STRING)) AS customer_name,
-  CAST(NULL AS INT) AS customer_age,
-  CAST(cmb.annual_income AS INT) AS customer_income,
-  CAST(cmb.credit_score AS INT) AS credit_score
-FROM (
-  SELECT
-    cmb.*,
-    ROW_NUMBER() OVER (
-      PARTITION BY cmb.customer_id
-      ORDER BY CAST(cmb.credit_score AS INT) DESC, CAST(cmb.annual_income AS INT) DESC
-    ) AS rn
-  FROM customer_master_bronze cmb
-) cmb
-WHERE cmb.rn = 1
-"""
-
-customers_silver_df = spark.sql(customers_silver_sql)
-
-customers_silver_output_path = f"{TARGET_PATH}/customers_silver.csv"
-(
-    customers_silver_df.write.mode(WRITE_MODE)
+patient_wearable_observations_bronze_df = (
+    spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .csv(customers_silver_output_path)
+    .load(f"{SOURCE_PATH}/patient_wearable_observations_bronze.{FILE_FORMAT}/")
+)
+patient_wearable_observations_bronze_df.createOrReplaceTempView("patient_wearable_observations_bronze")
+
+# ------------------------------------------------------------------------------
+# Target: silver.patient_silver
+# ------------------------------------------------------------------------------
+
+patient_silver_df = spark.sql(
+    """
+    WITH base AS (
+        SELECT
+            CAST(pb.patient_id AS STRING)          AS patient_id,
+            CAST(pb.trial_id AS STRING)            AS trial_id,
+            CAST(pb.site_id AS STRING)             AS site_id,
+            CAST(pb.gender AS STRING)              AS gender,
+            CAST(pb.date_of_birth AS DATE)         AS date_of_birth,
+            CAST(pb.country AS STRING)             AS country,
+            CAST(pb.enrollment_date AS TIMESTAMP)  AS enrollment_date,
+            CAST(pb.consent_status AS STRING)      AS consent_status,
+            ROW_NUMBER() OVER (
+                PARTITION BY CAST(pb.patient_id AS STRING)
+                ORDER BY CAST(pb.patient_id AS STRING)
+            ) AS rn
+        FROM patient_bronze pb
+    )
+    SELECT
+        patient_id,
+        trial_id,
+        site_id,
+        gender,
+        date_of_birth,
+        country,
+        enrollment_date,
+        consent_status
+    FROM base
+    WHERE rn = 1
+    """
 )
 
-customers_silver_df.createOrReplaceTempView("customers_silver")
-
-# ============================================================
-# TARGET: silver.loan_agreements_silver
-# ============================================================
-
-loan_agreements_silver_sql = """
-SELECT
-  CAST(lab.loan_id AS STRING) AS loan_id,
-  CAST(lab.customer_id AS STRING) AS customer_id,
-  CAST(lab.branch_id AS STRING) AS branch_id,
-  CAST(lab.interest_rate AS FLOAT) AS interest_rate,
-  DATE(CAST(lab.application_date AS STRING)) AS application_date,
-  CAST(lab.loan_amount AS INT) AS loan_amount,
-  CAST(lab.loan_status AS STRING) AS loan_status,
-  CAST(lab.loan_type AS STRING) AS loan_type
-FROM (
-  SELECT
-    lab.*,
-    ROW_NUMBER() OVER (
-      PARTITION BY lab.loan_id
-      ORDER BY DATE(CAST(lab.application_date AS STRING)) DESC
-    ) AS rn
-  FROM loan_applications_bronze lab
-) lab
-WHERE lab.rn = 1
-"""
-
-loan_agreements_silver_df = spark.sql(loan_agreements_silver_sql)
-
-loan_agreements_silver_output_path = f"{TARGET_PATH}/loan_agreements_silver.csv"
 (
-    loan_agreements_silver_df.write.mode(WRITE_MODE)
+    patient_silver_df.coalesce(1)
+    .write.mode("overwrite")
+    .format(FILE_FORMAT)
     .option("header", "true")
-    .csv(loan_agreements_silver_output_path)
+    .save(f"{TARGET_PATH}/patient_silver.csv")
 )
 
-loan_agreements_silver_df.createOrReplaceTempView("loan_agreements_silver")
+# ------------------------------------------------------------------------------
+# Target: silver.patient_visits_silver
+# ------------------------------------------------------------------------------
 
-# ============================================================
-# TARGET: silver.loan_transactions_silver
-# ============================================================
-
-loan_transactions_silver_sql = """
-SELECT
-  CAST(rtb.transaction_id AS STRING) AS transaction_id,
-  CAST(rtb.loan_id AS STRING) AS loan_id,
-  CAST(las.customer_id AS STRING) AS customer_id,
-  CAST(las.branch_id AS STRING) AS branch_id,
-  DATE(CAST(rtb.payment_date AS STRING)) AS transaction_date,
-  CAST(rtb.payment_amount AS INT) AS amount,
-  CAST(las.interest_rate AS FLOAT) AS interest_rate,
-  CAST('repayment' AS STRING) AS transaction_type
-FROM (
-  SELECT
-    rtb.*,
-    ROW_NUMBER() OVER (
-      PARTITION BY rtb.transaction_id
-      ORDER BY DATE(CAST(rtb.payment_date AS STRING)) DESC
-    ) AS rn
-  FROM repayment_transactions_bronze rtb
-  WHERE rtb.transaction_id IS NOT NULL
-) rtb
-LEFT JOIN loan_agreements_silver las
-  ON rtb.loan_id = las.loan_id
-WHERE rtb.rn = 1
-"""
-
-loan_transactions_silver_df = spark.sql(loan_transactions_silver_sql)
-
-loan_transactions_silver_output_path = f"{TARGET_PATH}/loan_transactions_silver.csv"
-(
-    loan_transactions_silver_df.write.mode(WRITE_MODE)
-    .option("header", "true")
-    .csv(loan_transactions_silver_output_path)
+patient_visits_silver_df = spark.sql(
+    """
+    WITH base AS (
+        SELECT
+            CAST(pvb.visit_id AS STRING)        AS visit_id,
+            CAST(pvb.patient_id AS STRING)      AS patient_id,
+            CAST(pvb.trial_id AS STRING)        AS trial_id,
+            CAST(pvb.visit_date AS TIMESTAMP)   AS visit_date,
+            CAST(pvb.visit_type AS STRING)      AS visit_type,
+            ROW_NUMBER() OVER (
+                PARTITION BY CAST(pvb.visit_id AS STRING)
+                ORDER BY CAST(pvb.visit_id AS STRING)
+            ) AS rn
+        FROM patient_visits_bronze pvb
+    )
+    SELECT
+        visit_id,
+        patient_id,
+        trial_id,
+        visit_date,
+        visit_type
+    FROM base
+    WHERE rn = 1
+    """
 )
 
-loan_transactions_silver_df.createOrReplaceTempView("loan_transactions_silver")
-
-# ============================================================
-# TARGET: silver.loan_analytics_silver
-# ============================================================
-
-loan_analytics_silver_sql = """
-SELECT
-  CAST(lts.branch_id AS STRING) AS branch_id,
-  CAST(lts.customer_id AS STRING) AS customer_id,
-  CAST(COUNT(DISTINCT lts.loan_id) AS INT) AS total_loans,
-  CAST(SUM(la.loan_amount) AS INT) AS total_disbursed,
-  CAST(SUM(lts.amount) AS INT) AS total_repaid,
-  CAST(SUM(la.loan_amount) - SUM(lts.amount) AS INT) AS current_balance,
-  CAST(AVG(DISTINCT la.interest_rate) AS FLOAT) AS average_interest_rate
-FROM loan_transactions_silver lts
-INNER JOIN loan_agreements_silver la
-  ON lts.loan_id = la.loan_id
-GROUP BY
-  lts.branch_id,
-  lts.customer_id
-"""
-
-loan_analytics_silver_df = spark.sql(loan_analytics_silver_sql)
-
-loan_analytics_silver_output_path = f"{TARGET_PATH}/loan_analytics_silver.csv"
 (
-    loan_analytics_silver_df.write.mode(WRITE_MODE)
+    patient_visits_silver_df.coalesce(1)
+    .write.mode("overwrite")
+    .format(FILE_FORMAT)
     .option("header", "true")
-    .csv(loan_analytics_silver_output_path)
+    .save(f"{TARGET_PATH}/patient_visits_silver.csv")
+)
+
+# ------------------------------------------------------------------------------
+# Target: silver.patient_lab_results_silver
+# ------------------------------------------------------------------------------
+
+patient_lab_results_silver_df = spark.sql(
+    """
+    WITH base AS (
+        SELECT
+            CAST(plrb.lab_result_id AS STRING)     AS lab_result_id,
+            CAST(plrb.patient_id AS STRING)        AS patient_id,
+            CAST(plrb.sample_id AS STRING)         AS sample_id,
+            CAST(plrb.test_name AS STRING)         AS test_name,
+            CAST(plrb.test_result AS DOUBLE)       AS test_result,
+            CAST(plrb.test_unit AS STRING)         AS test_unit,
+            CAST(plrb.reference_range AS STRING)   AS reference_range,
+            CAST(plrb.abnormal_flag AS STRING)     AS abnormal_flag,
+            CAST(plrb.test_date AS TIMESTAMP)      AS test_date,
+            CAST(plrb.lab_name AS STRING)          AS lab_name,
+            ROW_NUMBER() OVER (
+                PARTITION BY CAST(plrb.lab_result_id AS STRING)
+                ORDER BY CAST(plrb.lab_result_id AS STRING)
+            ) AS rn
+        FROM patient_lab_results_bronze plrb
+    )
+    SELECT
+        lab_result_id,
+        patient_id,
+        sample_id,
+        test_name,
+        test_result,
+        test_unit,
+        reference_range,
+        abnormal_flag,
+        test_date,
+        lab_name
+    FROM base
+    WHERE rn = 1
+    """
+)
+
+(
+    patient_lab_results_silver_df.coalesce(1)
+    .write.mode("overwrite")
+    .format(FILE_FORMAT)
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/patient_lab_results_silver.csv")
+)
+
+# ------------------------------------------------------------------------------
+# Target: silver.patient_drug_administrations_silver
+# ------------------------------------------------------------------------------
+
+patient_drug_administrations_silver_df = spark.sql(
+    """
+    WITH base AS (
+        SELECT
+            CAST(pdab.administration_id AS STRING)       AS administration_id,
+            CAST(pdab.patient_id AS STRING)              AS patient_id,
+            CAST(pdab.drug_code AS STRING)               AS drug_code,
+            CAST(pdab.dosage_mg AS DOUBLE)               AS dosage_mg,
+            CAST(pdab.administration_date AS TIMESTAMP)  AS administration_date,
+            CAST(pdab.administration_route AS STRING)    AS administration_route,
+            CAST(pdab.administered_by AS STRING)         AS administered_by,
+            CAST(pdab.batch_number AS STRING)            AS batch_number,
+            ROW_NUMBER() OVER (
+                PARTITION BY CAST(pdab.administration_id AS STRING)
+                ORDER BY CAST(pdab.administration_id AS STRING)
+            ) AS rn
+        FROM patient_drug_administrations_bronze pdab
+    )
+    SELECT
+        administration_id,
+        patient_id,
+        drug_code,
+        dosage_mg,
+        administration_date,
+        administration_route,
+        administered_by,
+        batch_number
+    FROM base
+    WHERE rn = 1
+    """
+)
+
+(
+    patient_drug_administrations_silver_df.coalesce(1)
+    .write.mode("overwrite")
+    .format(FILE_FORMAT)
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/patient_drug_administrations_silver.csv")
+)
+
+# ------------------------------------------------------------------------------
+# Target: silver.patient_adverse_events_silver
+# ------------------------------------------------------------------------------
+
+patient_adverse_events_silver_df = spark.sql(
+    """
+    WITH base AS (
+        SELECT
+            CAST(paeb.event_id AS STRING)                 AS event_id,
+            CAST(paeb.patient_id AS STRING)               AS patient_id,
+            CAST(paeb.event_type AS STRING)               AS event_type,
+            CAST(paeb.severity AS STRING)                 AS severity,
+            CAST(paeb.event_start_date AS TIMESTAMP)      AS event_start_date,
+            CAST(paeb.event_end_date AS TIMESTAMP)        AS event_end_date,
+            CAST(paeb.outcome AS STRING)                  AS outcome,
+            CAST(paeb.related_to_drug AS BOOLEAN)         AS related_to_drug,
+            CAST(paeb.hospitalization_required AS BOOLEAN) AS hospitalization_required,
+            ROW_NUMBER() OVER (
+                PARTITION BY CAST(paeb.event_id AS STRING)
+                ORDER BY CAST(paeb.event_id AS STRING)
+            ) AS rn
+        FROM patient_adverse_events_bronze paeb
+    )
+    SELECT
+        event_id,
+        patient_id,
+        event_type,
+        severity,
+        event_start_date,
+        event_end_date,
+        outcome,
+        related_to_drug,
+        hospitalization_required
+    FROM base
+    WHERE rn = 1
+    """
+)
+
+(
+    patient_adverse_events_silver_df.coalesce(1)
+    .write.mode("overwrite")
+    .format(FILE_FORMAT)
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/patient_adverse_events_silver.csv")
+)
+
+# ------------------------------------------------------------------------------
+# Target: silver.patient_wearable_observations_silver
+# ------------------------------------------------------------------------------
+
+patient_wearable_observations_silver_df = spark.sql(
+    """
+    WITH base AS (
+        SELECT
+            CAST(pwob.device_record_id AS STRING)       AS device_record_id,
+            CAST(pwob.patient_id AS STRING)             AS patient_id,
+            CAST(pwob.device_type AS STRING)            AS device_type,
+            CAST(pwob.recorded_timestamp AS TIMESTAMP)  AS recorded_timestamp,
+            CAST(pwob.step_count AS INT)                AS step_count,
+            CAST(pwob.heart_rate AS FLOAT)              AS heart_rate,
+            ROW_NUMBER() OVER (
+                PARTITION BY CAST(pwob.device_record_id AS STRING)
+                ORDER BY CAST(pwob.device_record_id AS STRING)
+            ) AS rn
+        FROM patient_wearable_observations_bronze pwob
+    )
+    SELECT
+        device_record_id,
+        patient_id,
+        device_type,
+        recorded_timestamp,
+        step_count,
+        heart_rate
+    FROM base
+    WHERE rn = 1
+    """
+)
+
+(
+    patient_wearable_observations_silver_df.coalesce(1)
+    .write.mode("overwrite")
+    .format(FILE_FORMAT)
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/patient_wearable_observations_silver.csv")
 )
 
 job.commit()
