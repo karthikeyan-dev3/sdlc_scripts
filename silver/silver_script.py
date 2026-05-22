@@ -1,9 +1,9 @@
 import sys
-from awsglue.context import GlueContext
-from awsglue.job import Job
+from awsglue.transforms import *
 from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
-from pyspark.sql import SparkSession
+from awsglue.context import GlueContext
+from awsglue.job import Job
 
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
 
@@ -17,284 +17,230 @@ SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 FILE_FORMAT = "csv"
 
-# =============================================================================
-# 1) Read source tables from S3 (Bronze)
-# =============================================================================
-sales_transactions_bronze_df = (
+# -------------------------------------
+# Read source tables from S3
+# -------------------------------------
+patient_data_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/sales_transactions_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/patient_data_bronze.{FILE_FORMAT}/")
 )
+patient_data_bronze_df.createOrReplaceTempView("patient_data_bronze")
 
-products_bronze_df = (
+genomics_sequencing_runs_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/products_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/genomics_sequencing_runs_bronze.{FILE_FORMAT}/")
 )
+genomics_sequencing_runs_bronze_df.createOrReplaceTempView("genomics_sequencing_runs_bronze")
 
-stores_bronze_df = (
+lab_test_results_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/stores_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/lab_test_results_bronze.{FILE_FORMAT}/")
 )
+lab_test_results_bronze_df.createOrReplaceTempView("lab_test_results_bronze")
 
-# =============================================================================
-# 2) Create temp views
-# =============================================================================
-sales_transactions_bronze_df.createOrReplaceTempView("sales_transactions_bronze")
-products_bronze_df.createOrReplaceTempView("products_bronze")
-stores_bronze_df.createOrReplaceTempView("stores_bronze")
-
-# =============================================================================
-# 3) Transform & Write: silver.sales_transactions_silver
-# =============================================================================
-sales_transactions_silver_sql = """
-WITH base AS (
-  SELECT
-    CAST(TRIM(stb.transaction_id) AS STRING)            AS transaction_id,
-    CAST(stb.transaction_time AS TIMESTAMP)            AS transaction_timestamp,
-    CAST(CAST(stb.transaction_time AS TIMESTAMP) AS DATE) AS transaction_date,
-    CAST(TRIM(stb.store_id) AS STRING)                 AS store_id,
-    CAST(TRIM(stb.product_id) AS STRING)               AS product_id,
-    CAST(COALESCE(CAST(stb.quantity AS INT), 0) AS INT) AS quantity_sold,
-    CAST(COALESCE(CAST(stb.sale_amount AS DOUBLE), 0.0) AS DOUBLE) AS sales_amount,
-    ROW_NUMBER() OVER (
-      PARTITION BY CAST(TRIM(stb.transaction_id) AS STRING)
-      ORDER BY CAST(stb.transaction_time AS TIMESTAMP) DESC
-    ) AS rn
-  FROM sales_transactions_bronze stb
-),
-filtered AS (
-  SELECT
-    transaction_id,
-    transaction_timestamp,
-    transaction_date,
-    store_id,
-    product_id,
-    quantity_sold,
-    sales_amount
-  FROM base
-  WHERE rn = 1
-    AND quantity_sold >= 0
-    AND sales_amount >= 0
+genomic_variants_bronze_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/genomic_variants_bronze.{FILE_FORMAT}/")
 )
+genomic_variants_bronze_df.createOrReplaceTempView("genomic_variants_bronze")
+
+# -------------------------------------
+# Target: silver_patient (sp)
+# Source: bronze.patient_data_bronze pdb
+# -------------------------------------
+silver_patient_df = spark.sql("""
 SELECT
-  transaction_id,
-  transaction_timestamp,
-  transaction_date,
-  store_id,
-  product_id,
-  quantity_sold,
-  sales_amount
-FROM filtered
-"""
-
-sales_transactions_silver_df = spark.sql(sales_transactions_silver_sql)
+  pdb.patient_id AS patient_id,
+  pdb.patient_id AS mrn,
+  pdb.first_name AS first_name,
+  pdb.last_name AS last_name,
+  CAST(pdb.date_of_birth AS date) AS date_of_birth,
+  CAST(months_between(current_date(), CAST(pdb.date_of_birth AS date)) / 12 AS int) AS age_years,
+  pdb.gender AS gender,
+  pdb.contact_number AS phone_number,
+  pdb.email AS email,
+  pdb.address AS address_line1,
+  pdb.address AS address_line2,
+  pdb.city AS city,
+  pdb.state AS state,
+  pdb.address AS postal_code,
+  pdb.country AS country,
+  CAST(pdb.registration_date AS timestamp) AS record_effective_ts,
+  CAST(pdb.registration_date AS timestamp) AS record_end_ts,
+  CAST('true' AS string) AS is_current_record
+FROM patient_data_bronze pdb
+""")
 
 (
-    sales_transactions_silver_df.coalesce(1)
+    silver_patient_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/sales_transactions_silver.csv")
+    .save(f"{TARGET_PATH}/silver_patient.csv")
 )
 
-sales_transactions_silver_df.createOrReplaceTempView("sales_transactions_silver")
-
-# =============================================================================
-# 4) Transform & Write: silver.products_silver
-# =============================================================================
-products_silver_sql = """
-WITH base AS (
-  SELECT
-    CAST(TRIM(pb.product_id) AS STRING) AS product_id,
-    CAST(
-      COALESCE(NULLIF(TRIM(pb.product_name), ''), 'UNKNOWN')
-      AS STRING
-    ) AS product_name,
-    CAST(TRIM(pb.category) AS STRING) AS category,
-    CAST(TRIM(pb.brand) AS STRING) AS brand,
-    CAST(pb.price AS FLOAT) AS price,
-    CAST(pb.is_active AS BOOLEAN) AS is_active,
-    ROW_NUMBER() OVER (
-      PARTITION BY CAST(TRIM(pb.product_id) AS STRING)
-      ORDER BY CAST(pb.is_active AS BOOLEAN) DESC
-    ) AS rn
-  FROM products_bronze pb
-)
+# -------------------------------------
+# Target: silver_sequencing_run (ssr)
+# Source: bronze.genomics_sequencing_runs_bronze gsrb
+#        LEFT JOIN bronze.lab_test_results_bronze ltrb ON gsrb.run_id = ltrb.sample_id
+# -------------------------------------
+silver_sequencing_run_df = spark.sql("""
 SELECT
-  product_id,
-  product_name,
-  category,
-  brand,
-  price,
-  is_active
-FROM base
-WHERE rn = 1
-"""
-
-products_silver_df = spark.sql(products_silver_sql)
+  gsrb.run_id AS sequencing_run_id,
+  gsrb.run_id AS run_accession,
+  CAST(gsrb.run_date AS date) AS run_date,
+  gsrb.sequencing_platform AS platform,
+  gsrb.technician_name AS instrument_id,
+  ltrb.lab_name AS lab_name,
+  gsrb.sequencing_platform AS sequencing_method,
+  ltrb.test_name AS panel_or_assay,
+  CAST(gsrb.read_length AS int) AS read_length_bp,
+  CAST(gsrb.coverage_depth AS double) AS coverage_mean,
+  gsrb.processing_status AS qc_status,
+  ltrb.test_result AS run_result_summary,
+  CAST(gsrb.upload_timestamp AS timestamp) AS record_effective_ts,
+  CAST(gsrb.upload_timestamp AS timestamp) AS record_end_ts,
+  CAST('true' AS string) AS is_current_record
+FROM genomics_sequencing_runs_bronze gsrb
+LEFT JOIN lab_test_results_bronze ltrb
+  ON gsrb.run_id = ltrb.sample_id
+""")
 
 (
-    products_silver_df.coalesce(1)
+    silver_sequencing_run_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/products_silver.csv")
+    .save(f"{TARGET_PATH}/silver_sequencing_run.csv")
 )
 
-products_silver_df.createOrReplaceTempView("products_silver")
-
-# =============================================================================
-# 5) Transform & Write: silver.stores_silver
-# =============================================================================
-stores_silver_sql = """
-WITH base AS (
-  SELECT
-    CAST(TRIM(sb.store_id) AS STRING) AS store_id,
-    CAST(TRIM(sb.store_name) AS STRING) AS store_name,
-    CAST(TRIM(sb.city) AS STRING) AS city,
-    CAST(TRIM(sb.state) AS STRING) AS state,
-    CAST(TRIM(sb.store_type) AS STRING) AS store_type,
-    CAST(sb.open_date AS DATE) AS open_date,
-    CAST(
-      COALESCE(
-        CASE UPPER(TRIM(sb.state))
-          WHEN 'CT' THEN 'NORTHEAST' WHEN 'ME' THEN 'NORTHEAST' WHEN 'MA' THEN 'NORTHEAST'
-          WHEN 'NH' THEN 'NORTHEAST' WHEN 'RI' THEN 'NORTHEAST' WHEN 'VT' THEN 'NORTHEAST'
-          WHEN 'NJ' THEN 'NORTHEAST' WHEN 'NY' THEN 'NORTHEAST' WHEN 'PA' THEN 'NORTHEAST'
-          WHEN 'IL' THEN 'MIDWEST' WHEN 'IN' THEN 'MIDWEST' WHEN 'MI' THEN 'MIDWEST'
-          WHEN 'OH' THEN 'MIDWEST' WHEN 'WI' THEN 'MIDWEST' WHEN 'IA' THEN 'MIDWEST'
-          WHEN 'KS' THEN 'MIDWEST' WHEN 'MN' THEN 'MIDWEST' WHEN 'MO' THEN 'MIDWEST'
-          WHEN 'NE' THEN 'MIDWEST' WHEN 'ND' THEN 'MIDWEST' WHEN 'SD' THEN 'MIDWEST'
-          WHEN 'DE' THEN 'SOUTH' WHEN 'FL' THEN 'SOUTH' WHEN 'GA' THEN 'SOUTH'
-          WHEN 'MD' THEN 'SOUTH' WHEN 'NC' THEN 'SOUTH' WHEN 'SC' THEN 'SOUTH'
-          WHEN 'VA' THEN 'SOUTH' WHEN 'DC' THEN 'SOUTH' WHEN 'WV' THEN 'SOUTH'
-          WHEN 'AL' THEN 'SOUTH' WHEN 'KY' THEN 'SOUTH' WHEN 'MS' THEN 'SOUTH'
-          WHEN 'TN' THEN 'SOUTH' WHEN 'AR' THEN 'SOUTH' WHEN 'LA' THEN 'SOUTH'
-          WHEN 'OK' THEN 'SOUTH' WHEN 'TX' THEN 'SOUTH'
-          WHEN 'AZ' THEN 'WEST' WHEN 'CO' THEN 'WEST' WHEN 'ID' THEN 'WEST'
-          WHEN 'MT' THEN 'WEST' WHEN 'NV' THEN 'WEST' WHEN 'NM' THEN 'WEST'
-          WHEN 'UT' THEN 'WEST' WHEN 'WY' THEN 'WEST'
-          WHEN 'AK' THEN 'WEST' WHEN 'CA' THEN 'WEST' WHEN 'HI' THEN 'WEST'
-          WHEN 'OR' THEN 'WEST' WHEN 'WA' THEN 'WEST'
-          ELSE NULL
-        END,
-        'UNKNOWN'
-      ) AS STRING
-    ) AS region,
-    ROW_NUMBER() OVER (
-      PARTITION BY CAST(TRIM(sb.store_id) AS STRING)
-      ORDER BY CAST(sb.open_date AS DATE) DESC
-    ) AS rn
-  FROM stores_bronze sb
-)
+# -------------------------------------
+# Target: silver_patient_sample (sps)
+# Source: bronze.genomics_sequencing_runs_bronze gsrb
+#        LEFT JOIN bronze.lab_test_results_bronze ltrb ON gsrb.sample_id = ltrb.sample_id
+# -------------------------------------
+silver_patient_sample_df = spark.sql("""
 SELECT
-  store_id,
-  store_name,
-  city,
-  state,
-  region,
-  store_type,
-  open_date
-FROM base
-WHERE rn = 1
-"""
-
-stores_silver_df = spark.sql(stores_silver_sql)
+  gsrb.sample_id AS sample_id,
+  gsrb.sample_id AS sample_accession,
+  gsrb.patient_id AS patient_id,
+  ltrb.test_name AS sample_type,
+  CAST(ltrb.collection_date AS date) AS collection_date,
+  CAST(ltrb.collection_date AS date) AS received_date,
+  ltrb.biomarker AS anatomical_site,
+  ltrb.biomarker AS specimen_source,
+  ltrb.lab_name AS processing_lab,
+  ltrb.result_id AS chain_of_custody_id,
+  CAST(gsrb.upload_timestamp AS timestamp) AS record_effective_ts,
+  CAST(gsrb.upload_timestamp AS timestamp) AS record_end_ts,
+  CAST('true' AS string) AS is_current_record
+FROM genomics_sequencing_runs_bronze gsrb
+LEFT JOIN lab_test_results_bronze ltrb
+  ON gsrb.sample_id = ltrb.sample_id
+""")
 
 (
-    stores_silver_df.coalesce(1)
+    silver_patient_sample_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/stores_silver.csv")
+    .save(f"{TARGET_PATH}/silver_patient_sample.csv")
 )
 
-stores_silver_df.createOrReplaceTempView("stores_silver")
-
-# =============================================================================
-# 6) Transform & Write: silver.aggregated_sales_silver
-# =============================================================================
-aggregated_sales_silver_sql = """
-WITH agg AS (
-  SELECT
-    CAST(sts.transaction_date AS DATE) AS report_date,
-    CAST(sts.store_id AS STRING) AS store_id,
-    CAST(sts.product_id AS STRING) AS product_id,
-    CAST(SUM(CAST(sts.sales_amount AS DOUBLE)) AS DOUBLE) AS total_sales,
-    CAST(SUM(CAST(sts.quantity_sold AS INT)) AS INT) AS total_units_sold,
-    CAST(COUNT(DISTINCT sts.transaction_id) AS BIGINT) AS transaction_count
-  FROM sales_transactions_silver sts
-  GROUP BY
-    CAST(sts.transaction_date AS DATE),
-    CAST(sts.store_id AS STRING),
-    CAST(sts.product_id AS STRING)
-)
+# -------------------------------------
+# Target: silver_sample_sequencing_run (sssr)
+# Source: bronze.genomics_sequencing_runs_bronze gsrb
+# -------------------------------------
+silver_sample_sequencing_run_df = spark.sql("""
 SELECT
-  report_date,
-  store_id,
-  product_id,
-  total_sales,
-  total_units_sold,
-  transaction_count,
-  CAST(
-    CASE
-      WHEN transaction_count > 0 THEN total_sales / transaction_count
-      ELSE NULL
-    END AS DOUBLE
-  ) AS average_transaction_value,
-  CAST(
-    CASE
-      WHEN total_units_sold > 0 THEN total_sales / total_units_sold
-      ELSE NULL
-    END AS DOUBLE
-  ) AS average_price
-FROM agg
-"""
-
-aggregated_sales_silver_df = spark.sql(aggregated_sales_silver_sql)
+  gsrb.sample_id AS sample_id,
+  gsrb.run_id AS sequencing_run_id,
+  gsrb.run_id AS library_id,
+  gsrb.run_id AS lane_id,
+  gsrb.reference_genome AS alignment_reference_build,
+  gsrb.processing_status AS pipeline_version,
+  CAST(gsrb.run_date AS date) AS analysis_date,
+  gsrb.processing_status AS qc_status,
+  CAST(gsrb.upload_timestamp AS timestamp) AS record_effective_ts,
+  CAST(gsrb.upload_timestamp AS timestamp) AS record_end_ts,
+  CAST('true' AS string) AS is_current_record
+FROM genomics_sequencing_runs_bronze gsrb
+""")
 
 (
-    aggregated_sales_silver_df.coalesce(1)
+    silver_sample_sequencing_run_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/aggregated_sales_silver.csv")
+    .save(f"{TARGET_PATH}/silver_sample_sequencing_run.csv")
 )
 
-aggregated_sales_silver_df.createOrReplaceTempView("aggregated_sales_silver")
-
-# =============================================================================
-# 7) Transform & Write: silver.sales_enriched_silver
-# =============================================================================
-sales_enriched_silver_sql = """
+# -------------------------------------
+# Target: silver_genomic_variant (sgv)
+# Source: bronze.genomic_variants_bronze gvb
+# -------------------------------------
+silver_genomic_variant_df = spark.sql("""
 SELECT
-  sts.transaction_id AS transaction_id,
-  sts.transaction_date AS transaction_date,
-  sts.product_id AS product_id,
-  ps.product_name AS product_name,
-  sts.store_id AS store_id,
-  ss.store_name AS store_name,
-  sts.quantity_sold AS quantity_sold,
-  sts.sales_amount AS sales_amount,
-  ps.category AS category,
-  ss.region AS region
-FROM sales_transactions_silver sts
-INNER JOIN products_silver ps
-  ON sts.product_id = ps.product_id
-INNER JOIN stores_silver ss
-  ON sts.store_id = ss.store_id
-"""
-
-sales_enriched_silver_df = spark.sql(sales_enriched_silver_sql)
+  gvb.variant_id AS variant_id,
+  gvb.variant_id AS variant_key,
+  gvb.chromosome AS chromosome,
+  CAST(gvb.genomic_position AS int) AS position,
+  gvb.reference_allele AS reference_allele,
+  gvb.alternate_allele AS alternate_allele,
+  gvb.variant_type AS variant_type,
+  gvb.gene_name AS gene_symbol,
+  gvb.mutation AS transcript_id,
+  gvb.mutation AS hgvs_c,
+  gvb.mutation AS hgvs_p,
+  gvb.clinical_significance AS clinical_significance,
+  gvb.variant_id AS dbsnp_id
+FROM genomic_variants_bronze gvb
+""")
 
 (
-    sales_enriched_silver_df.coalesce(1)
+    silver_genomic_variant_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/sales_enriched_silver.csv")
+    .save(f"{TARGET_PATH}/silver_genomic_variant.csv")
+)
+
+# -------------------------------------
+# Target: silver_sample_variant_observation (ssvo)
+# Source: bronze.genomic_variants_bronze gvb
+#        LEFT JOIN bronze.genomics_sequencing_runs_bronze gsrb ON gvb.run_id = gsrb.run_id
+# -------------------------------------
+silver_sample_variant_observation_df = spark.sql("""
+SELECT
+  gsrb.sample_id AS sample_id,
+  gvb.variant_id AS variant_id,
+  gsrb.run_id AS sequencing_run_id,
+  gvb.validation_status AS genotype,
+  CAST(gvb.pathogenicity_score AS float) AS allele_fraction,
+  CAST(gvb.genomic_position AS int) AS read_depth,
+  CAST(gsrb.quality_score AS double) AS variant_quality,
+  gsrb.processing_status AS filter_status,
+  gsrb.technician_name AS caller_name,
+  gsrb.processing_status AS caller_version,
+  CAST(gvb.detected_date AS date) AS detected_date,
+  CAST(gsrb.upload_timestamp AS timestamp) AS record_effective_ts,
+  CAST(gsrb.upload_timestamp AS timestamp) AS record_end_ts,
+  CAST('true' AS string) AS is_current_record
+FROM genomic_variants_bronze gvb
+LEFT JOIN genomics_sequencing_runs_bronze gsrb
+  ON gvb.run_id = gsrb.run_id
+""")
+
+(
+    silver_sample_variant_observation_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/silver_sample_variant_observation.csv")
 )
 
 job.commit()
