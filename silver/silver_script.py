@@ -17,147 +17,284 @@ SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 FILE_FORMAT = "csv"
 
-# ============================================================
-# Source: sequencing_run_performance_daily_bronze (srpdb)
-# Target: sequencing_run_performance_daily_silver
-# ============================================================
-srpdb_df = (
+# =============================================================================
+# 1) Read source tables from S3 (Bronze)
+# =============================================================================
+sales_transactions_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/sequencing_run_performance_daily_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/sales_transactions_bronze.{FILE_FORMAT}/")
 )
-srpdb_df.createOrReplaceTempView("sequencing_run_performance_daily_bronze")
 
-sequencing_run_performance_daily_silver_df = spark.sql("""
-WITH ranked AS (
+products_bronze_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/products_bronze.{FILE_FORMAT}/")
+)
+
+stores_bronze_df = (
+    spark.read.format(FILE_FORMAT)
+    .option("header", "true")
+    .load(f"{SOURCE_PATH}/stores_bronze.{FILE_FORMAT}/")
+)
+
+# =============================================================================
+# 2) Create temp views
+# =============================================================================
+sales_transactions_bronze_df.createOrReplaceTempView("sales_transactions_bronze")
+products_bronze_df.createOrReplaceTempView("products_bronze")
+stores_bronze_df.createOrReplaceTempView("stores_bronze")
+
+# =============================================================================
+# 3) Transform & Write: silver.sales_transactions_silver
+# =============================================================================
+sales_transactions_silver_sql = """
+WITH base AS (
   SELECT
-    srpdb.*,
+    CAST(TRIM(stb.transaction_id) AS STRING)            AS transaction_id,
+    CAST(stb.transaction_time AS TIMESTAMP)            AS transaction_timestamp,
+    CAST(CAST(stb.transaction_time AS TIMESTAMP) AS DATE) AS transaction_date,
+    CAST(TRIM(stb.store_id) AS STRING)                 AS store_id,
+    CAST(TRIM(stb.product_id) AS STRING)               AS product_id,
+    CAST(COALESCE(CAST(stb.quantity AS INT), 0) AS INT) AS quantity_sold,
+    CAST(COALESCE(CAST(stb.sale_amount AS DOUBLE), 0.0) AS DOUBLE) AS sales_amount,
     ROW_NUMBER() OVER (
-      PARTITION BY srpdb.run_id
-      ORDER BY srpdb.upload_timestamp DESC
+      PARTITION BY CAST(TRIM(stb.transaction_id) AS STRING)
+      ORDER BY CAST(stb.transaction_time AS TIMESTAMP) DESC
     ) AS rn
-  FROM sequencing_run_performance_daily_bronze srpdb
-  WHERE srpdb.run_id IS NOT NULL
-    AND srpdb.run_date IS NOT NULL
+  FROM sales_transactions_bronze stb
+),
+filtered AS (
+  SELECT
+    transaction_id,
+    transaction_timestamp,
+    transaction_date,
+    store_id,
+    product_id,
+    quantity_sold,
+    sales_amount
+  FROM base
+  WHERE rn = 1
+    AND quantity_sold >= 0
+    AND sales_amount >= 0
 )
 SELECT
-  CAST(srpdb.run_id AS STRING) AS run_id,
-  DATE(srpdb.run_date) AS run_date,
-  CAST(srpdb.sequencing_center AS STRING) AS lab_id,
-  CAST(srpdb.sequencing_platform AS STRING) AS instrument_id,
-  CAST(srpdb.sample_id AS STRING) AS sample_count,
-  CAST(srpdb.coverage_depth AS DOUBLE) AS mean_read_depth,
-  CAST(srpdb.quality_score AS DOUBLE) AS pct_reads_q30,
-  CAST(srpdb.alignment_rate AS DOUBLE) AS pct_bases_covered_20x,
-  CAST(srpdb.processing_status AS STRING) AS failure_flag,
-  CAST(srpdb.quality_score AS DOUBLE) AS data_quality_score
-FROM ranked srpdb
-WHERE srpdb.rn = 1
-""")
+  transaction_id,
+  transaction_timestamp,
+  transaction_date,
+  store_id,
+  product_id,
+  quantity_sold,
+  sales_amount
+FROM filtered
+"""
+
+sales_transactions_silver_df = spark.sql(sales_transactions_silver_sql)
 
 (
-    sequencing_run_performance_daily_silver_df.coalesce(1)
+    sales_transactions_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/sequencing_run_performance_daily_silver.csv")
+    .save(f"{TARGET_PATH}/sales_transactions_silver.csv")
 )
 
-# ============================================================
-# Source: patient_variant_fact_bronze (pvfb)
-# Target: patient_variant_fact_silver
-# ============================================================
-pvfb_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/patient_variant_fact_bronze.{FILE_FORMAT}/")
-)
-pvfb_df.createOrReplaceTempView("patient_variant_fact_bronze")
+sales_transactions_silver_df.createOrReplaceTempView("sales_transactions_silver")
 
-patient_variant_fact_silver_df = spark.sql("""
-WITH ranked AS (
+# =============================================================================
+# 4) Transform & Write: silver.products_silver
+# =============================================================================
+products_silver_sql = """
+WITH base AS (
   SELECT
-    pvfb.*,
+    CAST(TRIM(pb.product_id) AS STRING) AS product_id,
+    CAST(
+      COALESCE(NULLIF(TRIM(pb.product_name), ''), 'UNKNOWN')
+      AS STRING
+    ) AS product_name,
+    CAST(TRIM(pb.category) AS STRING) AS category,
+    CAST(TRIM(pb.brand) AS STRING) AS brand,
+    CAST(pb.price AS FLOAT) AS price,
+    CAST(pb.is_active AS BOOLEAN) AS is_active,
     ROW_NUMBER() OVER (
-      PARTITION BY pvfb.patient_id, pvfb.run_id, pvfb.variant_id
-      ORDER BY pvfb.detected_date DESC
+      PARTITION BY CAST(TRIM(pb.product_id) AS STRING)
+      ORDER BY CAST(pb.is_active AS BOOLEAN) DESC
     ) AS rn
-  FROM patient_variant_fact_bronze pvfb
-  WHERE pvfb.variant_id IS NOT NULL
-    AND pvfb.patient_id IS NOT NULL
-    AND pvfb.run_id IS NOT NULL
+  FROM products_bronze pb
 )
 SELECT
-  CAST(pvfb.patient_id AS STRING) AS patient_id,
-  CAST(pvfb.run_id AS STRING) AS run_id,
-  CAST(pvfb.variant_id AS STRING) AS variant_id,
-  CAST(pvfb.chromosome AS STRING) AS chromosome,
-  CAST(pvfb.genomic_position AS INT) AS position,
-  CAST(pvfb.reference_allele AS STRING) AS reference_allele,
-  CAST(pvfb.alternate_allele AS STRING) AS alternate_allele,
-  CAST(pvfb.gene_name AS STRING) AS gene_symbol,
-  CAST(pvfb.variant_type AS STRING) AS variant_type,
-  CAST(pvfb.validation_status AS STRING) AS zygosity,
-  CAST(pvfb.clinical_significance AS STRING) AS clinical_significance,
-  CAST(pvfb.pathogenicity_score AS FLOAT) AS variant_quality_score,
-  DATE(pvfb.detected_date) AS variant_call_date
-FROM ranked pvfb
-WHERE pvfb.rn = 1
-""")
+  product_id,
+  product_name,
+  category,
+  brand,
+  price,
+  is_active
+FROM base
+WHERE rn = 1
+"""
+
+products_silver_df = spark.sql(products_silver_sql)
 
 (
-    patient_variant_fact_silver_df.coalesce(1)
+    products_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/patient_variant_fact_silver.csv")
+    .save(f"{TARGET_PATH}/products_silver.csv")
 )
 
-# ============================================================
-# Source: lab_results_trend_bronze (lrtb)
-# Target: lab_results_trend_silver
-# ============================================================
-lrtb_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/lab_results_trend_bronze.{FILE_FORMAT}/")
-)
-lrtb_df.createOrReplaceTempView("lab_results_trend_bronze")
+products_silver_df.createOrReplaceTempView("products_silver")
 
-lab_results_trend_silver_df = spark.sql("""
-WITH ranked AS (
+# =============================================================================
+# 5) Transform & Write: silver.stores_silver
+# =============================================================================
+stores_silver_sql = """
+WITH base AS (
   SELECT
-    lrtb.*,
+    CAST(TRIM(sb.store_id) AS STRING) AS store_id,
+    CAST(TRIM(sb.store_name) AS STRING) AS store_name,
+    CAST(TRIM(sb.city) AS STRING) AS city,
+    CAST(TRIM(sb.state) AS STRING) AS state,
+    CAST(TRIM(sb.store_type) AS STRING) AS store_type,
+    CAST(sb.open_date AS DATE) AS open_date,
+    CAST(
+      COALESCE(
+        CASE UPPER(TRIM(sb.state))
+          WHEN 'CT' THEN 'NORTHEAST' WHEN 'ME' THEN 'NORTHEAST' WHEN 'MA' THEN 'NORTHEAST'
+          WHEN 'NH' THEN 'NORTHEAST' WHEN 'RI' THEN 'NORTHEAST' WHEN 'VT' THEN 'NORTHEAST'
+          WHEN 'NJ' THEN 'NORTHEAST' WHEN 'NY' THEN 'NORTHEAST' WHEN 'PA' THEN 'NORTHEAST'
+          WHEN 'IL' THEN 'MIDWEST' WHEN 'IN' THEN 'MIDWEST' WHEN 'MI' THEN 'MIDWEST'
+          WHEN 'OH' THEN 'MIDWEST' WHEN 'WI' THEN 'MIDWEST' WHEN 'IA' THEN 'MIDWEST'
+          WHEN 'KS' THEN 'MIDWEST' WHEN 'MN' THEN 'MIDWEST' WHEN 'MO' THEN 'MIDWEST'
+          WHEN 'NE' THEN 'MIDWEST' WHEN 'ND' THEN 'MIDWEST' WHEN 'SD' THEN 'MIDWEST'
+          WHEN 'DE' THEN 'SOUTH' WHEN 'FL' THEN 'SOUTH' WHEN 'GA' THEN 'SOUTH'
+          WHEN 'MD' THEN 'SOUTH' WHEN 'NC' THEN 'SOUTH' WHEN 'SC' THEN 'SOUTH'
+          WHEN 'VA' THEN 'SOUTH' WHEN 'DC' THEN 'SOUTH' WHEN 'WV' THEN 'SOUTH'
+          WHEN 'AL' THEN 'SOUTH' WHEN 'KY' THEN 'SOUTH' WHEN 'MS' THEN 'SOUTH'
+          WHEN 'TN' THEN 'SOUTH' WHEN 'AR' THEN 'SOUTH' WHEN 'LA' THEN 'SOUTH'
+          WHEN 'OK' THEN 'SOUTH' WHEN 'TX' THEN 'SOUTH'
+          WHEN 'AZ' THEN 'WEST' WHEN 'CO' THEN 'WEST' WHEN 'ID' THEN 'WEST'
+          WHEN 'MT' THEN 'WEST' WHEN 'NV' THEN 'WEST' WHEN 'NM' THEN 'WEST'
+          WHEN 'UT' THEN 'WEST' WHEN 'WY' THEN 'WEST'
+          WHEN 'AK' THEN 'WEST' WHEN 'CA' THEN 'WEST' WHEN 'HI' THEN 'WEST'
+          WHEN 'OR' THEN 'WEST' WHEN 'WA' THEN 'WEST'
+          ELSE NULL
+        END,
+        'UNKNOWN'
+      ) AS STRING
+    ) AS region,
     ROW_NUMBER() OVER (
-      PARTITION BY lrtb.result_id
-      ORDER BY lrtb.result_date DESC, lrtb.collection_date DESC
+      PARTITION BY CAST(TRIM(sb.store_id) AS STRING)
+      ORDER BY CAST(sb.open_date AS DATE) DESC
     ) AS rn
-  FROM lab_results_trend_bronze lrtb
-  WHERE lrtb.result_id IS NOT NULL
-    AND lrtb.patient_id IS NOT NULL
-    AND lrtb.result_date IS NOT NULL
+  FROM stores_bronze sb
 )
 SELECT
-  CAST(lrtb.patient_id AS STRING) AS patient_id,
-  CAST(lrtb.result_id AS STRING) AS result_id,
-  CAST(lrtb.biomarker AS STRING) AS test_code,
-  CAST(lrtb.test_name AS STRING) AS test_name,
-  CAST(lrtb.test_result AS STRING) AS result_value,
-  CAST(lrtb.unit AS STRING) AS result_unit,
-  CAST(lrtb.reference_range AS STRING) AS reference_range_low,
-  CAST(lrtb.reference_range AS STRING) AS reference_range_high,
-  CAST(lrtb.interpretation AS STRING) AS abnormal_flag,
-  DATE(lrtb.result_date) AS result_date
-FROM ranked lrtb
-WHERE lrtb.rn = 1
-""")
+  store_id,
+  store_name,
+  city,
+  state,
+  region,
+  store_type,
+  open_date
+FROM base
+WHERE rn = 1
+"""
+
+stores_silver_df = spark.sql(stores_silver_sql)
 
 (
-    lab_results_trend_silver_df.coalesce(1)
+    stores_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/lab_results_trend_silver.csv")
+    .save(f"{TARGET_PATH}/stores_silver.csv")
+)
+
+stores_silver_df.createOrReplaceTempView("stores_silver")
+
+# =============================================================================
+# 6) Transform & Write: silver.aggregated_sales_silver
+# =============================================================================
+aggregated_sales_silver_sql = """
+WITH agg AS (
+  SELECT
+    CAST(sts.transaction_date AS DATE) AS report_date,
+    CAST(sts.store_id AS STRING) AS store_id,
+    CAST(sts.product_id AS STRING) AS product_id,
+    CAST(SUM(CAST(sts.sales_amount AS DOUBLE)) AS DOUBLE) AS total_sales,
+    CAST(SUM(CAST(sts.quantity_sold AS INT)) AS INT) AS total_units_sold,
+    CAST(COUNT(DISTINCT sts.transaction_id) AS BIGINT) AS transaction_count
+  FROM sales_transactions_silver sts
+  GROUP BY
+    CAST(sts.transaction_date AS DATE),
+    CAST(sts.store_id AS STRING),
+    CAST(sts.product_id AS STRING)
+)
+SELECT
+  report_date,
+  store_id,
+  product_id,
+  total_sales,
+  total_units_sold,
+  transaction_count,
+  CAST(
+    CASE
+      WHEN transaction_count > 0 THEN total_sales / transaction_count
+      ELSE NULL
+    END AS DOUBLE
+  ) AS average_transaction_value,
+  CAST(
+    CASE
+      WHEN total_units_sold > 0 THEN total_sales / total_units_sold
+      ELSE NULL
+    END AS DOUBLE
+  ) AS average_price
+FROM agg
+"""
+
+aggregated_sales_silver_df = spark.sql(aggregated_sales_silver_sql)
+
+(
+    aggregated_sales_silver_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/aggregated_sales_silver.csv")
+)
+
+aggregated_sales_silver_df.createOrReplaceTempView("aggregated_sales_silver")
+
+# =============================================================================
+# 7) Transform & Write: silver.sales_enriched_silver
+# =============================================================================
+sales_enriched_silver_sql = """
+SELECT
+  sts.transaction_id AS transaction_id,
+  sts.transaction_date AS transaction_date,
+  sts.product_id AS product_id,
+  ps.product_name AS product_name,
+  sts.store_id AS store_id,
+  ss.store_name AS store_name,
+  sts.quantity_sold AS quantity_sold,
+  sts.sales_amount AS sales_amount,
+  ps.category AS category,
+  ss.region AS region
+FROM sales_transactions_silver sts
+INNER JOIN products_silver ps
+  ON sts.product_id = ps.product_id
+INNER JOIN stores_silver ss
+  ON sts.store_id = ss.store_id
+"""
+
+sales_enriched_silver_df = spark.sql(sales_enriched_silver_sql)
+
+(
+    sales_enriched_silver_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/sales_enriched_silver.csv")
 )
 
 job.commit()
