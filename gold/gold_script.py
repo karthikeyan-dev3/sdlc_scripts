@@ -7,7 +7,7 @@ from pyspark.sql import SparkSession
 
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
 
-sc = SparkContext()
+sc = SparkContext.getOrCreate()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
 job = Job(glueContext)
@@ -17,169 +17,190 @@ SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
-spark.conf.set("mapreduce.fileoutputcommitter.marksuccessfuljobs", "false")
+# ------------------------------------------------------------------------------
+# 1) Read source tables from S3
+# ------------------------------------------------------------------------------
 
-# =============================================================================
-# Source Reads + Temp Views
-# =============================================================================
-
-sts_df = (
+srpds_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/sales_transactions_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/sequencing_run_performance_daily_silver.{FILE_FORMAT}/")
 )
-sts_df.createOrReplaceTempView("sts")
-
-pms_df = (
+pvfs_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/product_master_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/patient_variant_fact_silver.{FILE_FORMAT}/")
 )
-pms_df.createOrReplaceTempView("pms")
-
-sms_df = (
+lrts_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/store_master_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/lab_results_trend_silver.{FILE_FORMAT}/")
 )
-sms_df.createOrReplaceTempView("sms")
 
-ass_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/aggregated_sales_silver.{FILE_FORMAT}/")
-)
-ass_df.createOrReplaceTempView("ass")
+# ------------------------------------------------------------------------------
+# 2) Create temp views
+# ------------------------------------------------------------------------------
 
-sps_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/sales_performance_silver.{FILE_FORMAT}/")
-)
-sps_df.createOrReplaceTempView("sps")
+srpds_df.createOrReplaceTempView("sequencing_run_performance_daily_silver")
+pvfs_df.createOrReplaceTempView("patient_variant_fact_silver")
+lrts_df.createOrReplaceTempView("lab_results_trend_silver")
 
-# =============================================================================
-# Target: gold_sales_transactions
-# =============================================================================
-
-gold_sales_transactions_df = spark.sql(
+# ------------------------------------------------------------------------------
+# TABLE: gold.gold_sequencing_run_performance_daily
+# ------------------------------------------------------------------------------
+gold_sequencing_run_performance_daily_df = spark.sql(
     """
     SELECT
-        CAST(sts.transaction_id AS STRING) AS transaction_id,
-        DATE(sts.sale_date) AS sale_date,
-        CAST(sts.store_id AS STRING) AS store_id,
-        CAST(sts.product_id AS STRING) AS product_id,
-        CAST(sts.quantity_sold AS INT) AS quantity_sold,
-        CAST(sts.total_amount AS DOUBLE) AS total_amount
-    FROM sts
+        CAST(srpds.run_id AS STRING) AS run_id,
+        DATE(srpds.run_date) AS run_date,
+        CAST(srpds.lab_id AS STRING) AS lab_id,
+        CAST(srpds.instrument_id AS STRING) AS instrument_id,
+        CAST(srpds.sample_count AS STRING) AS sample_count,
+        CAST(srpds.mean_read_depth AS DOUBLE) AS mean_read_depth,
+        CAST(srpds.pct_reads_q30 AS DOUBLE) AS pct_reads_q30,
+        CAST(srpds.pct_bases_covered_20x AS DOUBLE) AS pct_bases_covered_20x,
+        CAST(srpds.failure_flag AS STRING) AS failure_flag,
+        CAST(srpds.data_quality_score AS DOUBLE) AS data_quality_score
+    FROM sequencing_run_performance_daily_silver srpds
     """
 )
 
 (
-    gold_sales_transactions_df.coalesce(1)
+    gold_sequencing_run_performance_daily_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_sales_transactions.csv")
+    .save(f"{TARGET_PATH}/gold_sequencing_run_performance_daily.csv")
 )
 
-# =============================================================================
-# Target: gold_product_master
-# =============================================================================
-
-gold_product_master_df = spark.sql(
+# ------------------------------------------------------------------------------
+# TABLE: gold.gold_patient_variant_fact
+# ------------------------------------------------------------------------------
+gold_patient_variant_fact_df = spark.sql(
     """
     SELECT
-        CAST(pms.product_id AS STRING) AS product_id,
-        CAST(pms.product_name AS STRING) AS product_name,
-        CAST(pms.category AS STRING) AS category,
-        CAST(pms.brand AS STRING) AS brand,
-        CAST(pms.price AS DOUBLE) AS price,
-        CAST(pms.attributes AS STRING) AS attributes
-    FROM pms
+        CAST(pvfs.patient_id AS STRING) AS patient_id,
+        CAST(pvfs.run_id AS STRING) AS run_id,
+        CAST(pvfs.variant_id AS STRING) AS variant_id,
+        CAST(pvfs.chromosome AS STRING) AS chromosome,
+        CAST(pvfs.position AS INT) AS position,
+        CAST(pvfs.reference_allele AS STRING) AS reference_allele,
+        CAST(pvfs.alternate_allele AS STRING) AS alternate_allele,
+        CAST(pvfs.gene_symbol AS STRING) AS gene_symbol,
+        CAST(pvfs.variant_type AS STRING) AS variant_type,
+        CAST(pvfs.zygosity AS STRING) AS zygosity,
+        CAST(pvfs.clinical_significance AS STRING) AS clinical_significance,
+        CAST(pvfs.variant_quality_score AS FLOAT) AS variant_quality_score,
+        DATE(pvfs.variant_call_date) AS variant_call_date
+    FROM patient_variant_fact_silver pvfs
     """
 )
 
 (
-    gold_product_master_df.coalesce(1)
+    gold_patient_variant_fact_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_product_master.csv")
+    .save(f"{TARGET_PATH}/gold_patient_variant_fact.csv")
 )
 
-# =============================================================================
-# Target: gold_store_master
-# =============================================================================
-
-gold_store_master_df = spark.sql(
+# ------------------------------------------------------------------------------
+# TABLE: gold.gold_lab_results_trend
+# ------------------------------------------------------------------------------
+gold_lab_results_trend_df = spark.sql(
     """
     SELECT
-        CAST(sms.store_id AS STRING) AS store_id,
-        CAST(sms.store_name AS STRING) AS store_name,
-        CAST(sms.region AS STRING) AS region,
-        CAST(sms.city AS STRING) AS city,
-        CAST(sms.store_area AS STRING) AS store_area
-    FROM sms
+        CAST(lrts.patient_id AS STRING) AS patient_id,
+        CAST(lrts.result_id AS STRING) AS result_id,
+        CAST(lrts.test_code AS STRING) AS test_code,
+        CAST(lrts.test_name AS STRING) AS test_name,
+        CAST(lrts.result_value AS STRING) AS result_value,
+        CAST(lrts.result_unit AS STRING) AS result_unit,
+        CAST(lrts.reference_range_low AS STRING) AS reference_range_low,
+        CAST(lrts.reference_range_high AS STRING) AS reference_range_high,
+        CAST(lrts.abnormal_flag AS STRING) AS abnormal_flag,
+        DATE(lrts.result_date) AS result_date
+    FROM lab_results_trend_silver lrts
     """
 )
 
 (
-    gold_store_master_df.coalesce(1)
+    gold_lab_results_trend_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_store_master.csv")
+    .save(f"{TARGET_PATH}/gold_lab_results_trend.csv")
 )
 
-# =============================================================================
-# Target: gold_aggregated_sales
-# =============================================================================
-
-gold_aggregated_sales_df = spark.sql(
+# ------------------------------------------------------------------------------
+# TABLE: gold.gold_patient_genomics_profile
+# ------------------------------------------------------------------------------
+gold_patient_genomics_profile_df = spark.sql(
     """
     SELECT
-        DATE(ass.report_date) AS report_date,
-        CAST(ass.store_id AS STRING) AS store_id,
-        CAST(ass.product_id AS STRING) AS product_id,
-        CAST(ass.total_quantity_sold AS INT) AS total_quantity_sold,
-        CAST(ass.total_sales_amount AS DOUBLE) AS total_sales_amount,
-        CAST(ass.average_price AS DOUBLE) AS average_price
-    FROM ass
+        CAST(pvfs.patient_id AS STRING) AS patient_id,
+        CAST(MAX_BY(pvfs.run_id, DATE(pvfs.variant_call_date)) AS STRING) AS latest_sequencing_run_id,
+        DATE(MAX_BY(srpds.run_date, DATE(pvfs.variant_call_date))) AS latest_sequencing_run_date,
+        DATE(MAX(lrts.result_date)) AS latest_lab_result_date,
+        CAST(COUNT(pvfs.variant_id) AS INT) AS variant_count_total,
+        CAST(COUNT(CASE WHEN pvfs.clinical_significance = 'Pathogenic' THEN pvfs.variant_id END) AS INT) AS variant_count_pathogenic,
+        CAST(COUNT(CASE WHEN pvfs.clinical_significance = 'Likely pathogenic' THEN pvfs.variant_id END) AS INT) AS variant_count_likely_pathogenic,
+        CAST(COUNT(CASE WHEN pvfs.clinical_significance = 'VUS' THEN pvfs.variant_id END) AS INT) AS variant_count_vus,
+        CAST(AVG(COALESCE(CAST(pvfs.variant_quality_score AS DOUBLE), CAST(srpds.data_quality_score AS DOUBLE))) AS DOUBLE) AS data_quality_score,
+        DATE(MAX(pvfs.variant_call_date)) AS record_effective_date
+    FROM patient_variant_fact_silver pvfs
+    LEFT JOIN sequencing_run_performance_daily_silver srpds
+        ON pvfs.run_id = srpds.run_id
+    LEFT JOIN lab_results_trend_silver lrts
+        ON pvfs.patient_id = lrts.patient_id
+    GROUP BY
+        pvfs.patient_id
     """
 )
 
 (
-    gold_aggregated_sales_df.coalesce(1)
+    gold_patient_genomics_profile_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_aggregated_sales.csv")
+    .save(f"{TARGET_PATH}/gold_patient_genomics_profile.csv")
 )
 
-# =============================================================================
-# Target: gold_sales_performance
-# =============================================================================
-
-gold_sales_performance_df = spark.sql(
+# ------------------------------------------------------------------------------
+# TABLE: gold.gold_clinical_trial_eligibility_screening
+# NOTE: ELIGIBILITY_RULE / ELIGIBILITY_STATUS / ELIGIBILITY_REASON / RULE_VERSION
+# are represented exactly as provided in UDT and must exist as Spark SQL functions.
+# ------------------------------------------------------------------------------
+gold_clinical_trial_eligibility_screening_df = spark.sql(
     """
     SELECT
-        CAST(sps.store_id AS STRING) AS store_id,
-        CAST(sps.product_id AS STRING) AS product_id,
-        CAST(sps.sale_period AS STRING) AS sale_period,
-        CAST(sps.sales_growth_rate AS DOUBLE) AS sales_growth_rate,
-        CAST(sps.average_discount AS DOUBLE) AS average_discount
-    FROM sps
+        CAST(pvfs.patient_id AS STRING) AS patient_id,
+        CAST(pvfs.variant_id AS STRING) AS supporting_variant_id,
+        CAST(lrts.result_id AS STRING) AS supporting_lab_result_id,
+        DATE(MAX(pvfs.variant_call_date)) AS evaluation_date,
+        CAST(ELIGIBILITY_RULE(pvfs.clinical_significance, lrts.abnormal_flag) AS STRING) AS trial_id,
+        CAST(ELIGIBILITY_STATUS(pvfs.clinical_significance, lrts.abnormal_flag) AS STRING) AS eligibility_status,
+        CAST(ELIGIBILITY_REASON(pvfs.variant_id, lrts.result_id) AS STRING) AS eligibility_reason,
+        CAST(RULE_VERSION(pvfs.variant_type) AS STRING) AS rule_version
+    FROM patient_variant_fact_silver pvfs
+    LEFT JOIN lab_results_trend_silver lrts
+        ON pvfs.patient_id = lrts.patient_id
+    GROUP BY
+        pvfs.patient_id,
+        pvfs.variant_id,
+        lrts.result_id,
+        pvfs.clinical_significance,
+        lrts.abnormal_flag,
+        pvfs.variant_type
     """
 )
 
 (
-    gold_sales_performance_df.coalesce(1)
+    gold_clinical_trial_eligibility_screening_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_sales_performance.csv")
+    .save(f"{TARGET_PATH}/gold_clinical_trial_eligibility_screening.csv")
 )
 
 job.commit()
