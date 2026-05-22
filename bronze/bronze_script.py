@@ -1,177 +1,50 @@
-import sys
-from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
-from awsglue.job import Job
 from pyspark.context import SparkContext
+from awsglue.job import Job
 
-args = getResolvedOptions(sys.argv, ["JOB_NAME"])
-
-SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/genomics/"
-TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
-FILE_FORMAT = "csv"
-
-sc = SparkContext()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
+
 job = Job(glueContext)
-job.init(args["JOB_NAME"], args)
+job.init("bronze_job", {})
 
-spark.conf.set("spark.sql.session.timeZone", "UTC")
+metadata = {'tables': [{'target_schema': 'bronze', 'target_table': 'sales_transactions_bronze', 'target_alias': 'stb', 'mapping_details': 'sales_transactions_raw str', 'description': 'Bronze table capturing raw sales transaction records ingested as-is from sales_transactions_raw (transaction_id, store_id, product_id, quantity, sale_amount, transaction_time). No joins or aggregations applied.'}, {'target_schema': 'bronze', 'target_table': 'products_bronze', 'target_alias': 'pb', 'mapping_details': 'products_raw pr', 'description': 'Bronze table capturing raw product master data ingested as-is from products_raw (product_id, product_name, category, brand, price, is_active). No joins or aggregations applied.'}, {'target_schema': 'bronze', 'target_table': 'stores_bronze', 'target_alias': 'sb', 'mapping_details': 'stores_raw sr', 'description': 'Bronze table capturing raw store master data ingested as-is from stores_raw (store_id, store_name, city, state, store_type, open_date). No joins or aggregations applied.'}], 'columns': [{'source_column': "['stb.transaction_id']", 'source_type': 'varchar(20)', 'source_nullable': 'not_accepted', 'target_column': 'transaction_id', 'target_type': 'varchar(20)', 'target_nullable': 'not_accepted', 'transformation': 'stb.transaction_id = str.transaction_id', 'target_table': 'stb'}, {'source_column': "['stb.store_id']", 'source_type': 'varchar(20)', 'source_nullable': 'accepted', 'target_column': 'store_id', 'target_type': 'varchar(20)', 'target_nullable': 'accepted', 'transformation': 'stb.store_id = str.store_id', 'target_table': 'stb'}, {'source_column': "['stb.product_id']", 'source_type': 'varchar(20)', 'source_nullable': 'accepted', 'target_column': 'product_id', 'target_type': 'varchar(20)', 'target_nullable': 'accepted', 'transformation': 'stb.product_id = str.product_id', 'target_table': 'stb'}, {'source_column': "['stb.quantity']", 'source_type': 'int', 'source_nullable': 'accepted', 'target_column': 'quantity', 'target_type': 'int', 'target_nullable': 'accepted', 'transformation': 'stb.quantity = str.quantity', 'target_table': 'stb'}, {'source_column': "['stb.sale_amount']", 'source_type': 'double', 'source_nullable': 'accepted', 'target_column': 'sale_amount', 'target_type': 'double', 'target_nullable': 'accepted', 'transformation': 'stb.sale_amount = str.sale_amount', 'target_table': 'stb'}, {'source_column': "['stb.transaction_time']", 'source_type': 'timestamp', 'source_nullable': 'accepted', 'target_column': 'transaction_time', 'target_type': 'timestamp', 'target_nullable': 'accepted', 'transformation': 'stb.transaction_time = str.transaction_time', 'target_table': 'stb'}, {'source_column': "['pb.product_id']", 'source_type': 'varchar(10)', 'source_nullable': 'not_accepted', 'target_column': 'product_id', 'target_type': 'varchar(10)', 'target_nullable': 'not_accepted', 'transformation': 'pb.product_id = pr.product_id', 'target_table': 'pb'}, {'source_column': "['pb.product_name']", 'source_type': 'varchar(255)', 'source_nullable': 'accepted', 'target_column': 'product_name', 'target_type': 'varchar(255)', 'target_nullable': 'accepted', 'transformation': 'pb.product_name = pr.product_name', 'target_table': 'pb'}, {'source_column': "['pb.category']", 'source_type': 'varchar(100)', 'source_nullable': 'accepted', 'target_column': 'category', 'target_type': 'varchar(100)', 'target_nullable': 'accepted', 'transformation': 'pb.category = pr.category', 'target_table': 'pb'}, {'source_column': "['pb.brand']", 'source_type': 'varchar(100)', 'source_nullable': 'accepted', 'target_column': 'brand', 'target_type': 'varchar(100)', 'target_nullable': 'accepted', 'transformation': 'pb.brand = pr.brand', 'target_table': 'pb'}, {'source_column': "['pb.price']", 'source_type': 'float', 'source_nullable': 'accepted', 'target_column': 'price', 'target_type': 'float', 'target_nullable': 'accepted', 'transformation': 'pb.price = pr.price', 'target_table': 'pb'}, {'source_column': "['pb.is_active']", 'source_type': 'boolean', 'source_nullable': 'accepted', 'target_column': 'is_active', 'target_type': 'boolean', 'target_nullable': 'accepted', 'transformation': 'pb.is_active = pr.is_active', 'target_table': 'pb'}, {'source_column': "['sb.store_id']", 'source_type': 'varchar(10)', 'source_nullable': 'not_accepted', 'target_column': 'store_id', 'target_type': 'varchar(10)', 'target_nullable': 'not_accepted', 'transformation': 'sb.store_id = sr.store_id', 'target_table': 'sb'}, {'source_column': "['sb.store_name']", 'source_type': 'varchar(255)', 'source_nullable': 'accepted', 'target_column': 'store_name', 'target_type': 'varchar(255)', 'target_nullable': 'accepted', 'transformation': 'sb.store_name = sr.store_name', 'target_table': 'sb'}, {'source_column': "['sb.city']", 'source_type': 'varchar(100)', 'source_nullable': 'accepted', 'target_column': 'city', 'target_type': 'varchar(100)', 'target_nullable': 'accepted', 'transformation': 'sb.city = sr.city', 'target_table': 'sb'}, {'source_column': "['sb.state']", 'source_type': 'varchar(100)', 'source_nullable': 'accepted', 'target_column': 'state', 'target_type': 'varchar(100)', 'target_nullable': 'accepted', 'transformation': 'sb.state = sr.state', 'target_table': 'sb'}, {'source_column': "['sb.store_type']", 'source_type': 'varchar(50)', 'source_nullable': 'accepted', 'target_column': 'store_type', 'target_type': 'varchar(50)', 'target_nullable': 'accepted', 'transformation': 'sb.store_type = sr.store_type', 'target_table': 'sb'}, {'source_column': "['sb.open_date']", 'source_type': 'date', 'source_nullable': 'accepted', 'target_column': 'open_date', 'target_type': 'date', 'target_nullable': 'accepted', 'transformation': 'sb.open_date = sr.open_date', 'target_table': 'sb'}], 'runtime_config': {'base_path': 's3://sdlc-agent-bucket/engineering-agent/src/', 'target_path': 's3://sdlc-agent-bucket/engineering-agent/bronze/', 'read_format': 'csv', 'write_format': 'csv', 'write_mode': 'overwrite'}}
 
-# -------------------------------------------------------------------
-# Source: patient_data_5000 (p)
-# Target: patient_genomics_profile_bronze
-# -------------------------------------------------------------------
-patient_data_5000_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/patient_data_5000.{FILE_FORMAT}/")
-)
-patient_data_5000_df.createOrReplaceTempView("patient_data_5000")
+runtime_config = metadata['runtime_config']
+base_path = runtime_config['base_path']
+target_path = runtime_config['target_path']
+read_format = runtime_config['read_format']
+write_format = runtime_config['write_format']
+write_mode = runtime_config['write_mode']
 
-patient_genomics_profile_bronze_df = spark.sql("""
-SELECT
-  CAST(p.patient_id AS STRING)            AS patient_id,
-  CAST(p.first_name AS STRING)            AS first_name,
-  CAST(p.last_name AS STRING)             AS last_name,
-  CAST(p.gender AS STRING)                AS gender,
-  DATE(p.date_of_birth)                   AS date_of_birth,
-  CAST(p.blood_group AS STRING)           AS blood_group,
-  CAST(p.ethnicity AS STRING)             AS ethnicity,
-  CAST(p.contact_number AS STRING)        AS contact_number,
-  CAST(p.email AS STRING)                 AS email,
-  CAST(p.address AS STRING)               AS address,
-  CAST(p.city AS STRING)                  AS city,
-  CAST(p.state AS STRING)                 AS state,
-  CAST(p.country AS STRING)               AS country,
-  CAST(p.diagnosis AS STRING)             AS diagnosis,
-  DATE(p.registration_date)               AS registration_date
-FROM patient_data_5000 p
-""")
+for table in metadata['tables']:
+    target_table = table['target_table']
+    target_alias = table['target_alias']
 
-(
-    patient_genomics_profile_bronze_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/patient_genomics_profile_bronze.csv")
-)
+    mapping_details = table['mapping_details'].split()
+    source_table = mapping_details[0]
+    source_alias = mapping_details[1]
 
-# -------------------------------------------------------------------
-# Source: genomics_sequencing_runs_5000 (r)
-# Target: sequencing_run_performance_daily_bronze
-# -------------------------------------------------------------------
-genomics_sequencing_runs_5000_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/genomics_sequencing_runs_5000.{FILE_FORMAT}/")
-)
-genomics_sequencing_runs_5000_df.createOrReplaceTempView("genomics_sequencing_runs_5000")
+    reader = spark.read.format(read_format)
+    if read_format == 'csv':
+        reader = reader.option("header", "true").option("inferSchema", "true")
 
-sequencing_run_performance_daily_bronze_df = spark.sql("""
-SELECT
-  CAST(r.run_id AS STRING)                AS run_id,
-  CAST(r.patient_id AS STRING)            AS patient_id,
-  CAST(r.sample_id AS STRING)             AS sample_id,
-  CAST(r.sequencing_platform AS STRING)   AS sequencing_platform,
-  DATE(r.run_date)                        AS run_date,
-  CAST(r.technician_name AS STRING)       AS technician_name,
-  CAST(r.read_length AS INT)              AS read_length,
-  CAST(r.coverage_depth AS DOUBLE)        AS coverage_depth,
-  CAST(r.raw_data_size_gb AS DOUBLE)      AS raw_data_size_gb,
-  CAST(r.quality_score AS DOUBLE)         AS quality_score,
-  CAST(r.alignment_rate AS DOUBLE)        AS alignment_rate,
-  CAST(r.reference_genome AS STRING)      AS reference_genome,
-  CAST(r.sequencing_center AS STRING)     AS sequencing_center,
-  CAST(r.processing_status AS STRING)     AS processing_status,
-  CAST(r.upload_timestamp AS TIMESTAMP)   AS upload_timestamp
-FROM genomics_sequencing_runs_5000 r
-""")
+    df = reader.load(base_path + f"{source_table}.{read_format}")
+    df = df.alias(source_alias)
 
-(
-    sequencing_run_performance_daily_bronze_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/sequencing_run_performance_daily_bronze.csv")
-)
+    transformations = []
+    for col_meta in metadata['columns']:
+        if col_meta['target_table'] == target_alias:
+            rhs = col_meta['transformation'].split('=', 1)[1].strip()
+            target_col = col_meta['target_column']
+            transformations.append(f"{rhs} as {target_col}")
 
-# -------------------------------------------------------------------
-# Source: genomic_variants_5000 (v)
-# Target: patient_variant_fact_bronze
-# -------------------------------------------------------------------
-genomic_variants_5000_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/genomic_variants_5000.{FILE_FORMAT}/")
-)
-genomic_variants_5000_df.createOrReplaceTempView("genomic_variants_5000")
+    df = df.selectExpr(*transformations)
 
-patient_variant_fact_bronze_df = spark.sql("""
-SELECT
-  CAST(v.variant_id AS STRING)                AS variant_id,
-  CAST(v.patient_id AS STRING)                AS patient_id,
-  CAST(v.run_id AS STRING)                    AS run_id,
-  CAST(v.chromosome AS STRING)                AS chromosome,
-  CAST(v.gene_name AS STRING)                 AS gene_name,
-  CAST(v.variant_type AS STRING)              AS variant_type,
-  CAST(v.mutation AS STRING)                  AS mutation,
-  CAST(v.genomic_position AS INT)             AS genomic_position,
-  CAST(v.reference_allele AS STRING)          AS reference_allele,
-  CAST(v.alternate_allele AS STRING)          AS alternate_allele,
-  CAST(v.clinical_significance AS STRING)     AS clinical_significance,
-  CAST(v.pathogenicity_score AS FLOAT)        AS pathogenicity_score,
-  DATE(v.detected_date)                       AS detected_date,
-  CAST(v.validation_status AS STRING)         AS validation_status,
-  CAST(v.reporting_lab AS STRING)             AS reporting_lab
-FROM genomic_variants_5000 v
-""")
+    writer = df.write.mode(write_mode).format(write_format)
+    if write_format == 'csv':
+        writer = writer.option("header", "true")
 
-(
-    patient_variant_fact_bronze_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/patient_variant_fact_bronze.csv")
-)
-
-# -------------------------------------------------------------------
-# Source: lab_test_results_5000 (l)
-# Target: lab_results_trend_bronze
-# -------------------------------------------------------------------
-lab_test_results_5000_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/lab_test_results_5000.{FILE_FORMAT}/")
-)
-lab_test_results_5000_df.createOrReplaceTempView("lab_test_results_5000")
-
-lab_results_trend_bronze_df = spark.sql("""
-SELECT
-  CAST(l.result_id AS STRING)            AS result_id,
-  CAST(l.patient_id AS STRING)           AS patient_id,
-  CAST(l.sample_id AS STRING)            AS sample_id,
-  CAST(l.test_name AS STRING)            AS test_name,
-  CAST(l.biomarker AS STRING)            AS biomarker,
-  CAST(l.test_result AS STRING)          AS test_result,
-  CAST(l.unit AS STRING)                 AS unit,
-  CAST(l.reference_range AS STRING)      AS reference_range,
-  CAST(l.interpretation AS STRING)       AS interpretation,
-  CAST(l.performed_by AS STRING)         AS performed_by,
-  CAST(l.lab_name AS STRING)             AS lab_name,
-  DATE(l.collection_date)                AS collection_date,
-  DATE(l.result_date)                    AS result_date,
-  CAST(l.approval_status AS STRING)      AS approval_status,
-  CAST(l.remarks AS STRING)              AS remarks
-FROM lab_test_results_5000 l
-""")
-
-(
-    lab_results_trend_bronze_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/lab_results_trend_bronze.csv")
-)
+    writer.save(target_path + f"{target_table}.{write_format}")
 
 job.commit()
