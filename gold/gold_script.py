@@ -3,7 +3,6 @@ from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
 from awsglue.job import Job
 from pyspark.context import SparkContext
-from pyspark.sql import SparkSession
 
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
 
@@ -17,116 +16,56 @@ SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-# ---------------------------------------------------------------------------
+# ----------------------------
 # 1) Read source tables from S3
-# ---------------------------------------------------------------------------
-sales_transactions_silver_df = (
+# ----------------------------
+sts_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .load(f"{SOURCE_PATH}/sales_transactions_silver.{FILE_FORMAT}/")
 )
-stores_silver_df = (
+pms_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/stores_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/product_master_silver.{FILE_FORMAT}/")
 )
-products_silver_df = (
+sms_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/products_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/store_master_silver.{FILE_FORMAT}/")
 )
-sales_summary_silver_df = (
+ass_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/sales_summary_silver.{FILE_FORMAT}/")
-)
-refresh_log_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/refresh_log_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/aggregated_sales_silver.{FILE_FORMAT}/")
 )
 
-# ---------------------------------------------------------------------------
+# ----------------------------
 # 2) Create temp views
-# ---------------------------------------------------------------------------
-sales_transactions_silver_df.createOrReplaceTempView("sales_transactions_silver")
-stores_silver_df.createOrReplaceTempView("stores_silver")
-products_silver_df.createOrReplaceTempView("products_silver")
-sales_summary_silver_df.createOrReplaceTempView("sales_summary_silver")
-refresh_log_silver_df.createOrReplaceTempView("refresh_log_silver")
+# ----------------------------
+sts_df.createOrReplaceTempView("sales_transactions_silver")
+pms_df.createOrReplaceTempView("product_master_silver")
+sms_df.createOrReplaceTempView("store_master_silver")
+ass_df.createOrReplaceTempView("aggregated_sales_silver")
 
-# ---------------------------------------------------------------------------
-# 3) Transformations with Spark SQL
-# ---------------------------------------------------------------------------
+# ----------------------------
+# 3) Transform + 4) Write each target table separately
+# ----------------------------
 
-# gold_sales_transactions (gst) from silver.sales_transactions_silver sts
-gold_sales_transactions_df = spark.sql("""
-SELECT
-  sts.transaction_id AS transaction_id,
-  sts.product_id AS product_id,
-  sts.store_id AS store_id,
-  CAST(sts.quantity_sold AS INT) AS quantity_sold,
-  CAST(sts.revenue AS DOUBLE) AS revenue,
-  DATE(sts.transaction_date) AS transaction_date
-FROM sales_transactions_silver sts
-""")
+# gold.gold_sales_transactions
+gold_sales_transactions_df = spark.sql(
+    """
+    SELECT
+        CAST(sts.transaction_id AS STRING) AS transaction_id,
+        DATE(sts.transaction_date) AS transaction_date,
+        CAST(sts.store_id AS STRING) AS store_id,
+        CAST(sts.product_id AS STRING) AS product_id,
+        CAST(sts.quantity_sold AS INT) AS quantity_sold,
+        CAST(sts.total_sales_amount AS DOUBLE) AS total_sales_amount
+    FROM sales_transactions_silver sts
+    """
+)
 
-# gold_store_metrics (gsm) from sts INNER JOIN ss
-gold_store_metrics_df = spark.sql("""
-SELECT
-  sts.store_id AS store_id,
-  SUM(CAST(sts.revenue AS DOUBLE)) AS total_revenue,
-  COUNT(DISTINCT sts.transaction_id) AS total_transactions,
-  SUM(CAST(sts.revenue AS DOUBLE)) / COUNT(DISTINCT sts.transaction_id) AS average_transaction_value
-FROM sales_transactions_silver sts
-INNER JOIN stores_silver ss
-  ON sts.store_id = ss.store_id
-GROUP BY
-  sts.store_id
-""")
-
-# gold_product_performance (gpp) from sts INNER JOIN ps
-gold_product_performance_df = spark.sql("""
-SELECT
-  sts.product_id AS product_id,
-  ps.category AS category,
-  SUM(CAST(sts.quantity_sold AS INT)) AS units_sold,
-  SUM(CAST(sts.revenue AS DOUBLE)) AS total_revenue,
-  SUM(CAST(sts.revenue AS DOUBLE)) / SUM(CAST(sts.quantity_sold AS INT)) AS average_price
-FROM sales_transactions_silver sts
-INNER JOIN products_silver ps
-  ON sts.product_id = ps.product_id
-GROUP BY
-  sts.product_id,
-  ps.category
-""")
-
-# gold_aggregated_reporting (gar) from silver.sales_summary_silver sss
-gold_aggregated_reporting_df = spark.sql("""
-SELECT
-  DATE(sss.report_date) AS report_date,
-  CAST(sss.total_sales AS INT) AS total_sales,
-  CAST(sss.total_revenue AS DOUBLE) AS total_revenue,
-  CAST(sss.total_units_sold AS INT) AS total_units_sold,
-  CAST(sss.store_count AS INT) AS store_count,
-  CAST(sss.product_count AS INT) AS product_count
-FROM sales_summary_silver sss
-""")
-
-# gold_refresh_log (grl) from silver.refresh_log_silver rls
-gold_refresh_log_df = spark.sql("""
-SELECT
-  rls.refresh_date AS refresh_date,
-  rls.status AS status,
-  rls.records_processed AS records_processed,
-  rls.success AS success,
-  rls.failure_reason AS failure_reason
-FROM refresh_log_silver rls
-""")
-
-# ---------------------------------------------------------------------------
-# 4) Save output (single CSV file per table directly under TARGET_PATH)
-# ---------------------------------------------------------------------------
 (
     gold_sales_transactions_df.coalesce(1)
     .write.mode("overwrite")
@@ -135,36 +74,65 @@ FROM refresh_log_silver rls
     .save(f"{TARGET_PATH}/gold_sales_transactions.csv")
 )
 
-(
-    gold_store_metrics_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_store_metrics.csv")
+# gold.gold_product_master
+gold_product_master_df = spark.sql(
+    """
+    SELECT
+        CAST(pms.product_id AS STRING) AS product_id,
+        CAST(pms.product_name AS STRING) AS product_name,
+        CAST(pms.product_category AS STRING) AS product_category,
+        CAST(pms.product_price AS FLOAT) AS product_price
+    FROM product_master_silver pms
+    """
 )
 
 (
-    gold_product_performance_df.coalesce(1)
+    gold_product_master_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_product_performance.csv")
+    .save(f"{TARGET_PATH}/gold_product_master.csv")
+)
+
+# gold.gold_store_master
+gold_store_master_df = spark.sql(
+    """
+    SELECT
+        CAST(sms.store_id AS STRING) AS store_id,
+        CAST(sms.store_name AS STRING) AS store_name,
+        CAST(sms.store_location AS STRING) AS store_location,
+        CAST(sms.store_region AS STRING) AS store_region
+    FROM store_master_silver sms
+    """
 )
 
 (
-    gold_aggregated_reporting_df.coalesce(1)
+    gold_store_master_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_aggregated_reporting.csv")
+    .save(f"{TARGET_PATH}/gold_store_master.csv")
+)
+
+# gold.gold_aggregated_sales
+gold_aggregated_sales_df = spark.sql(
+    """
+    SELECT
+        CAST(ass.store_id AS STRING) AS store_id,
+        CAST(ass.product_id AS STRING) AS product_id,
+        DATE(ass.sales_date) AS sales_date,
+        CAST(ass.total_quantity_sold AS INT) AS total_quantity_sold,
+        CAST(ass.total_sales_amount AS DOUBLE) AS total_sales_amount
+    FROM aggregated_sales_silver ass
+    """
 )
 
 (
-    gold_refresh_log_df.coalesce(1)
+    gold_aggregated_sales_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_refresh_log.csv")
+    .save(f"{TARGET_PATH}/gold_aggregated_sales.csv")
 )
 
 job.commit()
