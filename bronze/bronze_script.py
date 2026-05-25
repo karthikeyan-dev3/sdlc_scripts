@@ -235,7 +235,7 @@ for table in metadata['tables']:
     target_table = table['target_table']
     target_alias = table['target_alias']
 
-    reader = spark.read.format(read_format)
+    reader = glueContext.spark_session.read.format(read_format)
     if read_format == 'csv':
         reader = reader.option("header", "true").option("inferSchema", "true")
 
