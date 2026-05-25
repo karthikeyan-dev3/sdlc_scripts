@@ -1,9 +1,8 @@
-```python
 import sys
 from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
 from awsglue.job import Job
-from pyspark.context import SparkCon
+from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
@@ -195,4 +194,3 @@ FROM sales_performance_store_product_silver spsp
 )
 
 job.commit()
-```
