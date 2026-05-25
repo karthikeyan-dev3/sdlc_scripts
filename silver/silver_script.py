@@ -6,6 +6,7 @@ from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
+
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
@@ -16,9 +17,9 @@ SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 FILE_FORMAT = "csv"
 
-# ------------------------------------------------------------------------------------
-# 1) Read source tables from S3
-# ------------------------------------------------------------------------------------
+# -------------------------------------------------------------------
+# 1) Read source tables (Bronze) and create temp views
+# -------------------------------------------------------------------
 products_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
@@ -40,24 +41,27 @@ sales_transactions_bronze_df = (
 )
 sales_transactions_bronze_df.createOrReplaceTempView("sales_transactions_bronze")
 
-# ------------------------------------------------------------------------------------
+# -------------------------------------------------------------------
 # 2) product_details_silver
-#    - Filter product_id not null
 #    - TRIM product_id/product_name/category
-#    - De-duplicate by product_id using ROW_NUMBER
-# ------------------------------------------------------------------------------------
+#    - filter product_id not null
+#    - dedup: prefer is_active=true; tie-breaker by highest non-null price/brand (as available)
+# -------------------------------------------------------------------
 product_details_silver_df = spark.sql(
     """
     WITH base AS (
         SELECT
             TRIM(pb.product_id)   AS product_id,
             TRIM(pb.product_name) AS product_name,
-            TRIM(pb.category)     AS category
+            TRIM(pb.category)     AS category,
+            pb.is_active          AS is_active,
+            pb.price              AS price,
+            pb.brand              AS brand
         FROM products_bronze pb
         WHERE TRIM(pb.product_id) IS NOT NULL
           AND TRIM(pb.product_id) <> ''
     ),
-    dedup AS (
+    ranked AS (
         SELECT
             product_id,
             product_name,
@@ -65,12 +69,11 @@ product_details_silver_df = spark.sql(
             ROW_NUMBER() OVER (
                 PARTITION BY product_id
                 ORDER BY
-                    CASE
-                        WHEN product_name IS NOT NULL AND product_name <> '' THEN 0 ELSE 1
-                    END,
-                    CASE
-                        WHEN category IS NOT NULL AND category <> '' THEN 0 ELSE 1
-                    END
+                    CASE WHEN COALESCE(is_active, false) = true THEN 1 ELSE 0 END DESC,
+                    CASE WHEN price IS NULL THEN 0 ELSE 1 END DESC,
+                    CAST(COALESCE(price, 0) AS DOUBLE) DESC,
+                    CASE WHEN brand IS NULL OR TRIM(brand) = '' THEN 0 ELSE 1 END DESC,
+                    TRIM(brand) DESC
             ) AS rn
         FROM base
     )
@@ -78,7 +81,7 @@ product_details_silver_df = spark.sql(
         product_id,
         product_name,
         category
-    FROM dedup
+    FROM ranked
     WHERE rn = 1
     """
 )
@@ -87,17 +90,18 @@ product_details_silver_df.createOrReplaceTempView("product_details_silver")
 (
     product_details_silver_df.coalesce(1)
     .write.mode("overwrite")
+    .format("csv")
     .option("header", "true")
-    .csv(f"{TARGET_PATH}/product_details_silver.csv")
+    .save(f"{TARGET_PATH}/product_details_silver.csv")
 )
 
-# ------------------------------------------------------------------------------------
+# -------------------------------------------------------------------
 # 3) store_details_silver
-#    - Filter store_id not null
 #    - TRIM store_id/store_name/state/city
-#    - Derive region from state (standard mapping)
-#    - De-duplicate by store_id using ROW_NUMBER
-# ------------------------------------------------------------------------------------
+#    - filter store_id not null
+#    - region derived from state (state-to-region mapping)
+#    - dedup: prefer most complete store_name/state/city; tie-breaker by latest open_date
+# -------------------------------------------------------------------
 store_details_silver_df = spark.sql(
     """
     WITH base AS (
@@ -119,14 +123,18 @@ store_details_silver_df = spark.sql(
                 WHEN UPPER(state) IN ('ME','NH','VT','MA','RI','CT','NY','NJ','PA') THEN 'NORTHEAST'
                 WHEN UPPER(state) IN ('OH','MI','IN','IL','WI','MN','IA','MO','ND','SD','NE','KS') THEN 'MIDWEST'
                 WHEN UPPER(state) IN ('DE','MD','DC','VA','WV','NC','SC','GA','FL','KY','TN','MS','AL','OK','TX','AR','LA') THEN 'SOUTH'
-                WHEN UPPER(state) IN ('MT','ID','WY','CO','NM','AZ','UT','NV','WA','OR','CA','AK','HI') THEN 'WEST'
+                WHEN UPPER(state) IN ('ID','MT','WY','NV','UT','CO','AZ','NM','WA','OR','CA','AK','HI') THEN 'WEST'
                 ELSE NULL
             END AS region,
+            state,
             city,
-            open_date
+            open_date,
+            (CASE WHEN store_name IS NOT NULL AND store_name <> '' THEN 1 ELSE 0 END
+             + CASE WHEN state IS NOT NULL AND state <> '' THEN 1 ELSE 0 END
+             + CASE WHEN city IS NOT NULL AND city <> '' THEN 1 ELSE 0 END) AS completeness_score
         FROM base
     ),
-    dedup AS (
+    ranked AS (
         SELECT
             store_id,
             store_name,
@@ -134,9 +142,7 @@ store_details_silver_df = spark.sql(
             ROW_NUMBER() OVER (
                 PARTITION BY store_id
                 ORDER BY
-                    CASE WHEN store_name IS NOT NULL AND store_name <> '' THEN 0 ELSE 1 END,
-                    CASE WHEN region IS NOT NULL AND region <> '' THEN 0 ELSE 1 END,
-                    CASE WHEN city IS NOT NULL AND city <> '' THEN 0 ELSE 1 END,
+                    completeness_score DESC,
                     open_date DESC
             ) AS rn
         FROM enriched
@@ -145,7 +151,7 @@ store_details_silver_df = spark.sql(
         store_id,
         store_name,
         region
-    FROM dedup
+    FROM ranked
     WHERE rn = 1
     """
 )
@@ -154,19 +160,20 @@ store_details_silver_df.createOrReplaceTempView("store_details_silver")
 (
     store_details_silver_df.coalesce(1)
     .write.mode("overwrite")
+    .format("csv")
     .option("header", "true")
-    .csv(f"{TARGET_PATH}/store_details_silver.csv")
+    .save(f"{TARGET_PATH}/store_details_silver.csv")
 )
 
-# ------------------------------------------------------------------------------------
+# -------------------------------------------------------------------
 # 4) sales_transactions_silver
-#    - Conformed keys (join to silver dims)
+#    - joins to conformed product/store keys
 #    - sale_date = CAST(transaction_time AS DATE)
 #    - quantity_sold = GREATEST(COALESCE(quantity,0),0)
 #    - total_sales_value = GREATEST(COALESCE(sale_amount,0),0)
-#    - De-duplicate by transaction_id using ROW_NUMBER
-#    - Enforce non-null transaction_id/product_id/store_id
-# ------------------------------------------------------------------------------------
+#    - dedup by transaction_id: latest transaction_time, then highest total_sales_value
+#    - enforce non-null transaction_id/product_id/store_id
+# -------------------------------------------------------------------
 sales_transactions_silver_df = spark.sql(
     """
     WITH base AS (
@@ -176,7 +183,7 @@ sales_transactions_silver_df = spark.sql(
             stb.product_id AS product_id,
             stb.store_id AS store_id,
             GREATEST(COALESCE(CAST(stb.quantity AS INT), 0), 0) AS quantity_sold,
-            GREATEST(COALESCE(CAST(stb.sale_amount AS DOUBLE), 0D), 0D) AS total_sales_value,
+            GREATEST(COALESCE(CAST(stb.sale_amount AS DOUBLE), 0), 0) AS total_sales_value,
             stb.transaction_time AS transaction_time
         FROM sales_transactions_bronze stb
         LEFT JOIN product_details_silver pds
@@ -187,7 +194,7 @@ sales_transactions_silver_df = spark.sql(
           AND stb.product_id IS NOT NULL
           AND stb.store_id IS NOT NULL
     ),
-    dedup AS (
+    ranked AS (
         SELECT
             transaction_id,
             sale_date,
@@ -210,7 +217,7 @@ sales_transactions_silver_df = spark.sql(
         store_id,
         quantity_sold,
         total_sales_value
-    FROM dedup
+    FROM ranked
     WHERE rn = 1
     """
 )
@@ -219,17 +226,16 @@ sales_transactions_silver_df.createOrReplaceTempView("sales_transactions_silver"
 (
     sales_transactions_silver_df.coalesce(1)
     .write.mode("overwrite")
+    .format("csv")
     .option("header", "true")
-    .csv(f"{TARGET_PATH}/sales_transactions_silver.csv")
+    .save(f"{TARGET_PATH}/sales_transactions_silver.csv")
 )
 
-# ------------------------------------------------------------------------------------
+# -------------------------------------------------------------------
 # 5) aggregated_sales_silver
 #    - aggregation_date = sale_date
-#    - total_quantity_sold = SUM(quantity_sold)
-#    - total_sales_value = SUM(total_sales_value)
-#    - average_sales_value = AVG(total_sales_value)
-# ------------------------------------------------------------------------------------
+#    - totals and average on measures
+# -------------------------------------------------------------------
 aggregated_sales_silver_df = spark.sql(
     """
     SELECT
@@ -241,13 +247,13 @@ aggregated_sales_silver_df = spark.sql(
     GROUP BY sts.sale_date
     """
 )
-aggregated_sales_silver_df.createOrReplaceTempView("aggregated_sales_silver")
 
 (
     aggregated_sales_silver_df.coalesce(1)
     .write.mode("overwrite")
+    .format("csv")
     .option("header", "true")
-    .csv(f"{TARGET_PATH}/aggregated_sales_silver.csv")
+    .save(f"{TARGET_PATH}/aggregated_sales_silver.csv")
 )
 
 job.commit()
