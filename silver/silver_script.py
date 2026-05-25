@@ -54,7 +54,7 @@ product_details_silver_df = spark.sql(
             TRIM(pb.product_id)   AS product_id,
             TRIM(pb.product_name) AS product_name,
             TRIM(pb.category)     AS category,
-            pb.is_active          AS is_active,
+            CAST(pb.is_active AS BOOLEAN) AS is_active,
             pb.price              AS price,
             pb.brand              AS brand
         FROM products_bronze pb
