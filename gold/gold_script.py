@@ -1,10 +1,9 @@
-```python
 import sys
 from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
 from awsglue.job import Job
 from pyspark.context import SparkContext
-from pyspark.sql import SparkSess
+from pyspark.sql import SparkSession
 
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
 
@@ -155,4 +154,3 @@ gold_data_quality_metrics_df = spark.sql(
 )
 
 job.commit()
-```
