@@ -1,8 +1,7 @@
-```python
 import sys
 from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
-from awsglue.job import Jo
+from awsglue.job import Job
 from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 
@@ -112,4 +111,3 @@ stores_bronze_df = spark.sql(
 )
 
 job.commit()
-```
