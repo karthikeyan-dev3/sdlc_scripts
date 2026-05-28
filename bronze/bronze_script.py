@@ -1,7 +1,6 @@
-```python
 from awsglue.context import GlueContext
-
 from awsglue.job import Job
+from pyspark.context import SparkContext
 
 sc = SparkContext()
 glueContext = GlueContext(sc)
@@ -261,5 +260,3 @@ for table_meta in metadata['tables']:
     writer.save(target_path + target_table + '.' + write_format)
 
 job.commit()
-
-```
