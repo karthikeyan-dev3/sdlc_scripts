@@ -224,16 +224,16 @@ metadata = {
     }
 }
 
-runtime_config = metadata['runtime_config']
-base_path = runtime_config['base_path']
-target_path = runtime_config['target_path']
-read_format = runtime_config['read_format']
-write_format = runtime_config['write_format']
-write_mode = runtime_config['write_mode']
+base_path = metadata['runtime_config']['base_path']
+target_path = metadata['runtime_config']['target_path']
+read_format = metadata['runtime_config']['read_format']
+write_format = metadata['runtime_config']['write_format']
+write_mode = metadata['runtime_config']['write_mode']
 
 for table in metadata['tables']:
     mapping_details = table['mapping_details']
-    source_table, source_alias = mapping_details.split()
+    source_table = mapping_details.split()[0]
+    source_alias = mapping_details.split()[1]
     target_table = table['target_table']
     target_alias = table['target_alias']
 
@@ -241,7 +241,7 @@ for table in metadata['tables']:
     if read_format == 'csv':
         reader = reader.option('header', 'true').option('inferSchema', 'true')
 
-    df = reader.load(base_path + source_table + "." + read_format)
+    df = reader.load(base_path + source_table + '.' + read_format)
     df = df.alias(source_alias)
 
     transformations = []
@@ -258,6 +258,6 @@ for table in metadata['tables']:
     if write_format == 'csv':
         writer = writer.option('header', 'true')
 
-    writer.save(target_path + target_table + "." + write_format)
+    writer.save(target_path + target_table + '.' + write_format)
 
 job.commit()
