@@ -1,180 +1,219 @@
 import sys
+
 from awsglue.context import GlueContext
+from awsglue.job import Job
 from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
-from pyspark.sql import SparkSession
 
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
-
-sc = SparkContext()
-glueContext = GlueContext(sc)
-spark = glueContext.spark_session
 
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 FILE_FORMAT = "csv"
 
-# -----------------------------
-# Read Source Tables (S3 -> DF)
-# -----------------------------
-sequencing_runs_bronze_df = (
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args["JOB_NAME"], args)
+
+spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
+
+# =========================
+# Read Source Tables (S3)
+# =========================
+patient_data_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/sequencing_runs_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/patient_data_bronze.{FILE_FORMAT}/")
 )
 
-lab_work_items_bronze_df = (
+genomics_sequencing_runs_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/lab_work_items_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/genomics_sequencing_runs_bronze.{FILE_FORMAT}/")
 )
 
-pending_approvals_bronze_df = (
+lab_test_results_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/pending_approvals_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/lab_test_results_bronze.{FILE_FORMAT}/")
 )
 
-patient_diagnostic_results_bronze_df = (
+genomic_variants_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/patient_diagnostic_results_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/genomic_variants_bronze.{FILE_FORMAT}/")
 )
 
-pathogenic_variant_alerts_bronze_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/pathogenic_variant_alerts_bronze.{FILE_FORMAT}/")
-)
-
-# -----------------------------
+# =========================
 # Create Temp Views
-# -----------------------------
-sequencing_runs_bronze_df.createOrReplaceTempView("sequencing_runs_bronze")
-lab_work_items_bronze_df.createOrReplaceTempView("lab_work_items_bronze")
-pending_approvals_bronze_df.createOrReplaceTempView("pending_approvals_bronze")
-patient_diagnostic_results_bronze_df.createOrReplaceTempView("patient_diagnostic_results_bronze")
-pathogenic_variant_alerts_bronze_df.createOrReplaceTempView("pathogenic_variant_alerts_bronze")
+# =========================
+patient_data_bronze_df.createOrReplaceTempView("patient_data_bronze")
+genomics_sequencing_runs_bronze_df.createOrReplaceTempView(
+    "genomics_sequencing_runs_bronze"
+)
+lab_test_results_bronze_df.createOrReplaceTempView("lab_test_results_bronze")
+genomic_variants_bronze_df.createOrReplaceTempView("genomic_variants_bronze")
 
-# ----------------------------------------
-# Transform + Write: sequencing_runs_silver
-# ----------------------------------------
-sequencing_runs_silver_df = spark.sql(
+# =========================
+# TARGET: patient_silver
+# =========================
+patient_silver_df = spark.sql(
     """
-    SELECT
-        srb.run_id AS run_id,
-        srb.patient_id AS patient_id,
-        srb.sample_id AS sample_id,
-        srb.sequencing_platform AS sequencing_platform,
-        CAST(srb.run_date AS DATE) AS run_date,
-        srb.processing_status AS processing_status,
-        srb.upload_timestamp AS upload_timestamp
-    FROM sequencing_runs_bronze srb
-    """
+SELECT
+  patient_id,
+  NULLIF(TRIM(first_name),'') AS first_name,
+  NULLIF(TRIM(last_name),'') AS last_name,
+  NULLIF(UPPER(TRIM(gender)),'') AS gender,
+  CAST(date_of_birth AS date) AS date_of_birth,
+  NULLIF(UPPER(TRIM(blood_group)),'') AS blood_group,
+  NULLIF(TRIM(ethnicity),'') AS ethnicity,
+  NULLIF(TRIM(contact_number),'') AS contact_number,
+  NULLIF(LOWER(TRIM(email)),'') AS email,
+  NULLIF(TRIM(address),'') AS address,
+  NULLIF(TRIM(city),'') AS city,
+  NULLIF(TRIM(state),'') AS state,
+  NULLIF(TRIM(country),'') AS country,
+  NULLIF(TRIM(diagnosis),'') AS diagnosis,
+  CAST(registration_date AS date) AS registration_date
+FROM (
+  SELECT
+    pdb.*,
+    ROW_NUMBER() OVER (PARTITION BY patient_id ORDER BY registration_date DESC, patient_id) AS rn
+  FROM patient_data_bronze pdb
+  WHERE patient_id IS NOT NULL
+) x
+WHERE rn = 1
+"""
 )
 
 (
-    sequencing_runs_silver_df.coalesce(1)
+    patient_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/sequencing_runs_silver.csv")
+    .save(f"{TARGET_PATH}/patient_silver.csv")
 )
 
-# ---------------------------------------
-# Transform + Write: lab_work_items_silver
-# ---------------------------------------
-lab_work_items_silver_df = spark.sql(
+# =========================
+# TARGET: sequencing_run_silver
+# =========================
+sequencing_run_silver_df = spark.sql(
     """
-    SELECT
-        lwib.result_id AS result_id,
-        lwib.patient_id AS patient_id,
-        lwib.sample_id AS sample_id,
-        lwib.test_name AS test_name,
-        lwib.biomarker AS biomarker,
-        lwib.test_result AS test_result,
-        lwib.unit AS unit,
-        CAST(lwib.collection_date AS DATE) AS collection_date,
-        CAST(lwib.result_date AS DATE) AS result_date
-    FROM lab_work_items_bronze lwib
-    """
+SELECT
+  run_id,
+  patient_id,
+  sample_id,
+  NULLIF(TRIM(sequencing_platform),'') AS sequencing_platform,
+  CAST(run_date AS date) AS run_date,
+  NULLIF(TRIM(technician_name),'') AS technician_name,
+  CAST(read_length AS int) AS read_length,
+  CAST(coverage_depth AS double) AS coverage_depth,
+  CAST(raw_data_size_gb AS double) AS raw_data_size_gb,
+  CAST(quality_score AS double) AS quality_score,
+  CAST(alignment_rate AS double) AS alignment_rate,
+  NULLIF(TRIM(reference_genome),'') AS reference_genome,
+  NULLIF(TRIM(sequencing_center),'') AS sequencing_center,
+  NULLIF(UPPER(TRIM(processing_status)),'') AS processing_status,
+  CAST(upload_timestamp AS timestamp) AS upload_timestamp
+FROM (
+  SELECT
+    gsrb.*,
+    ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY upload_timestamp DESC, run_date DESC, run_id) AS rn
+  FROM genomics_sequencing_runs_bronze gsrb
+  WHERE run_id IS NOT NULL
+) x
+WHERE rn = 1
+"""
 )
 
 (
-    lab_work_items_silver_df.coalesce(1)
+    sequencing_run_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/lab_work_items_silver.csv")
+    .save(f"{TARGET_PATH}/sequencing_run_silver.csv")
 )
 
-# ------------------------------------------
-# Transform + Write: pending_approvals_silver
-# ------------------------------------------
-pending_approvals_silver_df = spark.sql(
+# =========================
+# TARGET: lab_test_result_silver
+# =========================
+lab_test_result_silver_df = spark.sql(
     """
-    SELECT
-        pab.approval_status AS approval_status,
-        pab.result_id AS result_id,
-        pab.patient_id AS patient_id,
-        CAST(pab.result_date AS DATE) AS result_date
-    FROM pending_approvals_bronze pab
-    """
+SELECT
+  result_id,
+  patient_id,
+  sample_id,
+  NULLIF(TRIM(test_name),'') AS test_name,
+  NULLIF(TRIM(biomarker),'') AS biomarker,
+  NULLIF(TRIM(test_result),'') AS test_result,
+  NULLIF(TRIM(unit),'') AS unit,
+  NULLIF(TRIM(reference_range),'') AS reference_range,
+  NULLIF(TRIM(interpretation),'') AS interpretation,
+  NULLIF(TRIM(performed_by),'') AS performed_by,
+  NULLIF(TRIM(lab_name),'') AS lab_name,
+  CAST(collection_date AS date) AS collection_date,
+  CAST(result_date AS date) AS result_date,
+  NULLIF(UPPER(TRIM(approval_status)),'') AS approval_status,
+  NULLIF(TRIM(remarks),'') AS remarks
+FROM (
+  SELECT
+    ltrb.*,
+    ROW_NUMBER() OVER (PARTITION BY result_id ORDER BY result_date DESC, collection_date DESC, result_id) AS rn
+  FROM lab_test_results_bronze ltrb
+  WHERE result_id IS NOT NULL
+) x
+WHERE rn = 1
+"""
 )
 
 (
-    pending_approvals_silver_df.coalesce(1)
+    lab_test_result_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/pending_approvals_silver.csv")
+    .save(f"{TARGET_PATH}/lab_test_result_silver.csv")
 )
 
-# ----------------------------------------------------
-# Transform + Write: patient_diagnostic_results_silver
-# ----------------------------------------------------
-patient_diagnostic_results_silver_df = spark.sql(
+# =========================
+# TARGET: variant_observation_silver
+# =========================
+variant_observation_silver_df = spark.sql(
     """
-    SELECT
-        pdrb.patient_id AS patient_id,
-        pdrb.diagnosis AS diagnosis,
-        CAST(pdrb.registration_date AS DATE) AS registration_date
-    FROM patient_diagnostic_results_bronze pdrb
-    """
+SELECT
+  variant_id,
+  patient_id,
+  run_id,
+  NULLIF(TRIM(chromosome),'') AS chromosome,
+  NULLIF(TRIM(gene_name),'') AS gene_name,
+  NULLIF(TRIM(variant_type),'') AS variant_type,
+  NULLIF(TRIM(mutation),'') AS mutation,
+  CAST(genomic_position AS int) AS genomic_position,
+  NULLIF(TRIM(reference_allele),'') AS reference_allele,
+  NULLIF(TRIM(alternate_allele),'') AS alternate_allele,
+  NULLIF(TRIM(clinical_significance),'') AS clinical_significance,
+  CAST(pathogenicity_score AS float) AS pathogenicity_score,
+  CAST(detected_date AS date) AS detected_date,
+  NULLIF(UPPER(TRIM(validation_status)),'') AS validation_status,
+  NULLIF(TRIM(reporting_lab),'') AS reporting_lab
+FROM (
+  SELECT
+    gvb.*,
+    ROW_NUMBER() OVER (PARTITION BY variant_id, patient_id, run_id ORDER BY detected_date DESC, variant_id) AS rn
+  FROM genomic_variants_bronze gvb
+  WHERE variant_id IS NOT NULL
+) x
+WHERE rn = 1
+"""
 )
 
 (
-    patient_diagnostic_results_silver_df.coalesce(1)
+    variant_observation_silver_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/patient_diagnostic_results_silver.csv")
+    .save(f"{TARGET_PATH}/variant_observation_silver.csv")
 )
 
-# -------------------------------------------------
-# Transform + Write: pathogenic_variant_alerts_silver
-# -------------------------------------------------
-pathogenic_variant_alerts_silver_df = spark.sql(
-    """
-    SELECT
-        pvab.variant_id AS variant_id,
-        pvab.patient_id AS patient_id,
-        pvab.run_id AS run_id,
-        pvab.gene_name AS gene_name,
-        pvab.variant_type AS variant_type,
-        pvab.clinical_significance AS clinical_significance,
-        CAST(pvab.pathogenicity_score AS FLOAT) AS pathogenicity_score,
-        CAST(pvab.detected_date AS DATE) AS detected_date,
-        pvab.validation_status AS validation_status,
-        pvab.reporting_lab AS reporting_lab
-    FROM pathogenic_variant_alerts_bronze pvab
-    """
-)
-
-(
-    pathogenic_variant_alerts_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/pathogenic_variant_alerts_silver.csv")
-)
+job.commit()
