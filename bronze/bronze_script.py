@@ -1,4 +1,3 @@
-```python
 import sys
 from awsglue.transforms import *
 from awsglue.utils import getResolvedOptions
@@ -9,6 +8,7 @@ from pyspark.sql import SparkSession
 
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
 
+sc = SparkContext()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
 job = Job(glueContext)
@@ -122,4 +122,3 @@ FROM sales_transactions_raw str
 )
 
 job.commit()
-```
