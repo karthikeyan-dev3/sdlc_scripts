@@ -54,7 +54,7 @@ SELECT
   TRIM(category) AS category,
   TRIM(brand) AS brand,
   CAST(price AS DOUBLE) AS price,
-  COALESCE(is_active, TRUE) AS is_active
+  COALESCE(CAST(is_active AS BOOLEAN), TRUE) AS is_active
 FROM (
   SELECT
     pb.product_id,
