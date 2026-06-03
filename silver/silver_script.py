@@ -4,6 +4,7 @@ from awsglue.utils import getResolvedOptions
 from awsglue.job import Job
 from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
+from pyspark.sql.functions import struct, to_json
 
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
 
@@ -55,10 +56,7 @@ product_master_silver_df = spark.sql(
             CAST(TRIM(pmb.product_id) AS STRING) AS product_id,
             CAST(TRIM(pmb.product_name) AS STRING) AS product_name,
             CAST(TRIM(pmb.category) AS STRING) AS category,
-            JSON_OBJECT(
-                'brand', pmb.brand,
-                'price', pmb.price
-            ) AS metadata_attributes,
+            to_json(struct(pmb.brand, pmb.price)) AS metadata_attributes,
             ROW_NUMBER() OVER (
                 PARTITION BY TRIM(pmb.product_id)
                 ORDER BY pmb.product_id
@@ -90,10 +88,7 @@ store_master_silver_df = spark.sql(
             CAST(TRIM(smb.store_name) AS STRING) AS store_name,
             CAST(TRIM(smb.city) AS STRING) AS city,
             CAST(TRIM(smb.store_type) AS STRING) AS store_type,
-            JSON_OBJECT(
-                'state', smb.state,
-                'open_date', smb.open_date
-            ) AS metadata_attributes,
+            to_json(struct(smb.state, smb.open_date)) AS metadata_attributes,
             ROW_NUMBER() OVER (
                 PARTITION BY TRIM(smb.store_id)
                 ORDER BY smb.store_id
