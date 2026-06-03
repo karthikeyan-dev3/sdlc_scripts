@@ -1,7 +1,7 @@
 import sys
+from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
 from awsglue.job import Job
-from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
@@ -16,183 +16,160 @@ SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-# -----------------------------
-# Read sources + Temp Views
-# -----------------------------
+# =============================================================================
+# 1) Read source tables
+# =============================================================================
 sts_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .load(f"{SOURCE_PATH}/sales_transactions_silver.{FILE_FORMAT}/")
 )
-sts_df.createOrReplaceTempView("sales_transactions_silver")
 
-ps_df = (
+pms_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/products_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/product_master_silver.{FILE_FORMAT}/")
 )
-ps_df.createOrReplaceTempView("products_silver")
 
-ss_df = (
+sms_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/stores_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/store_master_silver.{FILE_FORMAT}/")
 )
-ss_df.createOrReplaceTempView("stores_silver")
 
-sdps_df = (
+sas_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/store_daily_performance_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/sales_aggregated_silver.{FILE_FORMAT}/")
 )
-sdps_df.createOrReplaceTempView("store_daily_performance_silver")
 
-pdps_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/product_daily_performance_silver.{FILE_FORMAT}/")
-)
-pdps_df.createOrReplaceTempView("product_daily_performance_silver")
+# =============================================================================
+# 2) Create temp views
+# =============================================================================
+sts_df.createOrReplaceTempView("sts")
+pms_df.createOrReplaceTempView("pms")
+sms_df.createOrReplaceTempView("sms")
+sas_df.createOrReplaceTempView("sas")
 
-ars_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/aggregated_reports_silver.{FILE_FORMAT}/")
-)
-ars_df.createOrReplaceTempView("aggregated_reports_silver")
+# =============================================================================
+# 3) Transform + 4) Write each target table separately
+# =============================================================================
 
-# -----------------------------
-# gold_sales
-# -----------------------------
-gold_sales_df = spark.sql(
+# -----------------------------------------------------------------------------
+# Target: gold_sales_transactions
+# -----------------------------------------------------------------------------
+gold_sales_transactions_df = spark.sql(
     """
     SELECT
-        CAST(sts.transaction_id AS STRING)  AS transaction_id,
+        CAST(sts.transaction_id AS STRING)   AS transaction_id,
+        DATE(sts.sale_date)                 AS sale_date,
         CAST(sts.product_id AS STRING)      AS product_id,
         CAST(sts.store_id AS STRING)        AS store_id,
-        CAST(sts.transaction_date AS DATE)  AS transaction_date,
-        CAST(sts.revenue AS DOUBLE)         AS revenue,
-        CAST(sts.quantity_sold AS INT)      AS quantity_sold
-    FROM sales_transactions_silver sts
+        CAST(sts.quantity_sold AS INT)      AS quantity_sold,
+        CAST(sts.total_sales_amount AS DOUBLE) AS total_sales_amount
+    FROM sts
     """
 )
 
 (
-    gold_sales_df.coalesce(1)
+    gold_sales_transactions_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_sales.csv")
+    .save(f"{TARGET_PATH}/gold_sales_transactions.csv")
 )
 
-# -----------------------------
-# gold_products
-# -----------------------------
-gold_products_df = spark.sql(
+# -----------------------------------------------------------------------------
+# Target: gold_product_master
+# -----------------------------------------------------------------------------
+gold_product_master_df = spark.sql(
     """
     SELECT
-        CAST(ps.product_id AS STRING)    AS product_id,
-        CAST(ps.product_name AS STRING)  AS product_name,
-        CAST(ps.category AS STRING)      AS category,
-        CAST(ps.price AS FLOAT)          AS price
-    FROM products_silver ps
+        CAST(pms.product_id AS STRING)      AS product_id,
+        CAST(pms.product_name AS STRING)    AS product_name,
+        CAST(pms.category AS STRING)        AS category,
+        CAST(pms.brand AS STRING)           AS brand,
+        CAST(pms.price AS FLOAT)            AS price
+    FROM pms
     """
 )
 
 (
-    gold_products_df.coalesce(1)
+    gold_product_master_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_products.csv")
+    .save(f"{TARGET_PATH}/gold_product_master.csv")
 )
 
-# -----------------------------
-# gold_stores
-# -----------------------------
-gold_stores_df = spark.sql(
+# -----------------------------------------------------------------------------
+# Target: gold_store_master
+# -----------------------------------------------------------------------------
+gold_store_master_df = spark.sql(
     """
     SELECT
-        CAST(ss.store_id AS STRING)     AS store_id,
-        CAST(ss.store_name AS STRING)   AS store_name,
-        CAST(ss.location AS STRING)     AS location,
-        CAST(ss.region AS STRING)       AS region
-    FROM stores_silver ss
+        CAST(sms.store_id AS STRING)     AS store_id,
+        CAST(sms.store_name AS STRING)  AS store_name,
+        CAST(sms.location AS STRING)    AS location,
+        CAST(sms.region AS STRING)      AS region
+    FROM sms
     """
 )
 
 (
-    gold_stores_df.coalesce(1)
+    gold_store_master_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_stores.csv")
+    .save(f"{TARGET_PATH}/gold_store_master.csv")
 )
 
-# -----------------------------
-# gold_store_performance
-# -----------------------------
-gold_store_performance_df = spark.sql(
+# -----------------------------------------------------------------------------
+# Target: gold_sales_aggregated
+# -----------------------------------------------------------------------------
+gold_sales_aggregated_df = spark.sql(
     """
     SELECT
-        CAST(sdps.store_id AS STRING)          AS store_id,
-        CAST(sdps.date AS DATE)               AS date,
-        CAST(sdps.total_revenue AS DOUBLE)    AS total_revenue,
-        CAST(sdps.transaction_count AS BIGINT) AS transaction_count
-    FROM store_daily_performance_silver sdps
+        DATE(sas.sale_date)                 AS sale_date,
+        CAST(sas.product_id AS STRING)      AS product_id,
+        CAST(sas.store_id AS STRING)        AS store_id,
+        CAST(sas.total_quantity_sold AS INT) AS total_quantity_sold,
+        CAST(sas.total_sales_amount AS DOUBLE) AS total_sales_amount
+    FROM sas
     """
 )
 
 (
-    gold_store_performance_df.coalesce(1)
+    gold_sales_aggregated_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_store_performance.csv")
+    .save(f"{TARGET_PATH}/gold_sales_aggregated.csv")
 )
 
-# -----------------------------
-# gold_product_performance
-# -----------------------------
-gold_product_performance_df = spark.sql(
+# -----------------------------------------------------------------------------
+# Target: gold_sales_cleaned
+# Note: UDT does not specify dedup keys/order; pass-through mapping only.
+# -----------------------------------------------------------------------------
+gold_sales_cleaned_df = spark.sql(
     """
     SELECT
-        CAST(pdps.product_id AS STRING)        AS product_id,
-        CAST(pdps.date AS DATE)               AS date,
-        CAST(pdps.total_revenue AS DOUBLE)    AS total_revenue,
-        CAST(pdps.quantity_sold AS BIGINT)    AS quantity_sold
-    FROM product_daily_performance_silver pdps
+        CAST(sts.transaction_id AS STRING)   AS transaction_id,
+        DATE(sts.sale_date)                 AS sale_date,
+        CAST(sts.product_id AS STRING)      AS product_id,
+        CAST(sts.store_id AS STRING)        AS store_id,
+        CAST(sts.quantity_sold AS INT)      AS quantity_sold,
+        CAST(sts.total_sales_amount AS DOUBLE) AS total_sales_amount
+    FROM sts
     """
 )
 
 (
-    gold_product_performance_df.coalesce(1)
+    gold_sales_cleaned_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_product_performance.csv")
-)
-
-# -----------------------------
-# gold_aggregated_reports
-# -----------------------------
-gold_aggregated_reports_df = spark.sql(
-    """
-    SELECT
-        CAST(ars.report_id AS STRING)           AS report_id,
-        CAST(ars.report_name AS STRING)         AS report_name,
-        CAST(ars.generated_on AS TIMESTAMP)     AS generated_on,
-        CAST(ars.aggregation_level AS STRING)  AS aggregation_level
-    FROM aggregated_reports_silver ars
-    """
-)
-
-(
-    gold_aggregated_reports_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_aggregated_reports.csv")
+    .save(f"{TARGET_PATH}/gold_sales_cleaned.csv")
 )
 
 job.commit()
