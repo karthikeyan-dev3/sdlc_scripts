@@ -258,6 +258,7 @@ metrics AS (
   LEFT JOIN products_silver ps
     ON ts.product_id = ps.product_id
   CROSS JOIN freshness f
+  GROUP BY f.data_freshness
 )
 SELECT
   metric_date,
