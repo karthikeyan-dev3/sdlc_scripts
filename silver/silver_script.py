@@ -112,10 +112,10 @@ dedup AS (
     ) AS rn
   FROM (
     SELECT
-      store_id,
-      store_name,
-      store_location,
-      store_region,
+      base.store_id,
+      base.store_name,
+      base.store_location,
+      base.store_region,
       open_date AS sb_open_date
     FROM base
     JOIN stores_bronze sb2
