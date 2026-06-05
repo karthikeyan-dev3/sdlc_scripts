@@ -22,32 +22,32 @@ FILE_FORMAT = "csv"
 pes_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}patient_enrollment_silver/")
+    .load(f"{SOURCE_PATH}/patient_enrollment_silver.{FILE_FORMAT}/")
 )
 cvs_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}clinical_visit_silver/")
+    .load(f"{SOURCE_PATH}/clinical_visit_silver.{FILE_FORMAT}/")
 )
 lrs_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}lab_results_silver/")
+    .load(f"{SOURCE_PATH}/lab_results_silver.{FILE_FORMAT}/")
 )
 das_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}drug_administration_silver/")
+    .load(f"{SOURCE_PATH}/drug_administration_silver.{FILE_FORMAT}/")
 )
 aes_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}adverse_events_silver/")
+    .load(f"{SOURCE_PATH}/adverse_events_silver.{FILE_FORMAT}/")
 )
 wms_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}wearable_monitoring_silver/")
+    .load(f"{SOURCE_PATH}/wearable_monitoring_silver.{FILE_FORMAT}/")
 )
 
 # --------------------------------------------------------------------------------------
@@ -80,7 +80,7 @@ FROM pes
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_patient_enrollment.csv")
+    .save(f"{TARGET_PATH}/gold_patient_enrollment")
 )
 
 # gold_clinical_visits
@@ -101,7 +101,7 @@ LEFT JOIN pes
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_clinical_visits.csv")
+    .save(f"{TARGET_PATH}/gold_clinical_visits")
 )
 
 # gold_laboratory_tests
@@ -122,7 +122,7 @@ LEFT JOIN pes
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_laboratory_tests.csv")
+    .save(f"{TARGET_PATH}/gold_laboratory_tests")
 )
 
 # gold_drug_administration
@@ -143,7 +143,7 @@ LEFT JOIN pes
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_drug_administration.csv")
+    .save(f"{TARGET_PATH}/gold_drug_administration")
 )
 
 # gold_adverse_events
@@ -164,7 +164,7 @@ LEFT JOIN pes
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_adverse_events.csv")
+    .save(f"{TARGET_PATH}/gold_adverse_events")
 )
 
 # gold_wearable_device_data
@@ -185,7 +185,7 @@ LEFT JOIN pes
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_wearable_device_data.csv")
+    .save(f"{TARGET_PATH}/gold_wearable_device_data")
 )
 
 job.commit()
