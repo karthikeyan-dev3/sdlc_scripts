@@ -70,7 +70,7 @@ SELECT
   CAST(pes.patient_id AS STRING) AS patient_id,
   CAST(pes.enrollment_date AS TIMESTAMP) AS enrollment_date,
   CAST(pes.trial_id AS STRING) AS study_id,
-  CONCAT_WS(', ', pes.patient_name, pes.gender, pes.date_of_birth, pes.country) AS demographics,
+  CAST(pes.patient_name AS STRING) AS demographics,
   CAST(pes.patient_id AS STRING) AS standardized_patient_identifier
 FROM pes
 """
@@ -81,7 +81,7 @@ FROM pes
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_patient_enrollment.csv")
+    .save(f"{TARGET_PATH}/gold_patient_enrollment")
 )
 
 # gold_clinical_visits
@@ -103,7 +103,7 @@ LEFT JOIN pes
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_clinical_visits.csv")
+    .save(f"{TARGET_PATH}/gold_clinical_visits")
 )
 
 # gold_laboratory_tests
@@ -125,7 +125,7 @@ LEFT JOIN pes
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_laboratory_tests.csv")
+    .save(f"{TARGET_PATH}/gold_laboratory_tests")
 )
 
 # gold_drug_administration
@@ -147,7 +147,7 @@ LEFT JOIN pes
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_drug_administration.csv")
+    .save(f"{TARGET_PATH}/gold_drug_administration")
 )
 
 # gold_adverse_events
@@ -169,7 +169,7 @@ LEFT JOIN pes
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_adverse_events.csv")
+    .save(f"{TARGET_PATH}/gold_adverse_events")
 )
 
 # gold_wearable_device_data
@@ -191,7 +191,7 @@ LEFT JOIN pes
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_wearable_device_data.csv")
+    .save(f"{TARGET_PATH}/gold_wearable_device_data")
 )
 
 job.commit()
