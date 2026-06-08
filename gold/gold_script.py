@@ -68,7 +68,7 @@ wms_df.createOrReplaceTempView("wms")
 gold_patient_enrollment_df = spark.sql("""
 SELECT
   CAST(pes.patient_id AS STRING) AS patient_id,
-  CAST(pes.enrollment_date AS TIMESTAMP) AS enrollment_date,
+  pes.enrollment_date AS enrollment_date,
   CAST(pes.trial_id AS STRING) AS study_id,
   CAST(pes.patient_name AS STRING) AS demographics,
   CAST(pes.patient_id AS STRING) AS standardized_patient_identifier
@@ -81,7 +81,7 @@ FROM pes
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_patient_enrollment")
+    .save(f"{TARGET_PATH}/gold_patient_enrollment.csv")
 )
 
 # gold_clinical_visits
@@ -103,7 +103,7 @@ LEFT JOIN pes
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_clinical_visits")
+    .save(f"{TARGET_PATH}/gold_clinical_visits.csv")
 )
 
 # gold_laboratory_tests
@@ -125,7 +125,7 @@ LEFT JOIN pes
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_laboratory_tests")
+    .save(f"{TARGET_PATH}/gold_laboratory_tests.csv")
 )
 
 # gold_drug_administration
@@ -147,7 +147,7 @@ LEFT JOIN pes
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_drug_administration")
+    .save(f"{TARGET_PATH}/gold_drug_administration.csv")
 )
 
 # gold_adverse_events
@@ -169,7 +169,7 @@ LEFT JOIN pes
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_adverse_events")
+    .save(f"{TARGET_PATH}/gold_adverse_events.csv")
 )
 
 # gold_wearable_device_data
@@ -191,7 +191,7 @@ LEFT JOIN pes
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_wearable_device_data")
+    .save(f"{TARGET_PATH}/gold_wearable_device_data.csv")
 )
 
 job.commit()
