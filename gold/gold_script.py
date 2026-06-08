@@ -22,32 +22,32 @@ FILE_FORMAT = "csv"
 pes_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/patient_enrollment_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}patient_enrollment_silver/")
 )
 cvs_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/clinical_visit_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}clinical_visit_silver/")
 )
 lrs_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/lab_results_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}lab_results_silver/")
 )
 das_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/drug_administration_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}drug_administration_silver/")
 )
 aes_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/adverse_events_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}adverse_events_silver/")
 )
 wms_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/wearable_monitoring_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}wearable_monitoring_silver/")
 )
 
 # --------------------------------------------------------------------------------------
@@ -68,7 +68,7 @@ wms_df.createOrReplaceTempView("wms")
 gold_patient_enrollment_df = spark.sql("""
 SELECT
   CAST(pes.patient_id AS STRING) AS patient_id,
-  pes.enrollment_date AS enrollment_date,
+  CAST(pes.enrollment_date AS TIMESTAMP) AS enrollment_date,
   CAST(pes.trial_id AS STRING) AS study_id,
   CAST(pes.patient_name AS STRING) AS demographics,
   CAST(pes.patient_id AS STRING) AS standardized_patient_identifier
