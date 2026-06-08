@@ -73,7 +73,8 @@ SELECT
   CAST(pes.patient_name AS STRING) AS demographics,
   CAST(pes.patient_id AS STRING) AS standardized_patient_identifier
 FROM pes
-""")
+"""
+)
 
 (
     gold_patient_enrollment_df.coalesce(1)
@@ -94,7 +95,8 @@ FROM cvs
 LEFT JOIN pes
   ON cvs.patient_id = pes.patient_id
  AND cvs.trial_id = pes.trial_id
-""")
+"""
+)
 
 (
     gold_clinical_visits_df.coalesce(1)
@@ -115,7 +117,8 @@ SELECT
 FROM lrs
 LEFT JOIN pes
   ON lrs.patient_id = pes.patient_id
-""")
+"""
+)
 
 (
     gold_laboratory_tests_df.coalesce(1)
@@ -136,7 +139,8 @@ SELECT
 FROM das
 LEFT JOIN pes
   ON das.patient_id = pes.patient_id
-""")
+"""
+)
 
 (
     gold_drug_administration_df.coalesce(1)
@@ -157,7 +161,8 @@ SELECT
 FROM aes
 LEFT JOIN pes
   ON aes.patient_id = pes.patient_id
-""")
+"""
+)
 
 (
     gold_adverse_events_df.coalesce(1)
@@ -178,7 +183,8 @@ SELECT
 FROM wms
 LEFT JOIN pes
   ON wms.patient_id = pes.patient_id
-""")
+"""
+)
 
 (
     gold_wearable_device_data_df.coalesce(1)
