@@ -1,14 +1,13 @@
 import sys
+from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
 from awsglue.job import Job
-from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
-from pyspark.sql import SparkSession
 
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
 sc = SparkContext()
 glueContext = GlueContext(sc)
-spark: SparkSession = glueContext.spark_session
+spark = glueContext.spark_session
 job = Job(glueContext)
 job.init(args["JOB_NAME"], args)
 
@@ -17,7 +16,7 @@ TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 FILE_FORMAT = "csv"
 
 # -----------------------------
-# Read sources (S3)
+# 1) Read source tables (S3)
 # -----------------------------
 sdb_df = (
     spark.read.format(FILE_FORMAT)
@@ -26,468 +25,459 @@ sdb_df = (
 )
 sdb_df.createOrReplaceTempView("spend_data_bronze")
 
-# =============================================================================
-# Table: recipient_profile_silver
-# =============================================================================
-recipient_profile_silver_df = spark.sql(
-    """
-    WITH base AS (
-        SELECT
-            sdb.CUSTOMER_MASTERID AS customer_master_id,
-            sdb.COMPANY_PROFILEID AS company_profile_id,
-            CAST(sdb.NPI_NUMBER AS STRING) AS npi_number,
-            CAST(sdb.TAX_ID_NUM AS STRING) AS tax_id_num,
-            sdb.RECIPIENT_IDENTIFIER_TYPE AS recipient_identifier_type,
-            CAST(sdb.RECIPIENT_IDENTIFIER_VALUE AS STRING) AS recipient_identifier_value,
-            COALESCE(sdb.RECIPIENT_CATEGORY, sdb.PROFILE_TYPE, sdb.PAYEE_TYPE) AS recipient_type,
-            COALESCE(sdb.COUNTRY, sdb.RECIPIENT_IDENTIFIER_COUNTRY) AS country_code,
-            COALESCE(sdb.PROVINCE, sdb.LICENSE_STATE) AS state_province_code,
-            sdb.CITY AS city,
-            CAST(sdb.POSTAL_CODE AS STRING) AS postal_code,
-            COALESCE(
-                sdb.ORGANIZATION_NAME,
-                TRIM(CONCAT(COALESCE(sdb.FIRST_NAME,''), ' ', COALESCE(sdb.MIDDLE_NAME,''), ' ', COALESCE(sdb.LAST_NAME,'')))
-            ) AS recipient_name,
-            ROW_NUMBER() OVER (
-                PARTITION BY
-                    sdb.COMPANY_PROFILEID,
-                    sdb.CUSTOMER_MASTERID,
-                    sdb.NPI_NUMBER,
-                    sdb.TAX_ID_NUM,
-                    sdb.RECIPIENT_IDENTIFIER_TYPE,
-                    sdb.RECIPIENT_IDENTIFIER_VALUE,
-                    sdb.ORGANIZATION_NAME,
-                    sdb.FIRST_NAME,
-                    sdb.MIDDLE_NAME,
-                    sdb.LAST_NAME,
-                    sdb.ADDRESS_1,
-                    sdb.CITY,
-                    sdb.PROVINCE,
-                    sdb.POSTAL_CODE,
-                    sdb.COUNTRY
-                ORDER BY
-                    sdb.TRANSACTION_DATE DESC
-            ) AS rn
-        FROM spend_data_bronze sdb
-    )
-    SELECT
-        customer_master_id,
-        company_profile_id,
-        npi_number,
-        tax_id_num,
-        recipient_identifier_type,
-        recipient_identifier_value,
-        recipient_type,
-        country_code,
-        state_province_code,
-        city,
-        postal_code,
-        recipient_name
-    FROM base
-    WHERE rn = 1
-    """
+# -----------------------------
+# recipient_identity_silver
+# -----------------------------
+recipient_identity_silver_sql = """
+WITH base AS (
+  SELECT
+    COALESCE(NULLIF(UPPER(TRIM(sdb.RECIPIENT_CATEGORY)),''), NULLIF(UPPER(TRIM(sdb.PROFILE_TYPE)),'')) AS recipient_type,
+    NULLIF(TRIM(sdb.COMPANY_PROFILEID),'') AS company_profile_id,
+    NULLIF(TRIM(sdb.CUSTOMER_MASTERID),'') AS customer_master_id,
+    CAST(NULLIF(TRIM(CAST(sdb.NPI_NUMBER AS VARCHAR)), '') AS VARCHAR) AS npi_number,
+    CAST(NULLIF(TRIM(CAST(sdb.TAX_ID_NUM AS VARCHAR)), '') AS VARCHAR) AS tax_id_num,
+    CAST(NULLIF(TRIM(CAST(sdb.RECIPIENT_IDENTIFIER_VALUE AS VARCHAR)), '') AS VARCHAR) AS recipient_identifier_value,
+    COALESCE(
+      NULLIF(TRIM(sdb.ORGANIZATION_NAME),''),
+      NULLIF(TRIM(CONCAT_WS(' ', sdb.FIRST_NAME, sdb.MIDDLE_NAME, sdb.LAST_NAME)),''),
+      NULLIF(TRIM(sdb.PAYEE_NAME),'')
+    ) AS recipient_name,
+    UPPER(NULLIF(TRIM(sdb.COUNTRY),'')) AS country_code,
+    UPPER(NULLIF(TRIM(sdb.PROVINCE),'')) AS state_province_code,
+    NULLIF(TRIM(sdb.CITY),'') AS city,
+    CAST(NULLIF(TRIM(CAST(sdb.POSTAL_CODE AS VARCHAR)), '') AS VARCHAR) AS postal_code,
+    TRUE AS active_flag,
+    sdb.TRANSACTION_DATE AS effective_start_date,
+    DATE '9999-12-31' AS effective_end_date,
+    ROW_NUMBER() OVER (
+      PARTITION BY
+        NULLIF(TRIM(sdb.COMPANY_PROFILEID),''),
+        NULLIF(TRIM(sdb.CUSTOMER_MASTERID),''),
+        CAST(NULLIF(TRIM(CAST(sdb.NPI_NUMBER AS VARCHAR)), '') AS VARCHAR),
+        CAST(NULLIF(TRIM(CAST(sdb.TAX_ID_NUM AS VARCHAR)), '') AS VARCHAR),
+        CAST(NULLIF(TRIM(CAST(sdb.RECIPIENT_IDENTIFIER_VALUE AS VARCHAR)), '') AS VARCHAR),
+        COALESCE(
+          NULLIF(TRIM(sdb.ORGANIZATION_NAME),''),
+          NULLIF(TRIM(CONCAT_WS(' ', sdb.FIRST_NAME, sdb.MIDDLE_NAME, sdb.LAST_NAME)),''),
+          NULLIF(TRIM(sdb.PAYEE_NAME),'')
+        ),
+        UPPER(NULLIF(TRIM(sdb.COUNTRY),'')),
+        UPPER(NULLIF(TRIM(sdb.PROVINCE),'')),
+        NULLIF(TRIM(sdb.CITY),''),
+        CAST(NULLIF(TRIM(CAST(sdb.POSTAL_CODE AS VARCHAR)), '') AS VARCHAR)
+      ORDER BY sdb.TRANSACTION_DATE DESC
+    ) AS rn
+  FROM spend_data_bronze sdb
 )
-recipient_profile_silver_df.createOrReplaceTempView("recipient_profile_silver")
+SELECT
+  recipient_type,
+  company_profile_id,
+  customer_master_id,
+  npi_number,
+  tax_id_num,
+  recipient_identifier_value,
+  recipient_name,
+  country_code,
+  state_province_code,
+  city,
+  postal_code,
+  active_flag,
+  effective_start_date,
+  effective_end_date
+FROM base
+WHERE rn = 1
+"""
+recipient_identity_silver_df = spark.sql(recipient_identity_silver_sql)
+recipient_identity_silver_df.createOrReplaceTempView("recipient_identity_silver")
 
-(
-    recipient_profile_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/recipient_profile_silver.csv")
+recipient_identity_silver_df.coalesce(1).write.mode("overwrite").format("csv").option("header", "true").save(
+    f"{TARGET_PATH}/recipient_identity_silver.csv"
 )
 
-# =============================================================================
-# Table: transfer_of_value_silver
-# =============================================================================
-transfer_of_value_silver_df = spark.sql(
-    """
-    SELECT
-        CAST(hash(CONCAT(sdb.CUSTOMER_SOURCESYSTEM,'|',sdb.COMPANY_TRANSACTIONID)) AS STRING) AS tov_id,
-        sdb.CUSTOMER_SOURCESYSTEM AS source_system,
-        sdb.COMPANY_TRANSACTIONID AS source_transaction_id,
-        sdb.TRANSACTION_DATE AS transaction_date,
-        sdb.TRANSACTION_DATE AS posting_date,
-        sdb.TRANSACTION_DATE AS payment_date,
-        sdb.COMPANY_PROFILEID AS company_profile_id,
-        rps.country_code AS recipient_country_code,
-        rps.state_province_code AS recipient_state_province_code,
-        rps.recipient_type AS recipient_type,
-        COALESCE(sdb.PURPOSE, sdb.SECONDARY_PURPOSE, sdb.FORM) AS description,
-        sdb.CURRENCY AS currency_code,
-        sdb.TOTAL_AMOUNT AS amount_local,
-        CAST(COALESCE(sdb.TOTAL_NUMBER_OF_RECIPIENTS, 1) AS INT) AS quantity
-    FROM spend_data_bronze sdb
-    LEFT JOIN recipient_profile_silver rps
-        ON (
-            (sdb.COMPANY_PROFILEID IS NOT NULL AND sdb.COMPANY_PROFILEID = rps.company_profile_id)
-            OR (sdb.CUSTOMER_MASTERID IS NOT NULL AND sdb.CUSTOMER_MASTERID = rps.customer_master_id)
-            OR (sdb.NPI_NUMBER IS NOT NULL AND CAST(sdb.NPI_NUMBER AS STRING) = rps.npi_number)
-            OR (sdb.TAX_ID_NUM IS NOT NULL AND CAST(sdb.TAX_ID_NUM AS STRING) = rps.tax_id_num)
-            OR (
-                sdb.RECIPIENT_IDENTIFIER_TYPE IS NOT NULL
-                AND sdb.RECIPIENT_IDENTIFIER_VALUE IS NOT NULL
-                AND sdb.RECIPIENT_IDENTIFIER_TYPE = rps.recipient_identifier_type
-                AND CAST(sdb.RECIPIENT_IDENTIFIER_VALUE AS STRING) = rps.recipient_identifier_value
-            )
-        )
-    """
+# -----------------------------
+# transfer_of_value_silver
+# -----------------------------
+transfer_of_value_silver_sql = """
+WITH joined AS (
+  SELECT
+    sdb.*,
+    ris.company_profile_id AS ris_company_profile_id,
+    ris.customer_master_id AS ris_customer_master_id,
+    ris.npi_number AS ris_npi_number,
+    ris.tax_id_num AS ris_tax_id_num,
+    ris.recipient_identifier_value AS ris_recipient_identifier_value
+  FROM spend_data_bronze sdb
+  LEFT JOIN recipient_identity_silver ris
+    ON COALESCE(NULLIF(TRIM(sdb.COMPANY_PROFILEID),''),'~') = COALESCE(ris.company_profile_id,'~')
+   AND COALESCE(NULLIF(TRIM(sdb.CUSTOMER_MASTERID),''),'~') = COALESCE(ris.customer_master_id,'~')
+   AND COALESCE(CAST(sdb.NPI_NUMBER AS VARCHAR),'~') = COALESCE(ris.npi_number,'~')
+   AND COALESCE(CAST(sdb.TAX_ID_NUM AS VARCHAR),'~') = COALESCE(ris.tax_id_num,'~')
+   AND COALESCE(CAST(sdb.RECIPIENT_IDENTIFIER_VALUE AS VARCHAR),'~') = COALESCE(ris.recipient_identifier_value,'~')
+),
+dedup AS (
+  SELECT
+    SHA2(CONCAT_WS('||',
+      NULLIF(TRIM(sdb.CUSTOMER_SOURCESYSTEM),''),
+      NULLIF(TRIM(sdb.COMPANY_TRANSACTIONID),'')
+    ), 256) AS tov_id,
+    NULLIF(TRIM(sdb.CUSTOMER_SOURCESYSTEM),'') AS source_system,
+    NULLIF(TRIM(sdb.COMPANY_TRANSACTIONID),'') AS source_transaction_id,
+    sdb.TRANSACTION_DATE AS transaction_date,
+    CAST(NULL AS DATE) AS posting_date,
+    CAST(NULL AS DATE) AS payment_date,
+    NULLIF(TRIM(sdb.COMPANY_PROFILEID),'') AS company_profile_id,
+    CAST(NULL AS VARCHAR) AS payer_entity_id,
+    NULLIF(TRIM(sdb.CUSTOMER_MASTERID),'') AS customer_master_id,
+    CAST(NULLIF(TRIM(CAST(sdb.NPI_NUMBER AS VARCHAR)), '') AS VARCHAR) AS npi_number,
+    CAST(NULLIF(TRIM(CAST(sdb.TAX_ID_NUM AS VARCHAR)), '') AS VARCHAR) AS tax_id_num,
+    CAST(NULLIF(TRIM(CAST(sdb.RECIPIENT_IDENTIFIER_VALUE AS VARCHAR)), '') AS VARCHAR) AS recipient_identifier_value,
+    COALESCE(
+      NULLIF(TRIM(sdb.ORGANIZATION_NAME),''),
+      NULLIF(TRIM(CONCAT_WS(' ', sdb.FIRST_NAME, sdb.MIDDLE_NAME, sdb.LAST_NAME)),''),
+      NULLIF(TRIM(sdb.PAYEE_NAME),'')
+    ) AS recipient_name,
+    UPPER(NULLIF(TRIM(sdb.COUNTRY),'')) AS recipient_country_code,
+    UPPER(NULLIF(TRIM(sdb.PROVINCE),'')) AS recipient_state_province_code,
+    NULLIF(TRIM(sdb.CITY),'') AS recipient_city,
+    CAST(NULLIF(TRIM(CAST(sdb.POSTAL_CODE AS VARCHAR)), '') AS VARCHAR) AS recipient_postal_code,
+    COALESCE(NULLIF(UPPER(TRIM(sdb.RECIPIENT_CATEGORY)),''), NULLIF(UPPER(TRIM(sdb.PROFILE_TYPE)),'')) AS recipient_type,
+    NULLIF(TRIM(sdb.PURPOSE),'') AS tov_category,
+    NULLIF(TRIM(sdb.SECONDARY_PURPOSE),'') AS tov_subcategory,
+    COALESCE(NULLIF(TRIM(sdb.FORM),''), NULLIF(TRIM(sdb.PURPOSE),'')) AS description,
+    UPPER(NULLIF(TRIM(sdb.CURRENCY),'')) AS currency_code,
+    sdb.TOTAL_AMOUNT AS amount_local,
+    CAST(NULL AS DOUBLE) AS amount_usd,
+    CAST(NULL AS DOUBLE) AS quantity,
+    NULLIF(TRIM(sdb.COMPANY_EVENT_ID),'') AS event_id,
+    NULLIF(TRIM(sdb.MATERIAL_NAME),'') AS material_id,
+    CAST(NULL AS VARCHAR) AS contract_id,
+    CAST(NULL AS VARCHAR) AS invoice_id,
+    CAST(NULL AS VARCHAR) AS po_number,
+    CAST(NULL AS VARCHAR) AS payment_method,
+    CAST(NULL AS VARCHAR) AS cross_border_flag,
+    CURRENT_TIMESTAMP() AS created_ts,
+    CURRENT_TIMESTAMP() AS updated_ts,
+    ROW_NUMBER() OVER (
+      PARTITION BY
+        NULLIF(TRIM(sdb.CUSTOMER_SOURCESYSTEM),''),
+        NULLIF(TRIM(sdb.COMPANY_TRANSACTIONID),'')
+      ORDER BY sdb.TRANSACTION_DATE DESC
+    ) AS rn
+  FROM joined sdb
 )
+SELECT
+  tov_id,
+  source_system,
+  source_transaction_id,
+  transaction_date,
+  posting_date,
+  payment_date,
+  company_profile_id,
+  payer_entity_id,
+  customer_master_id,
+  npi_number,
+  tax_id_num,
+  recipient_identifier_value,
+  recipient_name,
+  recipient_country_code,
+  recipient_state_province_code,
+  recipient_city,
+  recipient_postal_code,
+  recipient_type,
+  tov_category,
+  tov_subcategory,
+  description,
+  currency_code,
+  amount_local,
+  amount_usd,
+  quantity,
+  event_id,
+  material_id,
+  contract_id,
+  invoice_id,
+  po_number,
+  payment_method,
+  cross_border_flag,
+  created_ts,
+  updated_ts
+FROM dedup
+WHERE rn = 1
+"""
+transfer_of_value_silver_df = spark.sql(transfer_of_value_silver_sql)
 transfer_of_value_silver_df.createOrReplaceTempView("transfer_of_value_silver")
 
-(
-    transfer_of_value_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/transfer_of_value_silver.csv")
+transfer_of_value_silver_df.coalesce(1).write.mode("overwrite").format("csv").option("header", "true").save(
+    f"{TARGET_PATH}/transfer_of_value_silver.csv"
 )
 
-# =============================================================================
-# Table: recipient_consent_silver
-# =============================================================================
-recipient_consent_silver_df = spark.sql(
-    """
-    WITH consent_events AS (
-        SELECT
-            CAST(
-                hash(
-                    CONCAT(
-                        COALESCE(rps.company_profile_id,''),'|',
-                        COALESCE(rps.customer_master_id,''),'|',
-                        COALESCE(rps.npi_number,''),'|',
-                        COALESCE(rps.tax_id_num,''),'|',
-                        COALESCE(rps.recipient_identifier_type,''),'|',
-                        COALESCE(rps.recipient_identifier_value,''),'|',
-                        'DISCLOSURE','|',
-                        'TRANSFER_OF_VALUE','|',
-                        COALESCE(rps.country_code,''),'|',
-                        CAST(sdb.TRANSACTION_DATE AS STRING)
-                    )
-                ) AS STRING
-            ) AS consent_id,
-            rps.country_code AS country_code,
-            sdb.TRANSACTION_DATE AS consent_captured_date,
-            sdb.CUSTOMER_SOURCESYSTEM AS consent_source,
-            CASE
-                WHEN sdb.TRANSACTION_CONSENT = true THEN 'GRANTED'
-                WHEN sdb.TRANSACTION_CONSENT = false THEN 'DENIED'
-                ELSE 'UNKNOWN'
-            END AS consent_status,
-            ROW_NUMBER() OVER (
-                PARTITION BY
-                    COALESCE(rps.company_profile_id,''),
-                    COALESCE(rps.customer_master_id,''),
-                    COALESCE(rps.npi_number,''),
-                    COALESCE(rps.tax_id_num,''),
-                    COALESCE(rps.recipient_identifier_type,''),
-                    COALESCE(rps.recipient_identifier_value,''),
-                    COALESCE(rps.country_code,'')
-                ORDER BY sdb.TRANSACTION_DATE DESC
-            ) AS rn
-        FROM spend_data_bronze sdb
-        INNER JOIN recipient_profile_silver rps
-            ON (
-                (sdb.COMPANY_PROFILEID IS NOT NULL AND sdb.COMPANY_PROFILEID = rps.company_profile_id)
-                OR (sdb.CUSTOMER_MASTERID IS NOT NULL AND sdb.CUSTOMER_MASTERID = rps.customer_master_id)
-                OR (sdb.NPI_NUMBER IS NOT NULL AND CAST(sdb.NPI_NUMBER AS STRING) = rps.npi_number)
-                OR (sdb.TAX_ID_NUM IS NOT NULL AND CAST(sdb.TAX_ID_NUM AS STRING) = rps.tax_id_num)
-                OR (
-                    sdb.RECIPIENT_IDENTIFIER_TYPE IS NOT NULL
-                    AND sdb.RECIPIENT_IDENTIFIER_VALUE IS NOT NULL
-                    AND sdb.RECIPIENT_IDENTIFIER_TYPE = rps.recipient_identifier_type
-                    AND CAST(sdb.RECIPIENT_IDENTIFIER_VALUE AS STRING) = rps.recipient_identifier_value
-                )
-            )
-    )
-    SELECT
-        consent_id,
-        country_code,
-        consent_captured_date,
-        consent_source,
-        consent_status
-    FROM consent_events
-    WHERE rn = 1
-    """
+# -----------------------------
+# recipient_consent_silver
+# -----------------------------
+recipient_consent_silver_sql = """
+WITH base AS (
+  SELECT
+    SHA2(CONCAT_WS('||',
+      NULLIF(TRIM(sdb.CUSTOMER_SOURCESYSTEM),''),
+      NULLIF(TRIM(sdb.COMPANY_TRANSACTIONID),''),
+      'TRANSACTION_CONSENT'
+    ), 256) AS consent_id,
+    NULLIF(TRIM(sdb.COMPANY_PROFILEID),'') AS company_profile_id,
+    NULLIF(TRIM(sdb.CUSTOMER_MASTERID),'') AS customer_master_id,
+    CAST(NULLIF(TRIM(CAST(sdb.NPI_NUMBER AS VARCHAR)), '') AS VARCHAR) AS npi_number,
+    CAST(NULLIF(TRIM(CAST(sdb.TAX_ID_NUM AS VARCHAR)), '') AS VARCHAR) AS tax_id_num,
+    CAST(NULLIF(TRIM(CAST(sdb.RECIPIENT_IDENTIFIER_VALUE AS VARCHAR)), '') AS VARCHAR) AS recipient_identifier_value,
+    'DISCLOSURE_CONSENT' AS consent_type,
+    'TRANSACTION' AS consent_scope,
+    UPPER(NULLIF(TRIM(sdb.COUNTRY),'')) AS country_code,
+    sdb.TRANSACTION_DATE AS effective_start_date,
+    DATE '9999-12-31' AS effective_end_date,
+    CASE
+      WHEN sdb.TRANSACTION_CONSENT = TRUE THEN 'CONSENTED'
+      WHEN sdb.TRANSACTION_CONSENT = FALSE THEN 'DECLINED'
+      ELSE 'UNKNOWN'
+    END AS consent_status,
+    sdb.TRANSACTION_DATE AS consent_captured_date,
+    NULLIF(TRIM(sdb.CUSTOMER_SOURCESYSTEM),'') AS consent_source,
+    CAST(NULL AS VARCHAR) AS consent_document_reference,
+    CURRENT_TIMESTAMP() AS last_validated_ts,
+    ROW_NUMBER() OVER (
+      PARTITION BY
+        NULLIF(TRIM(sdb.COMPANY_PROFILEID),''),
+        NULLIF(TRIM(sdb.CUSTOMER_MASTERID),''),
+        CAST(NULLIF(TRIM(CAST(sdb.NPI_NUMBER AS VARCHAR)), '') AS VARCHAR),
+        CAST(NULLIF(TRIM(CAST(sdb.TAX_ID_NUM AS VARCHAR)), '') AS VARCHAR),
+        CAST(NULLIF(TRIM(CAST(sdb.RECIPIENT_IDENTIFIER_VALUE AS VARCHAR)), '') AS VARCHAR),
+        UPPER(NULLIF(TRIM(sdb.COUNTRY),'')),
+        sdb.TRANSACTION_DATE
+      ORDER BY sdb.TRANSACTION_DATE DESC
+    ) AS rn
+  FROM spend_data_bronze sdb
 )
+SELECT
+  consent_id,
+  company_profile_id,
+  customer_master_id,
+  npi_number,
+  tax_id_num,
+  recipient_identifier_value,
+  consent_type,
+  consent_scope,
+  country_code,
+  effective_start_date,
+  effective_end_date,
+  consent_status,
+  consent_captured_date,
+  consent_source,
+  consent_document_reference,
+  last_validated_ts
+FROM base
+WHERE rn = 1
+"""
+recipient_consent_silver_df = spark.sql(recipient_consent_silver_sql)
 recipient_consent_silver_df.createOrReplaceTempView("recipient_consent_silver")
 
-(
-    recipient_consent_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/recipient_consent_silver.csv")
+recipient_consent_silver_df.coalesce(1).write.mode("overwrite").format("csv").option("header", "true").save(
+    f"{TARGET_PATH}/recipient_consent_silver.csv"
 )
 
-# =============================================================================
-# Table: event_silver
-# =============================================================================
-event_silver_df = spark.sql(
-    """
-    WITH base AS (
-        SELECT
-            CAST(
-                CASE
-                    WHEN sdb.COMPANY_EVENT_ID IS NOT NULL
-                        THEN hash(CONCAT(sdb.CUSTOMER_SOURCESYSTEM,'|',sdb.COMPANY_EVENT_ID))
-                    ELSE hash(CONCAT(sdb.CUSTOMER_SOURCESYSTEM,'|',sdb.ENGAGEMENT_NAME,'|',CAST(sdb.ENGAGEMENT_START_DATE AS STRING)))
-                END AS STRING
-            ) AS event_id,
-            COALESCE(sdb.ENGAGEMENT_NAME, sdb.COMPANY_EVENT_ID) AS event_name,
-            sdb.ENGAGEMENT_TYPE AS event_type,
-            sdb.ENGAGEMENT_START_DATE AS event_start_date,
-            sdb.ENGAGEMENT_END_DATE AS event_end_date,
-            sdb.VENUE_COUNTRY AS event_country_code,
-            sdb.VENUE_PROVINCE AS event_state_province_code,
-            sdb.VENUE_CITY AS event_city,
-            sdb.COMPANY_PROFILEID AS organizing_company_profile_id,
-            ROW_NUMBER() OVER (
-                PARTITION BY
-                    CASE
-                        WHEN sdb.COMPANY_EVENT_ID IS NOT NULL
-                            THEN hash(CONCAT(sdb.CUSTOMER_SOURCESYSTEM,'|',sdb.COMPANY_EVENT_ID))
-                        ELSE hash(CONCAT(sdb.CUSTOMER_SOURCESYSTEM,'|',sdb.ENGAGEMENT_NAME,'|',CAST(sdb.ENGAGEMENT_START_DATE AS STRING)))
-                    END
-                ORDER BY sdb.TRANSACTION_DATE DESC
-            ) AS rn
-        FROM spend_data_bronze sdb
-    )
-    SELECT
-        event_id,
-        event_name,
-        event_type,
-        event_start_date,
-        event_end_date,
-        event_country_code,
-        event_state_province_code,
-        event_city,
-        organizing_company_profile_id
-    FROM base
-    WHERE rn = 1
-    """
+# -----------------------------
+# event_silver
+# -----------------------------
+event_silver_sql = """
+WITH base AS (
+  SELECT
+    SHA2(CONCAT_WS('||',
+      NULLIF(TRIM(sdb.CUSTOMER_SOURCESYSTEM),''),
+      NULLIF(TRIM(sdb.COMPANY_EVENT_ID),'')
+    ), 256) AS event_id,
+    NULLIF(TRIM(sdb.CUSTOMER_SOURCESYSTEM),'') AS source_system,
+    NULLIF(TRIM(sdb.COMPANY_EVENT_ID),'') AS company_event_id,
+    NULLIF(TRIM(sdb.ENGAGEMENT_NAME),'') AS event_name,
+    NULLIF(TRIM(sdb.ENGAGEMENT_TYPE),'') AS event_type,
+    sdb.ENGAGEMENT_START_DATE AS event_start_date,
+    sdb.ENGAGEMENT_END_DATE AS event_end_date,
+    UPPER(NULLIF(TRIM(sdb.VENUE_COUNTRY),'')) AS event_country_code,
+    UPPER(NULLIF(TRIM(sdb.VENUE_PROVINCE),'')) AS event_state_province_code,
+    NULLIF(TRIM(sdb.VENUE_CITY),'') AS event_city,
+    NULLIF(TRIM(sdb.COMPANY_PROFILEID),'') AS organizing_company_profile_id,
+    CAST(NULL AS VARCHAR) AS event_owner_org,
+    CASE
+      WHEN sdb.ENGAGEMENT_END_DATE IS NOT NULL AND sdb.ENGAGEMENT_END_DATE < CURRENT_DATE THEN 'COMPLETED'
+      ELSE 'PLANNED_OR_ACTIVE'
+    END AS event_status,
+    CURRENT_TIMESTAMP() AS created_ts,
+    CURRENT_TIMESTAMP() AS updated_ts,
+    ROW_NUMBER() OVER (
+      PARTITION BY
+        NULLIF(TRIM(sdb.CUSTOMER_SOURCESYSTEM),''),
+        NULLIF(TRIM(sdb.COMPANY_EVENT_ID),'')
+      ORDER BY sdb.TRANSACTION_DATE DESC
+    ) AS rn
+  FROM spend_data_bronze sdb
 )
+SELECT
+  event_id,
+  company_event_id,
+  source_system,
+  event_name,
+  event_type,
+  event_start_date,
+  event_end_date,
+  event_country_code,
+  event_state_province_code,
+  event_city,
+  organizing_company_profile_id,
+  event_owner_org,
+  event_status,
+  created_ts,
+  updated_ts
+FROM base
+WHERE rn = 1
+"""
+event_silver_df = spark.sql(event_silver_sql)
 event_silver_df.createOrReplaceTempView("event_silver")
 
-(
-    event_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/event_silver.csv")
+event_silver_df.coalesce(1).write.mode("overwrite").format("csv").option("header", "true").save(
+    f"{TARGET_PATH}/event_silver.csv"
 )
 
-# =============================================================================
-# Table: event_spend_allocation_silver
-# =============================================================================
-event_spend_allocation_silver_df = spark.sql(
-    """
-    SELECT
-        CAST(hash(CONCAT(es.event_id,'|',tovs.tov_id)) AS STRING) AS allocation_id,
-        es.event_id AS event_id,
-        tovs.tov_id AS tov_id,
-        CASE
-            WHEN COALESCE(sdb.TOTAL_NUMBER_OF_RECIPIENTS,0) > 0 THEN 'EQUAL_SPLIT_BY_RECIPIENT_COUNT'
-            ELSE 'FULL_TO_PRIMARY_RECIPIENT'
-        END AS allocation_method,
-        CAST(COALESCE(sdb.TOTAL_NUMBER_OF_RECIPIENTS, 1) AS INT) AS allocation_basis_value,
-        CASE
-            WHEN COALESCE(sdb.TOTAL_NUMBER_OF_RECIPIENTS,0) > 0 THEN (sdb.TOTAL_AMOUNT / sdb.TOTAL_NUMBER_OF_RECIPIENTS)
-            ELSE sdb.TOTAL_AMOUNT
-        END AS allocated_amount_usd,
-        sdb.TRANSACTION_DATE AS allocation_date
-    FROM transfer_of_value_silver tovs
-    INNER JOIN spend_data_bronze sdb
-        ON (tovs.source_system = sdb.CUSTOMER_SOURCESYSTEM AND tovs.source_transaction_id = sdb.COMPANY_TRANSACTIONID)
-    INNER JOIN event_silver es
-        ON (
-            (sdb.COMPANY_EVENT_ID IS NOT NULL AND es.event_name = sdb.COMPANY_EVENT_ID)
-            OR (sdb.COMPANY_EVENT_ID IS NULL AND sdb.ENGAGEMENT_NAME IS NOT NULL AND es.event_name = sdb.ENGAGEMENT_NAME AND es.event_start_date = sdb.ENGAGEMENT_START_DATE)
-        )
-    """
+# -----------------------------
+# material_silver
+# -----------------------------
+material_silver_sql = """
+WITH base AS (
+  SELECT
+    SHA2(CONCAT_WS('||', UPPER(TRIM(sdb.MATERIAL_NAME))), 256) AS material_id,
+    NULLIF(TRIM(sdb.MATERIAL_NAME),'') AS material_name,
+    CAST(NULL AS VARCHAR) AS material_type,
+    CAST(NULL AS BOOLEAN) AS regulated_flag,
+    UPPER(NULLIF(TRIM(sdb.COUNTRY),'')) AS country_code,
+    CAST(NULL AS DOUBLE) AS unit_value_usd,
+    MIN(sdb.TRANSACTION_DATE) OVER (PARTITION BY NULLIF(TRIM(sdb.MATERIAL_NAME),'')) AS effective_start_date,
+    DATE '9999-12-31' AS effective_end_date
+  FROM spend_data_bronze sdb
 )
-event_spend_allocation_silver_df.createOrReplaceTempView("event_spend_allocation_silver")
+SELECT DISTINCT
+  material_id,
+  material_name,
+  material_type,
+  regulated_flag,
+  country_code,
+  unit_value_usd,
+  effective_start_date,
+  effective_end_date
+FROM base
+WHERE material_name IS NOT NULL
+"""
+material_silver_df = spark.sql(material_silver_sql)
+material_silver_df.createOrReplaceTempView("material_silver")
 
-(
-    event_spend_allocation_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/event_spend_allocation_silver.csv")
+material_silver_df.coalesce(1).write.mode("overwrite").format("csv").option("header", "true").save(
+    f"{TARGET_PATH}/material_silver.csv"
 )
 
-# =============================================================================
-# Table: material_master_silver
-# =============================================================================
-material_master_silver_df = spark.sql(
-    """
-    WITH base AS (
-        SELECT
-            CAST(
-                hash(CONCAT(UPPER(TRIM(COALESCE(sdb.MATERIAL_NAME,sdb.PRODUCT,sdb.PRODUCT_2))),'|',sdb.COUNTRY)) AS STRING
-            ) AS material_id,
-            COALESCE(sdb.MATERIAL_NAME, sdb.PRODUCT, sdb.PRODUCT_2) AS material_name,
-            CASE WHEN sdb.MATERIAL_NAME IS NOT NULL THEN 'IN_KIND' ELSE 'PRODUCT' END AS material_type,
-            sdb.COUNTRY AS country_code,
-            ROW_NUMBER() OVER (
-                PARTITION BY hash(CONCAT(UPPER(TRIM(COALESCE(sdb.MATERIAL_NAME,sdb.PRODUCT,sdb.PRODUCT_2))),'|',sdb.COUNTRY))
-                ORDER BY sdb.TRANSACTION_DATE DESC
-            ) AS rn
-        FROM spend_data_bronze sdb
-        WHERE COALESCE(sdb.MATERIAL_NAME, sdb.PRODUCT, sdb.PRODUCT_2) IS NOT NULL
-    )
-    SELECT
-        material_id,
-        material_name,
-        material_type,
-        country_code
-    FROM base
-    WHERE rn = 1
-    """
+# -----------------------------
+# material_distribution_silver
+# -----------------------------
+material_distribution_silver_sql = """
+WITH base AS (
+  SELECT
+    SHA2(CONCAT_WS('||', tovs.tov_id, ms.material_id), 256) AS distribution_id,
+    tovs.tov_id AS tov_id,
+    ms.material_id AS material_id,
+    sdb.TRANSACTION_DATE AS distribution_date,
+    UPPER(NULLIF(TRIM(sdb.COUNTRY),'')) AS country_code,
+    sdb.MATERIAL_QTY AS quantity,
+    CAST(NULL AS DOUBLE) AS unit_value_usd,
+    CAST(NULL AS DOUBLE) AS total_value_usd,
+    CAST(NULL AS VARCHAR) AS distribution_channel,
+    CAST(NULL AS VARCHAR) AS compliance_flag,
+    CAST(NULL AS VARCHAR) AS noncompliance_reason_code,
+    ROW_NUMBER() OVER (
+      PARTITION BY tovs.tov_id, ms.material_id
+      ORDER BY sdb.TRANSACTION_DATE DESC
+    ) AS rn
+  FROM spend_data_bronze sdb
+  INNER JOIN transfer_of_value_silver tovs
+    ON NULLIF(TRIM(sdb.CUSTOMER_SOURCESYSTEM),'') = tovs.source_system
+   AND NULLIF(TRIM(sdb.COMPANY_TRANSACTIONID),'') = tovs.source_transaction_id
+  LEFT JOIN material_silver ms
+    ON UPPER(TRIM(sdb.MATERIAL_NAME)) = UPPER(TRIM(ms.material_name))
+  WHERE (sdb.MATERIAL_NAME IS NOT NULL OR sdb.MATERIAL_QTY IS NOT NULL)
 )
-material_master_silver_df.createOrReplaceTempView("material_master_silver")
-
-(
-    material_master_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/material_master_silver.csv")
-)
-
-# =============================================================================
-# Table: material_distribution_silver
-# =============================================================================
-material_distribution_silver_df = spark.sql(
-    """
-    SELECT
-        CAST(hash(CONCAT(tovs.tov_id,'|',mms.material_id)) AS STRING) AS distribution_id,
-        tovs.tov_id AS tov_id,
-        mms.material_id AS material_id,
-        sdb.TRANSACTION_DATE AS distribution_date,
-        sdb.COUNTRY AS country_code,
-        CAST(COALESCE(sdb.MATERIAL_QTY, 1) AS INT) AS quantity,
-        COALESCE(sdb.FORM, sdb.PURPOSE) AS distribution_channel
-    FROM transfer_of_value_silver tovs
-    INNER JOIN spend_data_bronze sdb
-        ON (tovs.source_system = sdb.CUSTOMER_SOURCESYSTEM AND tovs.source_transaction_id = sdb.COMPANY_TRANSACTIONID)
-    LEFT JOIN material_master_silver mms
-        ON (
-            UPPER(TRIM(COALESCE(sdb.MATERIAL_NAME,sdb.PRODUCT,sdb.PRODUCT_2))) = UPPER(TRIM(mms.material_name))
-            AND mms.country_code = sdb.COUNTRY
-        )
-    """
-)
+SELECT
+  distribution_id,
+  tov_id,
+  material_id,
+  distribution_date,
+  country_code,
+  quantity,
+  unit_value_usd,
+  total_value_usd,
+  distribution_channel,
+  compliance_flag,
+  noncompliance_reason_code
+FROM base
+WHERE rn = 1
+"""
+material_distribution_silver_df = spark.sql(material_distribution_silver_sql)
 material_distribution_silver_df.createOrReplaceTempView("material_distribution_silver")
 
-(
-    material_distribution_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/material_distribution_silver.csv")
+material_distribution_silver_df.coalesce(1).write.mode("overwrite").format("csv").option("header", "true").save(
+    f"{TARGET_PATH}/material_distribution_silver.csv"
 )
 
-# =============================================================================
-# Table: hcp_profile_silver
-# =============================================================================
-hcp_profile_silver_df = spark.sql(
-    """
-    WITH base AS (
-        SELECT
-            rps.npi_number AS npi_number,
-            sdb.SPECIALTY AS hcp_specialty_description,
-            CAST(hash(UPPER(TRIM(sdb.SPECIALTY))) AS STRING) AS hcp_specialty_code,
-            COALESCE(sdb.RECIPIENT_IDENTIFIER_COUNTRY, sdb.COUNTRY) AS license_country_code,
-            COALESCE(sdb.LICENSE_STATE, sdb.PROVINCE) AS license_state_province_code,
-            (sdb.NPI_NUMBER IS NOT NULL AND sdb.ADDRESS_1 IS NOT NULL AND sdb.CITY IS NOT NULL AND sdb.COUNTRY IS NOT NULL) AS active_practice_flag,
-            ROW_NUMBER() OVER (
-                PARTITION BY rps.npi_number
-                ORDER BY sdb.TRANSACTION_DATE DESC
-            ) AS rn
-        FROM spend_data_bronze sdb
-        INNER JOIN recipient_profile_silver rps
-            ON (
-                (sdb.COMPANY_PROFILEID IS NOT NULL AND sdb.COMPANY_PROFILEID = rps.company_profile_id)
-                OR (sdb.CUSTOMER_MASTERID IS NOT NULL AND sdb.CUSTOMER_MASTERID = rps.customer_master_id)
-                OR (sdb.NPI_NUMBER IS NOT NULL AND CAST(sdb.NPI_NUMBER AS STRING) = rps.npi_number)
-                OR (sdb.TAX_ID_NUM IS NOT NULL AND CAST(sdb.TAX_ID_NUM AS STRING) = rps.tax_id_num)
-                OR (
-                    sdb.RECIPIENT_IDENTIFIER_TYPE IS NOT NULL
-                    AND sdb.RECIPIENT_IDENTIFIER_VALUE IS NOT NULL
-                    AND sdb.RECIPIENT_IDENTIFIER_TYPE = rps.recipient_identifier_type
-                    AND CAST(sdb.RECIPIENT_IDENTIFIER_VALUE AS STRING) = rps.recipient_identifier_value
-                )
-            )
-        WHERE rps.npi_number IS NOT NULL
-    )
-    SELECT
-        npi_number,
-        hcp_specialty_description,
-        hcp_specialty_code,
-        license_country_code,
-        license_state_province_code,
-        active_practice_flag
-    FROM base
-    WHERE rn = 1
-    """
+# -----------------------------
+# hcp_profile_silver
+# -----------------------------
+hcp_profile_silver_sql = """
+WITH base AS (
+  SELECT
+    NULLIF(TRIM(sdb.COMPANY_PROFILEID),'') AS company_profile_id,
+    NULLIF(TRIM(sdb.CUSTOMER_MASTERID),'') AS customer_master_id,
+    CAST(sdb.NPI_NUMBER AS VARCHAR) AS npi_number,
+    CAST(NULLIF(TRIM(CAST(sdb.TAX_ID_NUM AS VARCHAR)), '') AS VARCHAR) AS tax_id_num,
+    CAST(NULLIF(TRIM(CAST(sdb.RECIPIENT_IDENTIFIER_VALUE AS VARCHAR)), '') AS VARCHAR) AS recipient_identifier_value,
+    CAST(NULL AS VARCHAR) AS hcp_specialty_code,
+    NULLIF(TRIM(sdb.SPECIALTY),'') AS hcp_specialty_description,
+    UPPER(NULLIF(TRIM(sdb.COUNTRY),'')) AS license_country_code,
+    UPPER(NULLIF(TRIM(sdb.LICENSE_STATE),'')) AS license_state_province_code,
+    CAST(NULL AS BOOLEAN) AS active_practice_flag,
+    CAST(NULL AS VARCHAR) AS primary_affiliated_hco_id,
+    ROW_NUMBER() OVER (
+      PARTITION BY
+        NULLIF(TRIM(sdb.COMPANY_PROFILEID),''),
+        NULLIF(TRIM(sdb.CUSTOMER_MASTERID),''),
+        CAST(sdb.NPI_NUMBER AS VARCHAR),
+        CAST(NULLIF(TRIM(CAST(sdb.TAX_ID_NUM AS VARCHAR)), '') AS VARCHAR),
+        CAST(NULLIF(TRIM(CAST(sdb.RECIPIENT_IDENTIFIER_VALUE AS VARCHAR)), '') AS VARCHAR)
+      ORDER BY sdb.TRANSACTION_DATE DESC
+    ) AS rn
+  FROM spend_data_bronze sdb
+  WHERE
+    UPPER(TRIM(sdb.RECIPIENT_CATEGORY)) IN ('HCP','HEALTHCARE PROFESSIONAL')
+    OR sdb.NPI_NUMBER IS NOT NULL
 )
+SELECT
+  company_profile_id,
+  customer_master_id,
+  npi_number,
+  tax_id_num,
+  recipient_identifier_value,
+  hcp_specialty_code,
+  hcp_specialty_description,
+  license_country_code,
+  license_state_province_code,
+  active_practice_flag,
+  primary_affiliated_hco_id
+FROM base
+WHERE rn = 1
+"""
+hcp_profile_silver_df = spark.sql(hcp_profile_silver_sql)
 hcp_profile_silver_df.createOrReplaceTempView("hcp_profile_silver")
 
-(
-    hcp_profile_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/hcp_profile_silver.csv")
-)
-
-# =============================================================================
-# Table: cross_border_payment_silver
-# =============================================================================
-cross_border_payment_silver_df = spark.sql(
-    """
-    WITH base AS (
-        SELECT
-            CAST(hash(tovs.tov_id) AS STRING) AS cross_border_id,
-            tovs.tov_id AS tov_id,
-            tovs.payer_country_code AS payer_country_code,
-            tovs.recipient_country_code AS recipient_country_code,
-            (
-                tovs.payer_country_code IS NOT NULL
-                AND tovs.recipient_country_code IS NOT NULL
-                AND tovs.payer_country_code <> tovs.recipient_country_code
-            ) AS cross_border_flag,
-            CASE
-                WHEN (
-                    tovs.payer_country_code IS NOT NULL
-                    AND tovs.recipient_country_code IS NOT NULL
-                    AND tovs.payer_country_code <> tovs.recipient_country_code
-                )
-                THEN 'PAYER_TO_RECIPIENT_COUNTRY_MISMATCH'
-                ELSE NULL
-            END AS cross_border_type,
-            ROW_NUMBER() OVER (PARTITION BY tovs.tov_id ORDER BY tovs.tov_id) AS rn
-        FROM transfer_of_value_silver tovs
-    )
-    SELECT
-        cross_border_id,
-        tov_id,
-        payer_country_code,
-        recipient_country_code,
-        cross_border_flag,
-        cross_border_type
-    FROM base
-    WHERE rn = 1
-    """
-)
-
-(
-    cross_border_payment_silver_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/cross_border_payment_silver.csv")
+hcp_profile_silver_df.coalesce(1).write.mode("overwrite").format("csv").option("header", "true").save(
+    f"{TARGET_PATH}/hcp_profile_silver.csv"
 )
 
 job.commit()
