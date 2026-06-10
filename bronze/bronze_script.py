@@ -1,119 +1,105 @@
 import sys
 from awsglue.context import GlueContext
+from awsglue.job import Job
 from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
 
-sc = SparkContext.getOrCreate()
+sc = SparkContext()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args["JOB_NAME"], args)
 
-SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/src/"
+SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/spend_data/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
 FILE_FORMAT = "csv"
 
-spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
-
-# ============================================================
-# Read Source Tables (S3) + Create Temp Views
-# ============================================================
-
-products_raw_df = (
+# ----------------------------
+# Source Read: spend_data
+# ----------------------------
+spend_data_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/products_raw.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/spend_data.{FILE_FORMAT}/")
 )
-products_raw_df.createOrReplaceTempView("products_raw")
+spend_data_df.createOrReplaceTempView("spend_data")
 
-sales_transactions_raw_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/sales_transactions_raw.{FILE_FORMAT}/")
-)
-sales_transactions_raw_df.createOrReplaceTempView("sales_transactions_raw")
-
-stores_raw_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/stores_raw.{FILE_FORMAT}/")
-)
-stores_raw_df.createOrReplaceTempView("stores_raw")
-
-# ============================================================
-# Target: bronze.products_bronze
-# Source: products_raw pr
-# ============================================================
-
-products_bronze_df = spark.sql(
+# ----------------------------
+# Target Transform: bronze.spend_data_bronze
+# ----------------------------
+spend_data_bronze_df = spark.sql(
     """
     SELECT
-        CAST(pr.product_id AS STRING)   AS product_id,
-        CAST(pr.product_name AS STRING) AS product_name,
-        CAST(pr.category AS STRING)     AS category,
-        CAST(pr.brand AS STRING)        AS brand,
-        CAST(pr.price AS DOUBLE)        AS price,
-        CAST(pr.is_active AS BOOLEAN)   AS is_active
-    FROM products_raw pr
+        CAST(sd.CUSTOMER_MASTERID AS STRING) AS CUSTOMER_MASTERID,
+        CAST(sd.COMPANY_PROFILEID AS STRING) AS COMPANY_PROFILEID,
+        CAST(sd.RECIPIENT_CATEGORY AS STRING) AS RECIPIENT_CATEGORY,
+        CAST(sd.ORGANIZATION_NAME AS STRING) AS ORGANIZATION_NAME,
+        CAST(sd.LAST_NAME AS STRING) AS LAST_NAME,
+        CAST(sd.FIRST_NAME AS STRING) AS FIRST_NAME,
+        CAST(sd.MIDDLE_NAME AS STRING) AS MIDDLE_NAME,
+        CAST(sd.ADDRESS_1 AS STRING) AS ADDRESS_1,
+        CAST(sd.ADDRESS_2 AS STRING) AS ADDRESS_2,
+        CAST(sd.CITY AS STRING) AS CITY,
+        CAST(sd.PROVINCE AS STRING) AS PROVINCE,
+        CAST(sd.POSTAL_CODE AS INT) AS POSTAL_CODE,
+        CAST(sd.COUNTRY AS STRING) AS COUNTRY,
+        CAST(sd.PROFILE_TYPE AS STRING) AS PROFILE_TYPE,
+        CAST(sd.SPECIALTY AS STRING) AS SPECIALTY,
+        CAST(sd.STATE_LICENSE_NUMBER AS INT) AS STATE_LICENSE_NUMBER,
+        CAST(sd.LICENSE_STATE AS STRING) AS LICENSE_STATE,
+        CAST(sd.NPI_NUMBER AS INT) AS NPI_NUMBER,
+        CAST(sd.TAX_ID_NUM AS INT) AS TAX_ID_NUM,
+        CAST(sd.RECIPIENT_IDENTIFIER_COUNTRY AS STRING) AS RECIPIENT_IDENTIFIER_COUNTRY,
+        CAST(sd.RECIPIENT_IDENTIFIER_TYPE AS STRING) AS RECIPIENT_IDENTIFIER_TYPE,
+        CAST(sd.RECIPIENT_IDENTIFIER_VALUE AS INT) AS RECIPIENT_IDENTIFIER_VALUE,
+        CAST(sd.TRANSACTION_CONSENT AS BOOLEAN) AS TRANSACTION_CONSENT,
+        CAST(sd.CUSTOMER_SOURCESYSTEM AS STRING) AS CUSTOMER_SOURCESYSTEM,
+        CAST(sd.COMPANY_TRANSACTIONID AS STRING) AS COMPANY_TRANSACTIONID,
+        CAST(sd.TRANSACTION_DATE AS DATE) AS TRANSACTION_DATE,
+        CAST(sd.PURPOSE AS STRING) AS PURPOSE,
+        CAST(sd.SECONDARY_PURPOSE AS STRING) AS SECONDARY_PURPOSE,
+        CAST(sd.FORM AS STRING) AS FORM,
+        CAST(sd.TOTAL_AMOUNT AS FLOAT) AS TOTAL_AMOUNT,
+        CAST(sd.CURRENCY AS STRING) AS CURRENCY,
+        CAST(sd.TOTAL_NUMBER_OF_RECIPIENTS AS INT) AS TOTAL_NUMBER_OF_RECIPIENTS,
+        CAST(sd.NUMBER_OF_COMPANY_REPRESENTATIVES AS INT) AS NUMBER_OF_COMPANY_REPRESENTATIVES,
+        CAST(sd.NUMBER_OF_NONPROFESSIONAL_RECIPIENTS AS INT) AS NUMBER_OF_NONPROFESSIONAL_RECIPIENTS,
+        CAST(sd.NUMBER_OF_NOSHOWS AS INT) AS NUMBER_OF_NOSHOWS,
+        CAST(sd.COMPANY_SALES_REPID AS STRING) AS COMPANY_SALES_REPID,
+        CAST(sd.TRANSACTION_INITIATOR_FIRSTNAME AS STRING) AS TRANSACTION_INITIATOR_FIRSTNAME,
+        CAST(sd.TRANSACTION_INITIATOR_LASTNAME AS STRING) AS TRANSACTION_INITIATOR_LASTNAME,
+        CAST(sd.PRODUCT AS STRING) AS PRODUCT,
+        CAST(sd.PRODUCT_2 AS STRING) AS PRODUCT_2,
+        CAST(sd.INDIRECT_PAYMENT AS BOOLEAN) AS INDIRECT_PAYMENT,
+        CAST(sd.PAYEE_NAME AS STRING) AS PAYEE_NAME,
+        CAST(sd.PAYEE_TYPE AS STRING) AS PAYEE_TYPE,
+        CAST(sd.MATERIAL_NAME AS STRING) AS MATERIAL_NAME,
+        CAST(sd.MATERIAL_QTY AS INT) AS MATERIAL_QTY,
+        CAST(sd.COMPANY_EVENT_ID AS STRING) AS COMPANY_EVENT_ID,
+        CAST(sd.ENGAGEMENT_TYPE AS STRING) AS ENGAGEMENT_TYPE,
+        CAST(sd.ENGAGEMENT_NAME AS STRING) AS ENGAGEMENT_NAME,
+        CAST(sd.ENGAGEMENT_START_DATE AS DATE) AS ENGAGEMENT_START_DATE,
+        CAST(sd.ENGAGEMENT_END_DATE AS DATE) AS ENGAGEMENT_END_DATE,
+        CAST(sd.ENGAGEMENT_DESCRIPTION AS STRING) AS ENGAGEMENT_DESCRIPTION,
+        CAST(sd.VENUE_CITY AS STRING) AS VENUE_CITY,
+        CAST(sd.VENUE_PROVINCE AS STRING) AS VENUE_PROVINCE,
+        CAST(sd.VENUE_COUNTRY AS STRING) AS VENUE_COUNTRY,
+        CAST(sd.VENUE_POSTALCODE AS INT) AS VENUE_POSTALCODE
+    FROM spend_data sd
     """
 )
 
+# ----------------------------
+# Target Write: spend_data_bronze.csv (single file at TARGET_PATH)
+# ----------------------------
 (
-    products_bronze_df.coalesce(1)
+    spend_data_bronze_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/products_bronze.csv")
+    .save(f"{TARGET_PATH}/spend_data_bronze.csv")
 )
 
-# ============================================================
-# Target: bronze.sales_transactions_bronze
-# Source: sales_transactions_raw str
-# ============================================================
-
-sales_transactions_bronze_df = spark.sql(
-    """
-    SELECT
-        CAST(str.transaction_id AS STRING)   AS transaction_id,
-        CAST(str.store_id AS STRING)         AS store_id,
-        CAST(str.product_id AS STRING)       AS product_id,
-        CAST(str.quantity AS INT)            AS quantity,
-        CAST(str.sale_amount AS DOUBLE)      AS sale_amount,
-        CAST(str.transaction_time AS TIMESTAMP) AS transaction_time
-    FROM sales_transactions_raw str
-    """
-)
-
-(
-    sales_transactions_bronze_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/sales_transactions_bronze.csv")
-)
-
-# ============================================================
-# Target: bronze.stores_bronze
-# Source: stores_raw sr
-# ============================================================
-
-stores_bronze_df = spark.sql(
-    """
-    SELECT
-        CAST(sr.store_id AS STRING)     AS store_id,
-        CAST(sr.store_name AS STRING)   AS store_name,
-        CAST(sr.city AS STRING)         AS city,
-        CAST(sr.state AS STRING)        AS state,
-        CAST(sr.store_type AS STRING)   AS store_type,
-        DATE(CAST(sr.open_date AS DATE)) AS open_date
-    FROM stores_raw sr
-    """
-)
-
-(
-    stores_bronze_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/stores_bronze.csv")
-)
+job.commit()
