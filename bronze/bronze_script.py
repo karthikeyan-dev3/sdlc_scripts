@@ -3,8 +3,13 @@ from awsglue.context import GlueContext
 from awsglue.job import Job
 from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
+from pyspark.sql import SparkSession
 
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
+
+SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/spend_data/"
+TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
+FILE_FORMAT = "csv"
 
 sc = SparkContext()
 glueContext = GlueContext(sc)
@@ -12,13 +17,9 @@ spark = glueContext.spark_session
 job = Job(glueContext)
 job.init(args["JOB_NAME"], args)
 
-SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/spend_data/"
-TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
-FILE_FORMAT = "csv"
-
-# ----------------------------
-# Source Read: spend_data
-# ----------------------------
+# -----------------------------
+# Source: spend_data
+# -----------------------------
 spend_data_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
@@ -26,9 +27,9 @@ spend_data_df = (
 )
 spend_data_df.createOrReplaceTempView("spend_data")
 
-# ----------------------------
-# Target Transform: bronze.spend_data_bronze
-# ----------------------------
+# -----------------------------
+# Target: bronze.spend_data_bronze
+# -----------------------------
 spend_data_bronze_df = spark.sql(
     """
     SELECT
@@ -91,15 +92,13 @@ spend_data_bronze_df = spark.sql(
     """
 )
 
-# ----------------------------
-# Target Write: spend_data_bronze.csv (single file at TARGET_PATH)
-# ----------------------------
+target_output_path = f"{TARGET_PATH}/spend_data_bronze.csv"
 (
     spend_data_bronze_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/spend_data_bronze.csv")
+    .save(target_output_path)
 )
 
 job.commit()
