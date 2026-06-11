@@ -1,124 +1,49 @@
-import sys
-from awsglue.transforms import *
-from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
-from awsglue.job import Job
 from pyspark.context import SparkContext
-from pyspark.sql import SparkSession
-
-args = getResolvedOptions(sys.argv, ["JOB_NAME"])
-
-SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/src/"
-TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
-FILE_FORMAT = "csv"
+from awsglue.job import Job
 
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
+
 job = Job(glueContext)
-job.init(args["JOB_NAME"], args)
+job.init("bronze_job", {})
 
-# ============================================================
-# SOURCE READS (S3) + TEMP VIEWS
-# ============================================================
+metadata = {'tables': [{'target_schema': 'bronze', 'target_table': 'product_master_bronze', 'target_alias': 'pmb', 'mapping_details': 'products_raw p', 'description': 'Bronze product master table mapped directly from products_raw with columns: product_id, product_name, category, brand, price, is_active.'}, {'target_schema': 'bronze', 'target_table': 'store_master_bronze', 'target_alias': 'smb', 'mapping_details': 'stores_raw s', 'description': 'Bronze store master table mapped directly from stores_raw with columns: store_id, store_name, city, state, store_type, open_date.'}, {'target_schema': 'bronze', 'target_table': 'sales_transactions_bronze', 'target_alias': 'stb', 'mapping_details': 'sales_transactions_raw t', 'description': 'Bronze sales transactions table mapped directly from sales_transactions_raw with columns: transaction_id, store_id, product_id, quantity, sale_amount, transaction_time.'}], 'columns': [{'source_column': "['p.product_id']", 'source_type': 'varchar(10)', 'source_nullable': 'not specified', 'target_column': 'product_id', 'target_type': 'varchar(10)', 'target_nullable': 'not specified', 'transformation': 'p.product_id = pmb.product_id', 'target_table': 'p'}, {'source_column': "['p.product_name']", 'source_type': 'varchar(255)', 'source_nullable': 'not specified', 'target_column': 'product_name', 'target_type': 'varchar(255)', 'target_nullable': 'not specified', 'transformation': 'p.product_name = pmb.product_name', 'target_table': 'p'}, {'source_column': "['p.category']", 'source_type': 'varchar(100)', 'source_nullable': 'not specified', 'target_column': 'category', 'target_type': 'varchar(100)', 'target_nullable': 'not specified', 'transformation': 'p.category = pmb.category', 'target_table': 'p'}, {'source_column': "['p.brand']", 'source_type': 'varchar(100)', 'source_nullable': 'not specified', 'target_column': 'brand', 'target_type': 'varchar(100)', 'target_nullable': 'not specified', 'transformation': 'p.brand = pmb.brand', 'target_table': 'p'}, {'source_column': "['p.price']", 'source_type': 'double', 'source_nullable': 'not specified', 'target_column': 'price', 'target_type': 'double', 'target_nullable': 'not specified', 'transformation': 'p.price = pmb.price', 'target_table': 'p'}, {'source_column': "['p.is_active']", 'source_type': 'boolean', 'source_nullable': 'not specified', 'target_column': 'is_active', 'target_type': 'boolean', 'target_nullable': 'not specified', 'transformation': 'p.is_active = pmb.is_active', 'target_table': 'p'}, {'source_column': "['s.store_id']", 'source_type': 'varchar(10)', 'source_nullable': 'not specified', 'target_column': 'store_id', 'target_type': 'varchar(10)', 'target_nullable': 'not specified', 'transformation': 's.store_id = smb.store_id', 'target_table': 's'}, {'source_column': "['s.store_name']", 'source_type': 'varchar(255)', 'source_nullable': 'not specified', 'target_column': 'store_name', 'target_type': 'varchar(255)', 'target_nullable': 'not specified', 'transformation': 's.store_name = smb.store_name', 'target_table': 's'}, {'source_column': "['s.city']", 'source_type': 'varchar(100)', 'source_nullable': 'not specified', 'target_column': 'city', 'target_type': 'varchar(100)', 'target_nullable': 'not specified', 'transformation': 's.city = smb.city', 'target_table': 's'}, {'source_column': "['s.state']", 'source_type': 'varchar(100)', 'source_nullable': 'not specified', 'target_column': 'state', 'target_type': 'varchar(100)', 'target_nullable': 'not specified', 'transformation': 's.state = smb.state', 'target_table': 's'}, {'source_column': "['s.store_type']", 'source_type': 'varchar(50)', 'source_nullable': 'not specified', 'target_column': 'store_type', 'target_type': 'varchar(50)', 'target_nullable': 'not specified', 'transformation': 's.store_type = smb.store_type', 'target_table': 's'}, {'source_column': "['s.open_date']", 'source_type': 'date', 'source_nullable': 'not specified', 'target_column': 'open_date', 'target_type': 'date', 'target_nullable': 'not specified', 'transformation': 's.open_date = smb.open_date', 'target_table': 's'}, {'source_column': "['t.transaction_id']", 'source_type': 'varchar(10)', 'source_nullable': 'not specified', 'target_column': 'transaction_id', 'target_type': 'varchar(10)', 'target_nullable': 'not specified', 'transformation': 't.transaction_id = stb.transaction_id', 'target_table': 't'}, {'source_column': "['t.store_id']", 'source_type': 'varchar(10)', 'source_nullable': 'not specified', 'target_column': 'store_id', 'target_type': 'varchar(10)', 'target_nullable': 'not specified', 'transformation': 't.store_id = stb.store_id', 'target_table': 't'}, {'source_column': "['t.product_id']", 'source_type': 'varchar(10)', 'source_nullable': 'not specified', 'target_column': 'product_id', 'target_type': 'varchar(10)', 'target_nullable': 'not specified', 'transformation': 't.product_id = stb.product_id', 'target_table': 't'}, {'source_column': "['t.quantity']", 'source_type': 'int', 'source_nullable': 'not specified', 'target_column': 'quantity', 'target_type': 'int', 'target_nullable': 'not specified', 'transformation': 't.quantity = stb.quantity', 'target_table': 't'}, {'source_column': "['t.sale_amount']", 'source_type': 'double', 'source_nullable': 'not specified', 'target_column': 'sale_amount', 'target_type': 'double', 'target_nullable': 'not specified', 'transformation': 't.sale_amount = stb.sale_amount', 'target_table': 't'}, {'source_column': "['t.transaction_time']", 'source_type': 'timestamp', 'source_nullable': 'not specified', 'target_column': 'transaction_time', 'target_type': 'timestamp', 'target_nullable': 'not specified', 'transformation': 't.transaction_time = stb.transaction_time', 'target_table': 't'}], 'runtime_config': {'base_path': 's3://sdlc-agent-bucket/engineering-agent/src/', 'target_path': 's3://sdlc-agent-bucket/engineering-agent/bronze/', 'read_format': 'csv', 'write_format': 'csv', 'write_mode': 'overwrite'}}
 
-products_raw_df = (
-    spark.read
-    .format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/products_raw.{FILE_FORMAT}/")
-)
-products_raw_df.createOrReplaceTempView("products_raw")
+base_path = metadata['runtime_config']['base_path']
+target_path = metadata['runtime_config']['target_path']
+read_format = metadata['runtime_config']['read_format']
+write_format = metadata['runtime_config']['write_format']
+write_mode = metadata['runtime_config']['write_mode']
 
-sales_transactions_raw_df = (
-    spark.read
-    .format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/sales_transactions_raw.{FILE_FORMAT}/")
-)
-sales_transactions_raw_df.createOrReplaceTempView("sales_transactions_raw")
+for table in metadata['tables']:
+    mapping_details = table['mapping_details'].split()
+    source_table = mapping_details[0]
+    source_alias = mapping_details[1]
+    target_table = table['target_table']
+    target_alias = table['target_alias']
 
-stores_raw_df = (
-    spark.read
-    .format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/stores_raw.{FILE_FORMAT}/")
-)
-stores_raw_df.createOrReplaceTempView("stores_raw")
+    reader = spark.read.format(read_format)
+    if read_format == 'csv':
+        reader = reader.option('header', 'true').option('inferSchema', 'true')
 
-# ============================================================
-# TARGET: products_bronze
-# ============================================================
+    df = reader.load(base_path + f"{source_table}.{read_format}")
+    df = df.alias(source_alias)
 
-products_bronze_df = spark.sql("""
-SELECT
-  CAST(pr.product_id AS STRING)   AS product_id,
-  CAST(pr.product_name AS STRING) AS product_name,
-  CAST(pr.category AS STRING)     AS category,
-  CAST(pr.brand AS STRING)        AS brand,
-  CAST(pr.price AS FLOAT)         AS price,
-  CAST(pr.is_active AS BOOLEAN)   AS is_active
-FROM products_raw pr
-""")
+    transformations = []
+    for col_meta in metadata['columns']:
+        if col_meta['target_table'] == source_alias:
+            rhs = col_meta['transformation'].split('=', 1)[1].strip()
+            target_column = col_meta['target_column']
+            transformations.append(f"{rhs} as {target_column}")
 
-(
-    products_bronze_df
-    .coalesce(1)
-    .write
-    .mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/products_bronze.csv")
-)
+    df = df.selectExpr(*transformations)
 
-# ============================================================
-# TARGET: sales_transactions_bronze
-# ============================================================
+    writer = df.write.mode(write_mode).format(write_format)
+    if write_format == 'csv':
+        writer = writer.option('header', 'true')
 
-sales_transactions_bronze_df = spark.sql("""
-SELECT
-  CAST(str.transaction_id AS STRING)    AS transaction_id,
-  CAST(str.store_id AS STRING)          AS store_id,
-  CAST(str.product_id AS STRING)        AS product_id,
-  CAST(str.quantity AS INT)             AS quantity,
-  CAST(str.sale_amount AS DOUBLE)       AS sale_amount,
-  CAST(str.transaction_time AS TIMESTAMP) AS transaction_time
-FROM sales_transactions_raw str
-""")
-
-(
-    sales_transactions_bronze_df
-    .coalesce(1)
-    .write
-    .mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/sales_transactions_bronze.csv")
-)
-
-# ============================================================
-# TARGET: stores_bronze
-# ============================================================
-
-stores_bronze_df = spark.sql("""
-SELECT
-  CAST(sr.store_id AS STRING)     AS store_id,
-  CAST(sr.store_name AS STRING)   AS store_name,
-  CAST(sr.city AS STRING)         AS city,
-  CAST(sr.state AS STRING)        AS state,
-  CAST(sr.store_type AS STRING)   AS store_type,
-  CAST(sr.open_date AS DATE)      AS open_date
-FROM stores_raw sr
-""")
-
-(
-    stores_bronze_df
-    .coalesce(1)
-    .write
-    .mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/stores_bronze.csv")
-)
+    writer.save(target_path + f"{target_table}.{write_format}")
 
 job.commit()
