@@ -1,184 +1,365 @@
 import sys
+from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
 from awsglue.job import Job
-from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
-from pyspark.sql import SparkSession
 
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
-
-sc = SparkContext()
-glueContext = GlueContext(sc)
-spark = glueContext.spark_session
-job = Job(glueContext)
-job.init(args["JOB_NAME"], args)
 
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 FILE_FORMAT = "csv"
 
-# =============================================================================
-# 1) Read source tables (Bronze) and create temp views
-# =============================================================================
-products_bronze_df = (
+sc = SparkContext.getOrCreate()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args["JOB_NAME"], args)
+
+# ------------------------------------------------------------------------------
+# 1) Read source tables from S3
+# ------------------------------------------------------------------------------
+stores_raw_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/products_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/stores_raw_bronze.{FILE_FORMAT}/")
 )
-products_bronze_df.createOrReplaceTempView("products_bronze")
 
-stores_bronze_df = (
+sales_transactions_raw_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/stores_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/sales_transactions_raw_bronze.{FILE_FORMAT}/")
 )
-stores_bronze_df.createOrReplaceTempView("stores_bronze")
 
-sales_transactions_bronze_df = (
+products_raw_bronze_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/sales_transactions_bronze.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/products_raw_bronze.{FILE_FORMAT}/")
 )
-sales_transactions_bronze_df.createOrReplaceTempView("sales_transactions_bronze")
 
-# =============================================================================
-# 2) products_silver
-# =============================================================================
-products_silver_df = spark.sql("""
-WITH base AS (
-  SELECT
-    TRIM(pb.product_id)    AS product_id,
-    TRIM(pb.product_name)  AS product_name,
-    TRIM(pb.category)      AS category,
-    TRIM(pb.brand)         AS brand,
-    CAST(pb.price AS DOUBLE)       AS price,
-    CAST(pb.is_active AS BOOLEAN)  AS is_active,
-    ROW_NUMBER() OVER (
-      PARTITION BY TRIM(pb.product_id)
-      ORDER BY TRIM(pb.product_name) DESC
-    ) AS rn
-  FROM products_bronze pb
-  WHERE pb.product_id IS NOT NULL
-    AND pb.product_name IS NOT NULL
-    AND pb.category IS NOT NULL
-    AND pb.brand IS NOT NULL
-    AND pb.price IS NOT NULL
-    AND pb.is_active IS NOT NULL
+# ------------------------------------------------------------------------------
+# 2) Create temp views
+# ------------------------------------------------------------------------------
+stores_raw_bronze_df.createOrReplaceTempView("stores_raw_bronze")
+sales_transactions_raw_bronze_df.createOrReplaceTempView("sales_transactions_raw_bronze")
+products_raw_bronze_df.createOrReplaceTempView("products_raw_bronze")
+
+# ------------------------------------------------------------------------------
+# silver.silver_project
+# ------------------------------------------------------------------------------
+silver_project_df = spark.sql(
+    """
+SELECT DISTINCT
+  CAST(srb.store_id AS STRING) AS project_id,
+  TRIM(srb.store_name) AS project_name,
+  NULL AS project_owner,
+  NULL AS project_status,
+  CAST(srb.open_date AS DATE) AS start_date,
+  NULL AS end_date
+FROM stores_raw_bronze srb
+WHERE srb.store_id IS NOT NULL
+"""
 )
-SELECT
-  product_id,
-  product_name,
-  category,
-  brand,
-  price,
-  is_active
-FROM base
-WHERE rn = 1
-""")
 
 (
-    products_silver_df.coalesce(1)
+    silver_project_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/products_silver.csv")
+    .save(f"{TARGET_PATH}/silver_project.csv")
 )
 
-# =============================================================================
-# 3) stores_silver
-# =============================================================================
-stores_silver_df = spark.sql("""
-WITH base AS (
-  SELECT
-    TRIM(sb.store_id)      AS store_id,
-    TRIM(sb.store_name)    AS store_name,
-    TRIM(sb.city)          AS city,
-    TRIM(sb.state)         AS state,
-    TRIM(sb.store_type)    AS store_type,
-    CAST(sb.open_date AS DATE) AS open_date,
-    ROW_NUMBER() OVER (
-      PARTITION BY TRIM(sb.store_id)
-      ORDER BY CAST(sb.open_date AS DATE) DESC
-    ) AS rn
-  FROM stores_bronze sb
-  WHERE sb.store_id IS NOT NULL
-    AND sb.store_name IS NOT NULL
-    AND sb.city IS NOT NULL
-    AND sb.state IS NOT NULL
-    AND sb.store_type IS NOT NULL
-    AND sb.open_date IS NOT NULL
+# ------------------------------------------------------------------------------
+# silver.silver_sample
+# ------------------------------------------------------------------------------
+silver_sample_df = spark.sql(
+    """
+SELECT DISTINCT
+  CAST(strb.transaction_id AS STRING) AS sample_id,
+  CAST(strb.store_id AS STRING) AS project_id,
+  CAST(strb.transaction_id AS STRING) AS sample_external_id,
+  NULL AS sample_type,
+  NULL AS subject_id,
+  CAST(strb.transaction_time AS TIMESTAMP) AS collection_ts,
+  CAST(strb.transaction_time AS TIMESTAMP) AS received_ts
+FROM sales_transactions_raw_bronze strb
+WHERE strb.transaction_id IS NOT NULL
+  AND strb.store_id IS NOT NULL
+"""
 )
-SELECT
-  store_id,
-  store_name,
-  city,
-  state,
-  store_type,
-  open_date
-FROM base
-WHERE rn = 1
-""")
 
 (
-    stores_silver_df.coalesce(1)
+    silver_sample_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/stores_silver.csv")
+    .save(f"{TARGET_PATH}/silver_sample.csv")
 )
 
-# =============================================================================
-# 4) sales_transactions_silver
-# =============================================================================
-sales_transactions_silver_df = spark.sql("""
-WITH base AS (
-  SELECT
-    TRIM(stb.transaction_id)                 AS transaction_id,
-    TRIM(stb.store_id)                       AS store_id,
-    TRIM(stb.product_id)                     AS product_id,
-    CAST(stb.quantity AS INT)                AS quantity,
-    CAST(stb.sale_amount AS DOUBLE)          AS sale_amount,
-    CAST(stb.transaction_time AS TIMESTAMP)  AS transaction_time,
-    CAST(stb.transaction_time AS DATE)       AS txn_date,
-    CASE
-      WHEN pb.product_id IS NULL OR sb.store_id IS NULL THEN 'REFERENCE_MISSING'
-      ELSE 'VALID'
-    END AS data_quality_status,
-    ROW_NUMBER() OVER (
-      PARTITION BY TRIM(stb.transaction_id)
-      ORDER BY CAST(stb.transaction_time AS TIMESTAMP) DESC
-    ) AS rn
-  FROM sales_transactions_bronze stb
-  LEFT JOIN products_bronze pb
-    ON stb.product_id = pb.product_id
-  LEFT JOIN stores_bronze sb
-    ON stb.store_id = sb.store_id
-  WHERE stb.transaction_id IS NOT NULL
-    AND stb.store_id IS NOT NULL
-    AND stb.product_id IS NOT NULL
-    AND stb.quantity IS NOT NULL
-    AND stb.sale_amount IS NOT NULL
-    AND stb.transaction_time IS NOT NULL
-    AND CAST(stb.quantity AS INT) > 0
-    AND CAST(stb.sale_amount AS DOUBLE) >= 0
+# ------------------------------------------------------------------------------
+# silver.silver_instrument
+# ------------------------------------------------------------------------------
+silver_instrument_df = spark.sql(
+    """
+SELECT DISTINCT
+  CAST(prb.product_id AS STRING) AS instrument_id,
+  CAST(prb.product_id AS STRING) AS machine_id,
+  TRIM(prb.category) AS instrument_type,
+  TRIM(prb.brand) AS manufacturer,
+  TRIM(prb.product_name) AS model,
+  NULL AS serial_number,
+  NULL AS location,
+  COALESCE(CAST(prb.is_active AS BOOLEAN), false) AS is_active
+FROM products_raw_bronze prb
+WHERE prb.product_id IS NOT NULL
+"""
 )
-SELECT
-  transaction_id,
-  store_id,
-  product_id,
-  quantity,
-  sale_amount,
-  transaction_time
-FROM base
-WHERE rn = 1
-""")
 
 (
-    sales_transactions_silver_df.coalesce(1)
+    silver_instrument_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/sales_transactions_silver.csv")
+    .save(f"{TARGET_PATH}/silver_instrument.csv")
+)
+
+# ------------------------------------------------------------------------------
+# silver.silver_machine_project_map
+# ------------------------------------------------------------------------------
+silver_machine_project_map_df = spark.sql(
+    """
+SELECT DISTINCT
+  CAST(strb.product_id AS STRING) AS machine_id,
+  CAST(strb.store_id AS STRING) AS project_id,
+  CAST(strb.transaction_time AS TIMESTAMP) AS effective_start_ts,
+  NULL AS effective_end_ts,
+  true AS is_current,
+  'sales_transactions_raw_bronze' AS mapping_source
+FROM sales_transactions_raw_bronze strb
+WHERE strb.product_id IS NOT NULL
+  AND strb.store_id IS NOT NULL
+  AND strb.transaction_time IS NOT NULL
+"""
+)
+
+(
+    silver_machine_project_map_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/silver_machine_project_map.csv")
+)
+
+# ------------------------------------------------------------------------------
+# silver.silver_experiment
+# ------------------------------------------------------------------------------
+silver_experiment_df = spark.sql(
+    """
+SELECT DISTINCT
+  CAST(strb.store_id AS STRING) AS experiment_id,
+  CAST(strb.store_id AS STRING) AS project_id,
+  TRIM(srb.store_name) AS experiment_name,
+  TRIM(srb.store_type) AS experiment_type,
+  NULL AS protocol_id,
+  NULL AS planned_start_ts,
+  NULL AS planned_end_ts,
+  NULL AS created_by,
+  NULL AS created_at_ts
+FROM sales_transactions_raw_bronze strb
+INNER JOIN stores_raw_bronze srb
+  ON strb.store_id = srb.store_id
+WHERE strb.store_id IS NOT NULL
+"""
+)
+
+(
+    silver_experiment_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/silver_experiment.csv")
+)
+
+# ------------------------------------------------------------------------------
+# silver.silver_run
+# ------------------------------------------------------------------------------
+silver_run_df = spark.sql(
+    """
+SELECT DISTINCT
+  CAST(strb.transaction_id AS STRING) AS run_id,
+  CAST(strb.store_id AS STRING) AS experiment_id,
+  CAST(strb.product_id AS STRING) AS instrument_id,
+  CAST(strb.product_id AS STRING) AS machine_id,
+  CAST(strb.transaction_time AS TIMESTAMP) AS run_start_ts,
+  CAST(strb.transaction_time AS TIMESTAMP) AS run_end_ts,
+  NULL AS run_status,
+  NULL AS data_version,
+  'sales_transactions_raw_bronze' AS source_format
+FROM sales_transactions_raw_bronze strb
+WHERE strb.transaction_id IS NOT NULL
+  AND strb.store_id IS NOT NULL
+  AND strb.product_id IS NOT NULL
+"""
+)
+
+(
+    silver_run_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/silver_run.csv")
+)
+
+# ------------------------------------------------------------------------------
+# silver.silver_experiment_observation
+# ------------------------------------------------------------------------------
+silver_experiment_observation_df = spark.sql(
+    """
+SELECT DISTINCT
+  CONCAT(CAST(strb.transaction_id AS STRING), '-', CAST(strb.product_id AS STRING)) AS observation_id,
+  CAST(strb.store_id AS STRING) AS project_id,
+  CAST(strb.store_id AS STRING) AS experiment_id,
+  CAST(strb.transaction_id AS STRING) AS run_id,
+  CAST(strb.transaction_id AS STRING) AS sample_id,
+  CAST(strb.product_id AS STRING) AS instrument_id,
+  CAST(strb.product_id AS STRING) AS machine_id,
+  TRIM(prb.category) AS instrument_type,
+  TRIM(prb.category) AS assay_type,
+  'sale_amount' AS metric_name,
+  CAST(strb.sale_amount AS DOUBLE) AS metric_value,
+  NULL AS metric_unit,
+  NULL AS result_status,
+  CAST(strb.transaction_time AS TIMESTAMP) AS observed_at_ts,
+  CURRENT_TIMESTAMP AS ingested_at_ts,
+  CURRENT_TIMESTAMP AS processed_at_ts
+FROM sales_transactions_raw_bronze strb
+INNER JOIN products_raw_bronze prb
+  ON strb.product_id = prb.product_id
+WHERE strb.transaction_id IS NOT NULL
+  AND strb.store_id IS NOT NULL
+  AND strb.product_id IS NOT NULL
+  AND strb.transaction_time IS NOT NULL
+"""
+)
+
+(
+    silver_experiment_observation_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/silver_experiment_observation.csv")
+)
+
+# ------------------------------------------------------------------------------
+# silver.silver_pipeline_run_audit
+# ------------------------------------------------------------------------------
+silver_pipeline_run_audit_df = spark.sql(
+    """
+SELECT DISTINCT
+  CAST(strb.transaction_id AS STRING) AS pipeline_run_id,
+  'bronze_to_silver_sales' AS pipeline_name,
+  CAST(strb.transaction_time AS TIMESTAMP) AS run_start_ts,
+  CAST(strb.transaction_time AS TIMESTAMP) AS run_end_ts,
+  NULL AS run_status,
+  NULL AS records_read,
+  NULL AS records_written,
+  NULL AS error_count,
+  NULL AS last_success_ts,
+  NULL AS trigger_type
+FROM sales_transactions_raw_bronze strb
+WHERE strb.transaction_id IS NOT NULL
+  AND strb.transaction_time IS NOT NULL
+"""
+)
+
+(
+    silver_pipeline_run_audit_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/silver_pipeline_run_audit.csv")
+)
+
+# ------------------------------------------------------------------------------
+# silver.silver_data_quality_check_result
+# ------------------------------------------------------------------------------
+silver_data_quality_check_result_df = spark.sql(
+    """
+SELECT DISTINCT
+  CONCAT(CAST(strb.transaction_id AS STRING), '-dq') AS dq_result_id,
+  'sales_transactions_raw_bronze' AS dataset_name,
+  'run' AS entity_type,
+  CAST(strb.transaction_id AS STRING) AS entity_id,
+  'not_null_keys' AS check_name,
+  'completeness' AS check_category,
+  'medium' AS check_severity,
+  CASE
+    WHEN strb.transaction_id IS NOT NULL
+     AND strb.store_id IS NOT NULL
+     AND strb.product_id IS NOT NULL
+     AND strb.transaction_time IS NOT NULL
+    THEN 'pass' ELSE 'fail'
+  END AS check_status,
+  CASE
+    WHEN strb.transaction_id IS NOT NULL
+     AND strb.store_id IS NOT NULL
+     AND strb.product_id IS NOT NULL
+     AND strb.transaction_time IS NOT NULL
+    THEN 0 ELSE 1
+  END AS failed_rule_count,
+  1 AS total_rule_count,
+  CASE
+    WHEN strb.transaction_id IS NOT NULL
+     AND strb.store_id IS NOT NULL
+     AND strb.product_id IS NOT NULL
+     AND strb.transaction_time IS NOT NULL
+    THEN 1.0 ELSE 0.0
+  END AS quality_score,
+  CURRENT_TIMESTAMP AS checked_at_ts,
+  CAST(strb.transaction_id AS STRING) AS run_id
+FROM sales_transactions_raw_bronze strb
+WHERE strb.transaction_id IS NOT NULL
+"""
+)
+
+(
+    silver_data_quality_check_result_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/silver_data_quality_check_result.csv")
+)
+
+# ------------------------------------------------------------------------------
+# silver.silver_kpi_ingestion_performance_hourly
+# ------------------------------------------------------------------------------
+silver_kpi_ingestion_performance_hourly_df = spark.sql(
+    """
+SELECT DISTINCT
+  CAST(strb.transaction_time AS TIMESTAMP) AS kpi_hour_ts,
+  TRIM(prb.category) AS instrument_type,
+  CAST(strb.store_id AS STRING) AS project_id,
+  NULL AS avg_processing_latency_seconds,
+  NULL AS p95_processing_latency_seconds,
+  NULL AS data_freshness_minutes,
+  NULL AS successful_runs,
+  NULL AS failed_runs,
+  NULL AS sla_adherence_pct
+FROM sales_transactions_raw_bronze strb
+INNER JOIN products_raw_bronze prb
+  ON strb.product_id = prb.product_id
+WHERE strb.transaction_time IS NOT NULL
+  AND strb.store_id IS NOT NULL
+  AND strb.product_id IS NOT NULL
+"""
+)
+
+(
+    silver_kpi_ingestion_performance_hourly_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/silver_kpi_ingestion_performance_hourly.csv")
 )
 
 job.commit()
