@@ -56,16 +56,16 @@ SELECT
   TRIM(pb.category) AS category,
   TRIM(pb.brand) AS brand,
   CAST(pb.price AS DOUBLE) AS price,
-  CAST(pb.is_active AS BOOLEAN) AS is_active
+  COALESCE(CAST(pb.is_active AS BOOLEAN), TRUE) AS is_active
 FROM (
   SELECT
-    pb.*,
+    pb.*, 
     ROW_NUMBER() OVER (PARTITION BY pb.product_id ORDER BY pb.product_id) AS rn
   FROM products_bronze pb
   WHERE pb.product_id IS NOT NULL
 ) pb
 WHERE pb.rn = 1
-  AND COALESCE(pb.is_active, TRUE) = TRUE
+  AND COALESCE(CAST(pb.is_active AS BOOLEAN), TRUE) = TRUE
 """)
 
 (
@@ -92,7 +92,7 @@ SELECT
   CAST(sb.open_date AS DATE) AS open_date
 FROM (
   SELECT
-    sb.*,
+    sb.*, 
     ROW_NUMBER() OVER (PARTITION BY sb.store_id ORDER BY sb.store_id) AS rn
   FROM stores_bronze sb
   WHERE sb.store_id IS NOT NULL
@@ -124,7 +124,7 @@ SELECT
   CAST(stb.transaction_time AS TIMESTAMP) AS transaction_time
 FROM (
   SELECT
-    stb.*,
+    stb.*, 
     ROW_NUMBER() OVER (PARTITION BY stb.transaction_id ORDER BY stb.transaction_time DESC) AS rn
   FROM sales_transactions_bronze stb
   WHERE stb.transaction_id IS NOT NULL
