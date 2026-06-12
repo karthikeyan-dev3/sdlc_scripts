@@ -1,11 +1,10 @@
-```python
 import sys
 from awsglue.context import GlueContext
 from awsglue.job import Job
 from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 
-args = getResoltions(sys.argv, ["JOB_NAME"])
+args = getResolvedOptions(sys.argv, ["JOB_NAME"])
 
 sc = SparkContext()
 glueContext = GlueContext(sc)
@@ -235,5 +234,3 @@ daily_data_quality_runs_silver_df = spark.sql(daily_data_quality_runs_silver_sql
 )
 
 job.commit()
-
-```
