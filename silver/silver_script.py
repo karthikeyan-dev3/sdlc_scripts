@@ -52,10 +52,10 @@ silver_project_df = spark.sql(
 SELECT DISTINCT
   CAST(srb.store_id AS STRING) AS project_id,
   TRIM(srb.store_name) AS project_name,
-  NULL AS project_owner,
-  NULL AS project_status,
+  'Unknown' AS project_owner,
+  'Unknown' AS project_status,
   CAST(srb.open_date AS DATE) AS start_date,
-  NULL AS end_date
+  'Unknown' AS end_date
 FROM stores_raw_bronze srb
 WHERE srb.store_id IS NOT NULL
 """
@@ -78,8 +78,8 @@ SELECT DISTINCT
   CAST(strb.transaction_id AS STRING) AS sample_id,
   CAST(strb.store_id AS STRING) AS project_id,
   CAST(strb.transaction_id AS STRING) AS sample_external_id,
-  NULL AS sample_type,
-  NULL AS subject_id,
+  'Unknown' AS sample_type,
+  'Unknown' AS subject_id,
   CAST(strb.transaction_time AS TIMESTAMP) AS collection_ts,
   CAST(strb.transaction_time AS TIMESTAMP) AS received_ts
 FROM sales_transactions_raw_bronze strb
@@ -107,8 +107,8 @@ SELECT DISTINCT
   TRIM(prb.category) AS instrument_type,
   TRIM(prb.brand) AS manufacturer,
   TRIM(prb.product_name) AS model,
-  NULL AS serial_number,
-  NULL AS location,
+  'Unknown' AS serial_number,
+  'Unknown' AS location,
   COALESCE(CAST(prb.is_active AS BOOLEAN), false) AS is_active
 FROM products_raw_bronze prb
 WHERE prb.product_id IS NOT NULL
@@ -132,7 +132,7 @@ SELECT DISTINCT
   CAST(strb.product_id AS STRING) AS machine_id,
   CAST(strb.store_id AS STRING) AS project_id,
   CAST(strb.transaction_time AS TIMESTAMP) AS effective_start_ts,
-  NULL AS effective_end_ts,
+  'Unknown' AS effective_end_ts,
   true AS is_current,
   'sales_transactions_raw_bronze' AS mapping_source
 FROM sales_transactions_raw_bronze strb
@@ -160,11 +160,11 @@ SELECT DISTINCT
   CAST(strb.store_id AS STRING) AS project_id,
   TRIM(srb.store_name) AS experiment_name,
   TRIM(srb.store_type) AS experiment_type,
-  NULL AS protocol_id,
-  NULL AS planned_start_ts,
-  NULL AS planned_end_ts,
-  NULL AS created_by,
-  NULL AS created_at_ts
+  'Unknown' AS protocol_id,
+  'Unknown' AS planned_start_ts,
+  'Unknown' AS planned_end_ts,
+  'Unknown' AS created_by,
+  'Unknown' AS created_at_ts
 FROM sales_transactions_raw_bronze strb
 INNER JOIN stores_raw_bronze srb
   ON strb.store_id = srb.store_id
@@ -192,8 +192,8 @@ SELECT DISTINCT
   CAST(strb.product_id AS STRING) AS machine_id,
   CAST(strb.transaction_time AS TIMESTAMP) AS run_start_ts,
   CAST(strb.transaction_time AS TIMESTAMP) AS run_end_ts,
-  NULL AS run_status,
-  NULL AS data_version,
+  'Unknown' AS run_status,
+  'Unknown' AS data_version,
   'sales_transactions_raw_bronze' AS source_format
 FROM sales_transactions_raw_bronze strb
 WHERE strb.transaction_id IS NOT NULL
@@ -227,8 +227,8 @@ SELECT DISTINCT
   TRIM(prb.category) AS assay_type,
   'sale_amount' AS metric_name,
   CAST(strb.sale_amount AS DOUBLE) AS metric_value,
-  NULL AS metric_unit,
-  NULL AS result_status,
+  'Unknown' AS metric_unit,
+  'Unknown' AS result_status,
   CAST(strb.transaction_time AS TIMESTAMP) AS observed_at_ts,
   CURRENT_TIMESTAMP AS ingested_at_ts,
   CURRENT_TIMESTAMP AS processed_at_ts
@@ -260,12 +260,12 @@ SELECT DISTINCT
   'bronze_to_silver_sales' AS pipeline_name,
   CAST(strb.transaction_time AS TIMESTAMP) AS run_start_ts,
   CAST(strb.transaction_time AS TIMESTAMP) AS run_end_ts,
-  NULL AS run_status,
-  NULL AS records_read,
-  NULL AS records_written,
-  NULL AS error_count,
-  NULL AS last_success_ts,
-  NULL AS trigger_type
+  'Unknown' AS run_status,
+  'Unknown' AS records_read,
+  'Unknown' AS records_written,
+  'Unknown' AS error_count,
+  'Unknown' AS last_success_ts,
+  'Unknown' AS trigger_type
 FROM sales_transactions_raw_bronze strb
 WHERE strb.transaction_id IS NOT NULL
   AND strb.transaction_time IS NOT NULL
@@ -339,12 +339,12 @@ SELECT DISTINCT
   CAST(strb.transaction_time AS TIMESTAMP) AS kpi_hour_ts,
   TRIM(prb.category) AS instrument_type,
   CAST(strb.store_id AS STRING) AS project_id,
-  NULL AS avg_processing_latency_seconds,
-  NULL AS p95_processing_latency_seconds,
-  NULL AS data_freshness_minutes,
-  NULL AS successful_runs,
-  NULL AS failed_runs,
-  NULL AS sla_adherence_pct
+  'Unknown' AS avg_processing_latency_seconds,
+  'Unknown' AS p95_processing_latency_seconds,
+  'Unknown' AS data_freshness_minutes,
+  'Unknown' AS successful_runs,
+  'Unknown' AS failed_runs,
+  'Unknown' AS sla_adherence_pct
 FROM sales_transactions_raw_bronze strb
 INNER JOIN products_raw_bronze prb
   ON strb.product_id = prb.product_id
