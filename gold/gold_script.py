@@ -66,7 +66,7 @@ gold_dim_product_df = spark.sql(
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_dim_product.csv")
+    .save(f"{TARGET_PATH}/gold_dim_product")
 )
 
 # gold.gold_dim_store
@@ -86,7 +86,7 @@ gold_dim_store_df = spark.sql(
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_dim_store.csv")
+    .save(f"{TARGET_PATH}/gold_dim_store")
 )
 
 # gold.gold_sales_transactions
@@ -98,11 +98,11 @@ gold_sales_transactions_df = spark.sql(
         CAST(sts.store_id AS STRING)              AS store_id,
         CAST(sts.product_id AS STRING)            AS product_id,
         CAST(sts.quantity AS INT)                 AS quantity,
-        NULL AS unit_price,
+        CAST(NULL AS DOUBLE)                      AS unit_price,
         CAST(sts.sale_amount AS DOUBLE)           AS gross_sales_amount,
         CAST(0 AS DOUBLE)                         AS discount_amount,
         CAST(sts.sale_amount AS DOUBLE)           AS net_sales_amount,
-        NULL AS currency_code
+        CAST(NULL AS STRING)                      AS currency_code
     FROM sales_transactions_silver sts
     LEFT JOIN dim_store_silver dss
         ON sts.store_id = dss.store_id
@@ -116,7 +116,7 @@ gold_sales_transactions_df = spark.sql(
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_sales_transactions.csv")
+    .save(f"{TARGET_PATH}/gold_sales_transactions")
 )
 
 # gold.gold_sales_daily_store_product
@@ -144,7 +144,7 @@ gold_sales_daily_store_product_df = spark.sql(
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_sales_daily_store_product.csv")
+    .save(f"{TARGET_PATH}/gold_sales_daily_store_product")
 )
 
 job.commit()
