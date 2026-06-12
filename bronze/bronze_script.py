@@ -1,15 +1,14 @@
 import sys
-from awsglue.transforms import *
-from awsglue.utils import getResolvedOptions
-from pyspark.context import SparkContext
 from awsglue.context import GlueContext
 from awsglue.job import Job
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from pyspark.sql import SparkSession
 
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
-
 sc = SparkContext()
 glueContext = GlueContext(sc)
-spark = glueContext.spark_session
+spark: SparkSession = glueContext.spark_session
 job = Job(glueContext)
 job.init(args["JOB_NAME"], args)
 
@@ -17,9 +16,9 @@ SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/src/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
 FILE_FORMAT = "csv"
 
-# -----------------------------
-# Read Source Tables from S3
-# -----------------------------
+# ----------------------------
+# Read source tables (S3)
+# ----------------------------
 products_raw_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
@@ -38,77 +37,83 @@ stores_raw_df = (
     .load(f"{SOURCE_PATH}/stores_raw.{FILE_FORMAT}/")
 )
 
-# -----------------------------
-# Create Temp Views
-# -----------------------------
+# ----------------------------
+# Create temp views
+# ----------------------------
 products_raw_df.createOrReplaceTempView("products_raw")
 sales_transactions_raw_df.createOrReplaceTempView("sales_transactions_raw")
 stores_raw_df.createOrReplaceTempView("stores_raw")
 
-# -----------------------------
-# Transform: products_raw_bronze
-# -----------------------------
-products_raw_bronze_df = spark.sql("""
-SELECT
-  prb.product_id AS product_id,
-  prb.product_name AS product_name,
-  prb.category AS category,
-  prb.brand AS brand,
-  prb.price AS price,
-  prb.is_active AS is_active
-FROM products_raw prb
-""")
-
-(
-    products_raw_bronze_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/products_raw_bronze.csv")
+# ----------------------------
+# Transform: products_bronze
+# ----------------------------
+products_bronze_df = spark.sql(
+    """
+    SELECT
+        CAST(pr.product_id AS STRING)      AS product_id,
+        CAST(pr.product_name AS STRING)    AS product_name,
+        CAST(pr.category AS STRING)        AS category,
+        CAST(pr.brand AS STRING)           AS brand,
+        CAST(pr.price AS FLOAT)            AS price,
+        CAST(pr.is_active AS BOOLEAN)      AS is_active
+    FROM products_raw pr
+    """
 )
 
-# -----------------------------
-# Transform: sales_transactions_raw_bronze
-# -----------------------------
-sales_transactions_raw_bronze_df = spark.sql("""
-SELECT
-  strb.transaction_id AS transaction_id,
-  strb.store_id AS store_id,
-  strb.product_id AS product_id,
-  strb.quantity AS quantity,
-  strb.sale_amount AS sale_amount,
-  strb.transaction_time AS transaction_time
-FROM sales_transactions_raw strb
-""")
-
 (
-    sales_transactions_raw_bronze_df.coalesce(1)
+    products_bronze_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/sales_transactions_raw_bronze.csv")
+    .save(f"{TARGET_PATH}/products_bronze.csv")
 )
 
-# -----------------------------
-# Transform: stores_raw_bronze
-# -----------------------------
-stores_raw_bronze_df = spark.sql("""
-SELECT
-  srb.store_id AS store_id,
-  srb.store_name AS store_name,
-  srb.city AS city,
-  srb.state AS state,
-  srb.store_type AS store_type,
-  srb.open_date AS open_date
-FROM stores_raw srb
-""")
+# ----------------------------
+# Transform: sales_transactions_bronze
+# ----------------------------
+sales_transactions_bronze_df = spark.sql(
+    """
+    SELECT
+        CAST(str.transaction_id AS STRING)     AS transaction_id,
+        CAST(str.store_id AS STRING)           AS store_id,
+        CAST(str.product_id AS STRING)         AS product_id,
+        CAST(str.quantity AS INT)              AS quantity,
+        CAST(str.sale_amount AS DOUBLE)        AS sale_amount,
+        CAST(str.transaction_time AS TIMESTAMP) AS transaction_time
+    FROM sales_transactions_raw str
+    """
+)
 
 (
-    stores_raw_bronze_df.coalesce(1)
+    sales_transactions_bronze_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/stores_raw_bronze.csv")
+    .save(f"{TARGET_PATH}/sales_transactions_bronze.csv")
+)
+
+# ----------------------------
+# Transform: stores_bronze
+# ----------------------------
+stores_bronze_df = spark.sql(
+    """
+    SELECT
+        CAST(sr.store_id AS STRING)        AS store_id,
+        CAST(sr.store_name AS STRING)      AS store_name,
+        CAST(sr.city AS STRING)            AS city,
+        CAST(sr.state AS STRING)           AS state,
+        CAST(sr.store_type AS STRING)      AS store_type,
+        DATE(sr.open_date)                 AS open_date
+    FROM stores_raw sr
+    """
+)
+
+(
+    stores_bronze_df.coalesce(1)
+    .write.mode("overwrite")
+    .format("csv")
+    .option("header", "true")
+    .save(f"{TARGET_PATH}/stores_bronze.csv")
 )
 
 job.commit()
