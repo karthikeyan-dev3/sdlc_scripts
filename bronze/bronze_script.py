@@ -6,9 +6,10 @@ from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
+
 sc = SparkContext()
 glueContext = GlueContext(sc)
-spark: SparkSession = glueContext.spark_session
+spark = glueContext.spark_session
 job = Job(glueContext)
 job.init(args["JOB_NAME"], args)
 
@@ -16,37 +17,35 @@ SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/src/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/bronze/"
 FILE_FORMAT = "csv"
 
-# ----------------------------
-# Read source tables (S3)
-# ----------------------------
+# ------------------------------------------------------------------------------
+# Read Source Tables
+# ------------------------------------------------------------------------------
+
 products_raw_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .load(f"{SOURCE_PATH}/products_raw.{FILE_FORMAT}/")
 )
+products_raw_df.createOrReplaceTempView("products_raw")
 
 sales_transactions_raw_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .load(f"{SOURCE_PATH}/sales_transactions_raw.{FILE_FORMAT}/")
 )
+sales_transactions_raw_df.createOrReplaceTempView("sales_transactions_raw")
 
 stores_raw_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
     .load(f"{SOURCE_PATH}/stores_raw.{FILE_FORMAT}/")
 )
-
-# ----------------------------
-# Create temp views
-# ----------------------------
-products_raw_df.createOrReplaceTempView("products_raw")
-sales_transactions_raw_df.createOrReplaceTempView("sales_transactions_raw")
 stores_raw_df.createOrReplaceTempView("stores_raw")
 
-# ----------------------------
-# Transform: products_bronze
-# ----------------------------
+# ------------------------------------------------------------------------------
+# Target: products_bronze
+# ------------------------------------------------------------------------------
+
 products_bronze_df = spark.sql(
     """
     SELECT
@@ -54,7 +53,7 @@ products_bronze_df = spark.sql(
         CAST(pr.product_name AS STRING)    AS product_name,
         CAST(pr.category AS STRING)        AS category,
         CAST(pr.brand AS STRING)           AS brand,
-        CAST(pr.price AS FLOAT)            AS price,
+        CAST(pr.price AS DOUBLE)           AS price,
         CAST(pr.is_active AS BOOLEAN)      AS is_active
     FROM products_raw pr
     """
@@ -68,17 +67,18 @@ products_bronze_df = spark.sql(
     .save(f"{TARGET_PATH}/products_bronze.csv")
 )
 
-# ----------------------------
-# Transform: sales_transactions_bronze
-# ----------------------------
+# ------------------------------------------------------------------------------
+# Target: sales_transactions_bronze
+# ------------------------------------------------------------------------------
+
 sales_transactions_bronze_df = spark.sql(
     """
     SELECT
-        CAST(str.transaction_id AS STRING)     AS transaction_id,
-        CAST(str.store_id AS STRING)           AS store_id,
-        CAST(str.product_id AS STRING)         AS product_id,
-        CAST(str.quantity AS INT)              AS quantity,
-        CAST(str.sale_amount AS DOUBLE)        AS sale_amount,
+        CAST(str.transaction_id AS STRING)   AS transaction_id,
+        CAST(str.store_id AS STRING)         AS store_id,
+        CAST(str.product_id AS STRING)       AS product_id,
+        CAST(str.quantity AS INT)            AS quantity,
+        CAST(str.sale_amount AS DOUBLE)      AS sale_amount,
         CAST(str.transaction_time AS TIMESTAMP) AS transaction_time
     FROM sales_transactions_raw str
     """
@@ -92,9 +92,10 @@ sales_transactions_bronze_df = spark.sql(
     .save(f"{TARGET_PATH}/sales_transactions_bronze.csv")
 )
 
-# ----------------------------
-# Transform: stores_bronze
-# ----------------------------
+# ------------------------------------------------------------------------------
+# Target: stores_bronze
+# ------------------------------------------------------------------------------
+
 stores_bronze_df = spark.sql(
     """
     SELECT
@@ -103,7 +104,7 @@ stores_bronze_df = spark.sql(
         CAST(sr.city AS STRING)            AS city,
         CAST(sr.state AS STRING)           AS state,
         CAST(sr.store_type AS STRING)      AS store_type,
-        DATE(sr.open_date)                 AS open_date
+        CAST(sr.open_date AS DATE)         AS open_date
     FROM stores_raw sr
     """
 )
