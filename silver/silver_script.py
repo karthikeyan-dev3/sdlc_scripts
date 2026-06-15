@@ -59,7 +59,6 @@ spark.sql(
 # =============================
 # Target: silver.dim_store_silver
 # =============================
-
 dim_store_silver_df = spark.sql(
     """
     SELECT
@@ -104,7 +103,6 @@ dim_store_silver_df = spark.sql(
 # =============================
 # Target: silver.dim_product_silver
 # =============================
-
 dim_product_silver_df = spark.sql(
     """
     SELECT
@@ -114,7 +112,7 @@ dim_product_silver_df = spark.sql(
       TRIM(category) AS category,
       CAST(NULL AS string) AS subcategory,
       CAST(NULL AS string) AS unit_of_measure,
-      COALESCE(is_active, TRUE) AS active_flag
+      COALESCE(CAST(is_active AS boolean), TRUE) AS active_flag
     FROM (
       SELECT
         pb.product_id,
@@ -141,7 +139,6 @@ dim_product_silver_df = spark.sql(
 # =============================
 # Target: silver.sales_transactions_silver
 # =============================
-
 sales_transactions_silver_df = spark.sql(
     """
     SELECT
