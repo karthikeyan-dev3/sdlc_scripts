@@ -1,268 +1,117 @@
 import sys
-from awsglue.context import GlueContext
 from awsglue.utils import getResolvedOptions
+from awsglue.context import GlueContext
+from awsglue.job import Job
 from pyspark.context import SparkContext
+from pyspark.sql import SparkSession
 
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
 
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args["JOB_NAME"], args)
 
 SOURCE_PATH = "s3://sdlc-agent-bucket/engineering-agent/silver/"
 TARGET_PATH = "s3://sdlc-agent-bucket/engineering-agent/gold/"
 FILE_FORMAT = "csv"
 
-# -------------------------------------------------------------------
-# 1) Read source tables from S3
-# -------------------------------------------------------------------
-patient_silver_df = (
+# ============================================================
+# Read Source Tables (S3) + Temp Views
+# ============================================================
+
+sales_silver_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/patient_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/sales_silver.{FILE_FORMAT}/")
 )
+sales_silver_df.createOrReplaceTempView("sales_silver")
 
-sequencing_run_silver_df = (
+product_master_silver_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/sequencing_run_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/product_master_silver.{FILE_FORMAT}/")
 )
+product_master_silver_df.createOrReplaceTempView("product_master_silver")
 
-variant_silver_df = (
+store_master_silver_df = (
     spark.read.format(FILE_FORMAT)
     .option("header", "true")
-    .load(f"{SOURCE_PATH}/variant_silver.{FILE_FORMAT}/")
+    .load(f"{SOURCE_PATH}/store_master_silver.{FILE_FORMAT}/")
 )
+store_master_silver_df.createOrReplaceTempView("store_master_silver")
 
-lab_result_silver_df = (
-    spark.read.format(FILE_FORMAT)
-    .option("header", "true")
-    .load(f"{SOURCE_PATH}/lab_result_silver.{FILE_FORMAT}/")
-)
+# ============================================================
+# Target: gold.gold_sales
+# ============================================================
 
-# -------------------------------------------------------------------
-# 2) Create temp views
-# -------------------------------------------------------------------
-patient_silver_df.createOrReplaceTempView("patient_silver")
-sequencing_run_silver_df.createOrReplaceTempView("sequencing_run_silver")
-variant_silver_df.createOrReplaceTempView("variant_silver")
-lab_result_silver_df.createOrReplaceTempView("lab_result_silver")
-
-# -------------------------------------------------------------------
-# TARGET: gold.gold_patient_risk_score_history
-# Mapping: silver.patient_silver ps LEFT JOIN silver.sequencing_run_silver srs ON ps.patient_id = srs.patient_id
-#          LEFT JOIN silver.variant_silver vs ON ps.patient_id = vs.patient_id
-#          LEFT JOIN silver.lab_result_silver lrs ON ps.patient_id = lrs.patient_id
-# Columns per UDT: patient_id
-# -------------------------------------------------------------------
-gold_patient_risk_score_history_df = spark.sql(
+gold_sales_df = spark.sql(
     """
-SELECT
-  CAST(ps.patient_id AS STRING) AS patient_id
-FROM patient_silver ps
-LEFT JOIN sequencing_run_silver srs
-  ON ps.patient_id = srs.patient_id
-LEFT JOIN variant_silver vs
-  ON ps.patient_id = vs.patient_id
-LEFT JOIN lab_result_silver lrs
-  ON ps.patient_id = lrs.patient_id
-"""
+    SELECT
+        ss.transaction_id AS transaction_id,
+        ss.store_id AS store_id,
+        ss.product_id AS product_id,
+        CAST(ss.sale_date AS DATE) AS sale_date,
+        CAST(ss.total_revenue AS DOUBLE) AS total_revenue,
+        CAST(ss.quantity_sold AS INT) AS quantity_sold,
+        CAST(COUNT(ss.transaction_id) OVER (PARTITION BY ss.store_id) AS INT) AS transaction_count
+    FROM sales_silver ss
+    """
 )
 
 (
-    gold_patient_risk_score_history_df.coalesce(1)
+    gold_sales_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_patient_risk_score_history.csv")
+    .save(f"{TARGET_PATH}/gold_sales.csv")
 )
 
-gold_patient_risk_score_history_df.createOrReplaceTempView("gold_patient_risk_score_history")
+# ============================================================
+# Target: gold.gold_product_master
+# ============================================================
 
-# -------------------------------------------------------------------
-# TARGET: gold.gold_patient_risk_score_current
-# Mapping: gold.gold_patient_risk_score_history gprsh INNER JOIN silver.patient_silver ps ON gprsh.patient_id = ps.patient_id
-#          LEFT JOIN silver.sequencing_run_silver srs ON ps.patient_id = srs.patient_id
-#          LEFT JOIN silver.variant_silver vs ON ps.patient_id = vs.patient_id
-#          LEFT JOIN silver.lab_result_silver lrs ON ps.patient_id = lrs.patient_id
-# Columns per UDT: patient_id
-# -------------------------------------------------------------------
-gold_patient_risk_score_current_df = spark.sql(
+gold_product_master_df = spark.sql(
     """
-SELECT
-  CAST(ps.patient_id AS STRING) AS patient_id
-FROM gold_patient_risk_score_history gprsh
-INNER JOIN patient_silver ps
-  ON gprsh.patient_id = ps.patient_id
-LEFT JOIN sequencing_run_silver srs
-  ON ps.patient_id = srs.patient_id
-LEFT JOIN variant_silver vs
-  ON ps.patient_id = vs.patient_id
-LEFT JOIN lab_result_silver lrs
-  ON ps.patient_id = lrs.patient_id
-"""
+    SELECT
+        pms.product_id AS product_id,
+        pms.product_name AS product_name,
+        pms.category AS category,
+        CAST(pms.price AS FLOAT) AS price,
+        pms.vendor AS vendor
+    FROM product_master_silver pms
+    """
 )
 
 (
-    gold_patient_risk_score_current_df.coalesce(1)
+    gold_product_master_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_patient_risk_score_current.csv")
+    .save(f"{TARGET_PATH}/gold_product_master.csv")
 )
 
-gold_patient_risk_score_current_df.createOrReplaceTempView("gold_patient_risk_score_current")
+# ============================================================
+# Target: gold.gold_store_master
+# ============================================================
 
-# -------------------------------------------------------------------
-# TARGET: gold.gold_patient_risk_trend_daily
-# Mapping: gold.gold_patient_risk_score_history gprsh INNER JOIN silver.patient_silver ps ON gprsh.patient_id = ps.patient_id
-# Columns per UDT: patient_id
-# -------------------------------------------------------------------
-gold_patient_risk_trend_daily_df = spark.sql(
+gold_store_master_df = spark.sql(
     """
-SELECT
-  CAST(ps.patient_id AS STRING) AS patient_id
-FROM gold_patient_risk_score_history gprsh
-INNER JOIN patient_silver ps
-  ON gprsh.patient_id = ps.patient_id
-"""
+    SELECT
+        sms.store_id AS store_id,
+        sms.store_name AS store_name,
+        sms.location AS location
+    FROM store_master_silver sms
+    """
 )
 
 (
-    gold_patient_risk_trend_daily_df.coalesce(1)
+    gold_store_master_df.coalesce(1)
     .write.mode("overwrite")
     .format("csv")
     .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_patient_risk_trend_daily.csv")
+    .save(f"{TARGET_PATH}/gold_store_master.csv")
 )
 
-# -------------------------------------------------------------------
-# TARGET: gold.gold_risk_alerts
-# Mapping: gold.gold_patient_risk_score_history gprsh INNER JOIN silver.patient_silver ps ON gprsh.patient_id = ps.patient_id
-# Columns per UDT: patient_id
-# -------------------------------------------------------------------
-gold_risk_alerts_df = spark.sql(
-    """
-SELECT
-  CAST(ps.patient_id AS STRING) AS patient_id
-FROM gold_patient_risk_score_history gprsh
-INNER JOIN patient_silver ps
-  ON gprsh.patient_id = ps.patient_id
-"""
-)
-
-(
-    gold_risk_alerts_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_risk_alerts.csv")
-)
-
-# -------------------------------------------------------------------
-# TARGET: gold.gold_patient_prioritization_queue
-# Mapping: gold.gold_patient_risk_score_current gprsc INNER JOIN silver.patient_silver ps ON gprsc.patient_id = ps.patient_id
-# Columns per UDT: patient_id
-# -------------------------------------------------------------------
-gold_patient_prioritization_queue_df = spark.sql(
-    """
-SELECT
-  CAST(ps.patient_id AS STRING) AS patient_id
-FROM gold_patient_risk_score_current gprsc
-INNER JOIN patient_silver ps
-  ON gprsc.patient_id = ps.patient_id
-"""
-)
-
-(
-    gold_patient_prioritization_queue_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_patient_prioritization_queue.csv")
-)
-
-# -------------------------------------------------------------------
-# TARGET: gold.gold_high_risk_population_summary
-# Mapping: gold.gold_patient_risk_score_current gprsc INNER JOIN silver.patient_silver ps ON gprsc.patient_id = ps.patient_id
-# Columns per UDT: patient_id
-# -------------------------------------------------------------------
-gold_high_risk_population_summary_df = spark.sql(
-    """
-SELECT
-  CAST(ps.patient_id AS STRING) AS patient_id
-FROM gold_patient_risk_score_current gprsc
-INNER JOIN patient_silver ps
-  ON gprsc.patient_id = ps.patient_id
-"""
-)
-
-(
-    gold_high_risk_population_summary_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_high_risk_population_summary.csv")
-)
-
-# -------------------------------------------------------------------
-# TARGET: gold.gold_variant_pathogenic_evidence_by_patient
-# Mapping: silver.variant_silver vs INNER JOIN silver.patient_silver ps ON vs.patient_id = ps.patient_id
-#          LEFT JOIN silver.sequencing_run_silver srs ON vs.run_id = srs.run_id
-# Columns per UDT: patient_id, gene_symbol, variant_id, variant_classification, classification_date
-# -------------------------------------------------------------------
-gold_variant_pathogenic_evidence_by_patient_df = spark.sql(
-    """
-SELECT
-  CAST(vs.patient_id AS STRING) AS patient_id,
-  CAST(vs.gene_name AS STRING) AS gene_symbol,
-  CAST(vs.variant_id AS STRING) AS variant_id,
-  CAST(vs.clinical_significance AS STRING) AS variant_classification,
-  CAST(vs.detected_date AS DATE) AS classification_date
-FROM variant_silver vs
-INNER JOIN patient_silver ps
-  ON vs.patient_id = ps.patient_id
-LEFT JOIN sequencing_run_silver srs
-  ON vs.run_id = srs.run_id
-"""
-)
-
-(
-    gold_variant_pathogenic_evidence_by_patient_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_variant_pathogenic_evidence_by_patient.csv")
-)
-
-# -------------------------------------------------------------------
-# TARGET: gold.gold_risk_score_data_quality
-# Mapping: gold.gold_patient_risk_score_history gprsh INNER JOIN silver.patient_silver ps ON gprsh.patient_id = ps.patient_id
-#          LEFT JOIN silver.sequencing_run_silver srs ON ps.patient_id = srs.patient_id
-#          LEFT JOIN silver.variant_silver vs ON ps.patient_id = vs.patient_id
-#          LEFT JOIN silver.lab_result_silver lrs ON ps.patient_id = lrs.patient_id
-# Columns per UDT: (only patient_id provided for this table in UDT)
-# -------------------------------------------------------------------
-gold_risk_score_data_quality_df = spark.sql(
-    """
-SELECT
-  CAST(ps.patient_id AS STRING) AS patient_id
-FROM gold_patient_risk_score_history gprsh
-INNER JOIN patient_silver ps
-  ON gprsh.patient_id = ps.patient_id
-LEFT JOIN sequencing_run_silver srs
-  ON ps.patient_id = srs.patient_id
-LEFT JOIN variant_silver vs
-  ON ps.patient_id = vs.patient_id
-LEFT JOIN lab_result_silver lrs
-  ON ps.patient_id = lrs.patient_id
-"""
-)
-
-(
-    gold_risk_score_data_quality_df.coalesce(1)
-    .write.mode("overwrite")
-    .format("csv")
-    .option("header", "true")
-    .save(f"{TARGET_PATH}/gold_risk_score_data_quality.csv")
-)
+job.commit()
