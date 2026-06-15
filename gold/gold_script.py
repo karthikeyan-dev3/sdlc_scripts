@@ -55,7 +55,7 @@ gold_sales_df = spark.sql(
         CAST(ss.sale_date AS DATE) AS sale_date,
         CAST(ss.total_revenue AS DOUBLE) AS total_revenue,
         CAST(ss.quantity_sold AS INT) AS quantity_sold,
-        CAST(COUNT(ss.transaction_id) OVER (PARTITION BY ss.store_id) AS INT) AS transaction_count
+        COUNT(ss.transaction_id) OVER (PARTITION BY ss.store_id) AS transaction_count
     FROM sales_silver ss
     """
 )
